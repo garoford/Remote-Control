@@ -8,7 +8,7 @@
 #
 # Abre un shell en el navegador vía https://xxxx.trycloudflare.com
 # (Quick Tunnel solo habla HTTP; no se puede exponer SSH crudo sin dominio.)
-# La sesión es tmux `cf-remote` + zsh + Oh My Posh (night-owl) + FiraCode Nerd Font.
+# Cada pestaña del navegador abre un zsh nuevo (Oh My Posh night-owl + FiraCode).
 
 set -euo pipefail
 
@@ -43,11 +43,6 @@ if [[ "$REAL_USER" == "root" ]]; then
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TMUX_CONF="$SCRIPT_DIR/tmux.night-owl.conf"
-TMUX_SESSION="cf-remote"
-TMUX_SOCKET="cf-remote"
-
 RUN_DIR="$REAL_HOME/.cache/cf-quick-tunnel"
 FONT_DIR="$RUN_DIR/fonts"
 LOG_FILE="$RUN_DIR/cloudflared.log"
@@ -79,8 +74,8 @@ cleanup_old() {
   pkill -f "ttyd .*localhost:${PORT}" 2>/dev/null || true
   pkill -f "ttyd --interface 127.0.0.1 --port ${PORT}" 2>/dev/null || true
   pkill -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" 2>/dev/null || true
-  # Socket propio: el tmux default hereda POSH_*/CURSOR_* de Cursor y OMP no inicia.
-  tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
+  # Por si quedó el tmux compartido de corridas anteriores.
+  tmux -L cf-remote kill-server 2>/dev/null || true
   rm -f "$TTYD_PID_FILE" "$CF_PID_FILE" "$LOG_FILE" "$URL_FILE"
 }
 
@@ -129,15 +124,6 @@ install_ttyd() {
   sudo install -m 755 "$TMP_BIN" /usr/local/bin/ttyd
   rm -f "$TMP_BIN"
   ok "ttyd instalado en /usr/local/bin/ttyd"
-}
-
-install_tmux_conf() {
-  if [[ ! -f "$TMUX_CONF" ]]; then
-    err "Falta $TMUX_CONF"
-    exit 1
-  fi
-  # Solo `tmux -f` este archivo. No pisar ~/.tmux.conf del usuario.
-  ok "tmux del túnel: $TMUX_CONF"
 }
 
 wait_for_url() {
@@ -254,7 +240,7 @@ printf '%s\n' "${BOLD}Cloudflare Quick Tunnel + terminal remota (sin dominio)${N
 echo
 info "Usuario shell : $REAL_USER"
 info "Puerto local  : $PORT (solo localhost)"
-info "Sesión tmux   : $TMUX_SESSION (socket $TMUX_SOCKET, zsh + Oh My Posh night-owl)"
+info "Shell         : zsh + Oh My Posh night-owl (una sesión por pestaña)"
 warn "Quick Tunnel = HTTP. Control remoto por navegador (ttyd), no SSH crudo."
 echo
 read -r -p "¿Continuar? [Y/n] " CONFIRM
@@ -267,10 +253,9 @@ fi
 cleanup_old
 install_cloudflared
 install_ttyd
-install_tmux_conf
 prepare_ttyd_index
 
-info "Arrancando ttyd en 127.0.0.1:${PORT} (tmux $TMUX_SESSION)..."
+info "Arrancando ttyd en 127.0.0.1:${PORT} (zsh por pestaña)..."
 # env -i: si se lanza desde Cursor/un zsh con Oh My Posh, POSH_* / CURSOR_*
 # se heredan y `oh-my-posh init` no imprime nada → prompt Fedora [%n@%m].
 CLEAN_PATH="$REAL_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -294,7 +279,7 @@ if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
   TTYD_ENV+=("SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
 fi
 
-# -W writable; xterm.js: FiraCode + Night Owl; tmux -u UTF-8
+# -W writable; xterm.js: FiraCode + Night Owl. Un zsh por pestaña (sin tmux -A).
 TTYD_CMD=(
   "${TTYD_ENV[@]}"
   ttyd
@@ -314,10 +299,6 @@ if [[ -s "$TTYD_INDEX" ]]; then
   TTYD_CMD+=(--index "$TTYD_INDEX")
 fi
 TTYD_CMD+=(
-  tmux -L "$TMUX_SOCKET" -u -f "$TMUX_CONF"
-  new-session -A -s "$TMUX_SESSION"
-  -c "$REAL_HOME"
-  --
   /usr/bin/zsh -il
 )
 
@@ -370,14 +351,14 @@ ${BOLD}También guardada en:${NC}
   ${URL_FILE}
 
 ${BOLD}En el browser:${NC}
-  tmux ${TMUX_SESSION} + zsh + Oh My Posh night-owl
+  zsh + Oh My Posh night-owl (cada pestaña = sesión nueva)
   fuente FiraCode Nerd Font Mono
 
 ${BOLD}PIDs:${NC}
   ttyd        : $(cat "$TTYD_PID_FILE")
   cloudflared : $(cat "$CF_PID_FILE")
 
-${BOLD}Parar el túnel (la sesión tmux se queda):${NC}
+${BOLD}Parar el túnel:${NC}
   kill \$(cat $TTYD_PID_FILE) \$(cat $CF_PID_FILE)
 
 ${YELLOW}Nota:${NC} la URL de Quick Tunnel cambia cada vez que reinicias.
