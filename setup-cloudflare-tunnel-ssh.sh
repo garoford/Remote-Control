@@ -8,7 +8,7 @@
 #
 # Abre un shell en el navegador vía https://xxxx.trycloudflare.com
 # (Quick Tunnel solo habla HTTP; no se puede exponer SSH crudo sin dominio.)
-# Cada pestaña del navegador abre un zsh nuevo (Oh My Posh night-owl + FiraCode).
+# Cada pestaña usa el login shell del usuario (zsh + Oh My Posh si los tiene).
 
 set -euo pipefail
 
@@ -42,6 +42,68 @@ if [[ "$REAL_USER" == "root" ]]; then
   err "Ejecuta como usuario normal (el script usa sudo solo cuando hace falta)."
   exit 1
 fi
+
+# Login shell del usuario. No exige zsh ni Oh My Posh: si no están, usa lo que haya.
+resolve_user_shell() {
+  local candidate resolved
+  local -a candidates=()
+
+  candidates+=("$(getent passwd "$REAL_USER" | cut -d: -f7)")
+  if [[ -n "${SHELL:-}" ]]; then
+    candidates+=("$SHELL")
+  fi
+  candidates+=(
+    /usr/bin/zsh /bin/zsh
+    /usr/bin/bash /bin/bash
+    /usr/bin/fish /bin/fish
+    /bin/sh
+  )
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    case "$(basename "$candidate")" in
+      nologin|false|sync|halt|shutdown) continue ;;
+    esac
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    resolved="$(command -v "$candidate" 2>/dev/null || true)"
+    if [[ -n "$resolved" && -x "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+
+shell_login_args() {
+  case "$(basename "$1")" in
+    sh|dash|ash) printf '%s\n' -i ;;
+    *)           printf '%s\n' -il ;;
+  esac
+}
+
+describe_shell() {
+  local name extra=""
+  name="$(basename "$1")"
+  if command -v oh-my-posh >/dev/null 2>&1 || [[ -x "$REAL_HOME/.local/bin/oh-my-posh" ]]; then
+    extra=" + Oh My Posh"
+  fi
+  printf '%s%s' "$name" "$extra"
+}
+
+PASSWD_SHELL="$(getent passwd "$REAL_USER" | cut -d: -f7)"
+USER_SHELL="$(resolve_user_shell || true)"
+if [[ -z "$USER_SHELL" ]]; then
+  err "No encontré un shell ejecutable (ni el login de $REAL_USER, ni bash/sh)."
+  exit 1
+fi
+if [[ -n "$PASSWD_SHELL" && "$USER_SHELL" != "$PASSWD_SHELL" && ! -x "$PASSWD_SHELL" ]]; then
+  warn "Login shell $PASSWD_SHELL no existe; usando $USER_SHELL"
+fi
+mapfile -t SHELL_ARGS < <(shell_login_args "$USER_SHELL")
+SHELL_LABEL="$(describe_shell "$USER_SHELL")"
 
 RUN_DIR="$REAL_HOME/.cache/cf-quick-tunnel"
 FONT_DIR="$RUN_DIR/fonts"
@@ -240,7 +302,7 @@ printf '%s\n' "${BOLD}Cloudflare Quick Tunnel + terminal remota (sin dominio)${N
 echo
 info "Usuario shell : $REAL_USER"
 info "Puerto local  : $PORT (solo localhost)"
-info "Shell         : zsh + Oh My Posh night-owl (una sesión por pestaña)"
+info "Shell         : $SHELL_LABEL ($USER_SHELL, una sesión por pestaña)"
 warn "Quick Tunnel = HTTP. Control remoto por navegador (ttyd), no SSH crudo."
 echo
 read -r -p "¿Continuar? [Y/n] " CONFIRM
@@ -255,7 +317,7 @@ install_cloudflared
 install_ttyd
 prepare_ttyd_index
 
-info "Arrancando ttyd en 127.0.0.1:${PORT} (zsh por pestaña)..."
+info "Arrancando ttyd en 127.0.0.1:${PORT} (${SHELL_LABEL} por pestaña)..."
 # env -i: si se lanza desde Cursor/un zsh con Oh My Posh, POSH_* / CURSOR_*
 # se heredan y `oh-my-posh init` no imprime nada → prompt Fedora [%n@%m].
 CLEAN_PATH="$REAL_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -265,7 +327,7 @@ TTYD_ENV=(
   "HOME=$REAL_HOME"
   "USER=$REAL_USER"
   "LOGNAME=$REAL_USER"
-  "SHELL=/usr/bin/zsh"
+  "SHELL=$USER_SHELL"
   "TERM=xterm-256color"
   "COLORTERM=truecolor"
   "LANG=$CLEAN_LANG"
@@ -279,7 +341,7 @@ if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
   TTYD_ENV+=("SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
 fi
 
-# -W writable; xterm.js: FiraCode + Night Owl. Un zsh por pestaña (sin tmux -A).
+# -W writable; xterm.js: FiraCode + Night Owl. Un login shell por pestaña (sin tmux -A).
 TTYD_CMD=(
   "${TTYD_ENV[@]}"
   ttyd
@@ -299,7 +361,7 @@ if [[ -s "$TTYD_INDEX" ]]; then
   TTYD_CMD+=(--index "$TTYD_INDEX")
 fi
 TTYD_CMD+=(
-  /usr/bin/zsh -il
+  "$USER_SHELL" "${SHELL_ARGS[@]}"
 )
 
 nohup "${TTYD_CMD[@]}" >"$RUN_DIR/ttyd.log" 2>&1 &
@@ -351,7 +413,7 @@ ${BOLD}También guardada en:${NC}
   ${URL_FILE}
 
 ${BOLD}En el browser:${NC}
-  zsh + Oh My Posh night-owl (cada pestaña = sesión nueva)
+  ${SHELL_LABEL} (cada pestaña = sesión nueva)
   fuente FiraCode Nerd Font Mono
 
 ${BOLD}PIDs:${NC}
