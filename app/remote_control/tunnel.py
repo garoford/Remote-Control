@@ -174,6 +174,8 @@ class TunnelService:
             "-t",
             "cursorBlink=true",
             "-t",
+            "scrollback=20000",
+            "-t",
             f"theme={NIGHT_OWL_THEME}",
         ]
         if self.ttyd_index.is_file() and self.ttyd_index.stat().st_size > 0:

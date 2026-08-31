@@ -8,6 +8,18 @@ html.rc-touch #terminal-container {
   margin: 0 !important;
   padding: 0 !important;
   box-sizing: border-box;
+  touch-action: none;
+}
+
+html.rc-touch .xterm,
+html.rc-touch .xterm-screen,
+html.rc-touch .xterm-screen canvas {
+  touch-action: none;
+}
+
+html.rc-touch .xterm-viewport {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 #rc-extra-keys {

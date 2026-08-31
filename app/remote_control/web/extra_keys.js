@@ -404,6 +404,97 @@
     );
   }
 
+  function scrollLocal(lines) {
+    var vp = document.querySelector(".xterm-viewport");
+    if (!vp) return false;
+    var max = vp.scrollHeight - vp.clientHeight;
+    if (max <= 2) return false;
+    var next = Math.max(0, Math.min(max, vp.scrollTop + lines * 20));
+    if (next === vp.scrollTop) return false;
+    vp.scrollTop = next;
+    return true;
+  }
+
+  function scrollTmux(lines) {
+    if (!lines) return;
+    var btn = lines < 0 ? 64 : 65;
+    var count = Math.min(12, Math.abs(lines));
+    var seq = "";
+    for (var i = 0; i < count; i++) seq += "\u001b[<" + btn + ";10;10M";
+    sendInput(seq);
+  }
+
+  function scrollByLines(lines) {
+    if (!lines) return;
+    if (!scrollLocal(lines)) scrollTmux(lines);
+  }
+
+  function bootTouchScroll() {
+    var startY = 0;
+    var lastY = 0;
+    var acc = 0;
+    var scrolling = false;
+    var active = false;
+    var PX = 16;
+
+    function fromKeys(ev) {
+      var t = ev.target;
+      return !!(t && t.closest && t.closest("#rc-extra-keys"));
+    }
+
+    function onStart(ev) {
+      if (!ev.touches || ev.touches.length !== 1 || fromKeys(ev)) {
+        active = false;
+        return;
+      }
+      startY = lastY = ev.touches[0].clientY;
+      acc = 0;
+      scrolling = false;
+      active = true;
+    }
+
+    function onMove(ev) {
+      if (!active || !ev.touches || ev.touches.length !== 1) return;
+      var y = ev.touches[0].clientY;
+      if (!scrolling && Math.abs(y - startY) < 8) return;
+      scrolling = true;
+      ev.preventDefault();
+      acc += lastY - y;
+      lastY = y;
+      var lines = acc / PX;
+      var step = lines < 0 ? Math.ceil(lines) : Math.floor(lines);
+      if (!step) return;
+      acc -= step * PX;
+      scrollByLines(step);
+    }
+
+    function onEnd() {
+      active = false;
+      scrolling = false;
+      acc = 0;
+    }
+
+    function bind(el) {
+      if (!el || el.dataset.rcTouchScroll === "1") return;
+      el.dataset.rcTouchScroll = "1";
+      el.addEventListener("touchstart", onStart, { passive: true });
+      el.addEventListener("touchmove", onMove, { passive: false });
+      el.addEventListener("touchend", onEnd, { passive: true });
+      el.addEventListener("touchcancel", onEnd, { passive: true });
+    }
+
+    bind(document.body);
+    var mo = new MutationObserver(function () {
+      bind(document.getElementById("terminal-container"));
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    bind(document.getElementById("terminal-container"));
+    setTimeout(function () {
+      mo.disconnect();
+      bind(document.getElementById("terminal-container"));
+    }, 4000);
+  }
+
   function boot() {
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
@@ -412,6 +503,7 @@
     document.documentElement.classList.add("rc-touch");
     mountBar();
     bootInterceptors();
+    bootTouchScroll();
   }
 
   if (window.__rcRedirecting) return;
