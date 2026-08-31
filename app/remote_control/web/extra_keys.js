@@ -227,7 +227,7 @@
   }
 
   function layout() {
-    if (!bar || !document.documentElement.classList.contains("rc-tablet")) return;
+    if (!bar || !document.documentElement.classList.contains("rc-touch")) return;
     var vv = window.visualViewport;
     var barH = bar.offsetHeight || 96;
     var viewH = vv ? vv.height : window.innerHeight;
@@ -408,7 +408,8 @@
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
-    if (device !== "tablet") return;
+    if (device === "pc") return;
+    document.documentElement.classList.add("rc-touch");
     mountBar();
     bootInterceptors();
   }

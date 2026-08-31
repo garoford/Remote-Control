@@ -1,9 +1,9 @@
-html.rc-tablet,
-html.rc-tablet body {
+html.rc-touch,
+html.rc-touch body {
   overflow: hidden;
 }
 
-html.rc-tablet #terminal-container {
+html.rc-touch #terminal-container {
   position: fixed !important;
   margin: 0 !important;
   padding: 0 !important;
@@ -25,7 +25,7 @@ html.rc-tablet #terminal-container {
   touch-action: manipulation;
 }
 
-html.rc-tablet #rc-extra-keys {
+html.rc-touch #rc-extra-keys {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -52,6 +52,14 @@ html.rc-tablet #rc-extra-keys {
   -webkit-tap-highlight-color: transparent;
   -webkit-user-select: none;
   user-select: none;
+}
+
+@media (max-width: 600px) {
+  #rc-extra-keys .rc-ek-key {
+    min-height: 38px;
+    font-size: 11px;
+    border-radius: 6px;
+  }
 }
 
 #rc-extra-keys .rc-ek-key:active,
