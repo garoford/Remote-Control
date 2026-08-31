@@ -1,0 +1,465 @@
+"""Start and stop the Cloudflare Quick Tunnel + ttyd session."""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+DEFAULT_PORT = 7681
+NIGHT_OWL_THEME = (
+    '{"background":"#011627","foreground":"#d6deeb","cursor":"#80A4C2",'
+    '"cursorAccent":"#011627","selectionBackground":"#1d3b53",'
+    '"selectionInactiveBackground":"#0b2942","black":"#011627",'
+    '"red":"#EF5350","green":"#22DA6E","yellow":"#ADDB67","blue":"#82AAFF",'
+    '"magenta":"#C792EA","cyan":"#21C7A8","white":"#FFFFFF",'
+    '"brightBlack":"#575656","brightRed":"#EF5350","brightGreen":"#22DA6E",'
+    '"brightYellow":"#FFEB95","brightBlue":"#82AAFF",'
+    '"brightMagenta":"#C792EA","brightCyan":"#7FDBCA","brightWhite":"#FFFFFF"}'
+)
+
+
+class TunnelError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class TunnelStatus:
+    running: bool
+    url: str | None
+    port: int
+    ttyd_pid: int | None
+    cloudflared_pid: int | None
+
+
+class TunnelService:
+    def __init__(self, port: int = DEFAULT_PORT) -> None:
+        self.port = port
+        self.home = Path.home()
+        self.user = os.environ.get("USER") or os.getlogin()
+        self.run_dir = self.home / ".cache" / "cf-quick-tunnel"
+        self.font_dir = self.run_dir / "fonts"
+        self.log_file = self.run_dir / "cloudflared.log"
+        self.ttyd_log = self.run_dir / "ttyd.log"
+        self.url_file = self.run_dir / "PUBLIC-URL.txt"
+        self.pid_dir = self.run_dir / "pids"
+        self.ttyd_pid_file = self.pid_dir / "ttyd.pid"
+        self.cf_pid_file = self.pid_dir / "cloudflared.pid"
+        self.ttyd_index = self.run_dir / "ttyd-index.html"
+        fonts = self.home / ".local" / "share" / "fonts" / "FiraCode"
+        self.font_reg_ttf = fonts / "FiraCodeNerdFontMono-Regular.ttf"
+        self.font_bold_ttf = fonts / "FiraCodeNerdFontMono-Bold.ttf"
+        self.font_reg_woff = self.font_dir / "FiraCodeNerdFontMono-Regular.woff2"
+        self.font_bold_woff = self.font_dir / "FiraCodeNerdFontMono-Bold.woff2"
+
+    def ensure_dirs(self) -> None:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.pid_dir.mkdir(parents=True, exist_ok=True)
+        self.font_dir.mkdir(parents=True, exist_ok=True)
+
+    def which(self, name: str) -> str | None:
+        return shutil.which(name)
+
+    def missing_binaries(self) -> list[str]:
+        missing: list[str] = []
+        if not self.which("ttyd"):
+            missing.append("ttyd")
+        if not self.which("cloudflared"):
+            missing.append("cloudflared")
+        return missing
+
+    def status(self) -> TunnelStatus:
+        ttyd_pid = self._alive_pid(self.ttyd_pid_file)
+        cf_pid = self._alive_pid(self.cf_pid_file)
+        running = bool(ttyd_pid and cf_pid)
+        url = None
+        if self.url_file.is_file():
+            text = self.url_file.read_text(encoding="utf-8").strip()
+            if text:
+                url = text
+        if running and not url:
+            url = self._url_from_log()
+        return TunnelStatus(
+            running=running,
+            url=url if running else None,
+            port=self.port,
+            ttyd_pid=ttyd_pid,
+            cloudflared_pid=cf_pid,
+        )
+
+    def start(self) -> str:
+        missing = self.missing_binaries()
+        if missing:
+            raise TunnelError(
+                "Falta instalar: " + ", ".join(missing) + "."
+            )
+        self.ensure_dirs()
+        self.stop(silent=True)
+        self._prepare_ttyd_index()
+        self._start_ttyd()
+        self._start_cloudflared()
+        url = self._wait_for_url(timeout=60)
+        self.url_file.write_text(url + "\n", encoding="utf-8")
+        self.url_file.chmod(0o600)
+        return url
+
+    def stop(self, silent: bool = False) -> None:
+        self._kill_pidfile(self.ttyd_pid_file)
+        self._kill_pidfile(self.cf_pid_file)
+        self._pkill(f"ttyd --interface 127.0.0.1 --port {self.port}")
+        self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
+        subprocess.run(
+            ["tmux", "-L", "cf-remote", "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        for path in (self.ttyd_pid_file, self.cf_pid_file, self.url_file):
+            path.unlink(missing_ok=True)
+        if not silent:
+            self.log_file.unlink(missing_ok=True)
+
+    def _start_ttyd(self) -> None:
+        user_shell = self._resolve_user_shell()
+        shell_args = self._shell_login_args(user_shell)
+        lang = os.environ.get("LANG", "en_US.UTF-8")
+        env = {
+            "HOME": str(self.home),
+            "USER": self.user,
+            "LOGNAME": self.user,
+            "SHELL": user_shell,
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "LANG": lang,
+            "LC_ALL": lang,
+            "PATH": f"{self.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        }
+        runtime = Path(f"/run/user/{os.getuid()}")
+        if runtime.is_dir():
+            env["XDG_RUNTIME_DIR"] = str(runtime)
+        ssh_sock = os.environ.get("SSH_AUTH_SOCK")
+        if ssh_sock and Path(ssh_sock).is_socket():
+            env["SSH_AUTH_SOCK"] = ssh_sock
+
+        cmd = [
+            "ttyd",
+            "--interface",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--writable",
+            "--cwd",
+            str(self.home),
+            "--terminal-type",
+            "xterm-256color",
+            "-t",
+            "fontSize=15",
+            "-t",
+            "fontFamily=FiraCode Nerd Font Mono",
+            "-t",
+            "fontWeight=400",
+            "-t",
+            "fontWeightBold=700",
+            "-t",
+            "cursorBlink=true",
+            "-t",
+            f"theme={NIGHT_OWL_THEME}",
+        ]
+        if self.ttyd_index.is_file() and self.ttyd_index.stat().st_size > 0:
+            cmd.extend(["--index", str(self.ttyd_index)])
+        cmd.extend([user_shell, *shell_args])
+
+        with self.ttyd_log.open("w", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        self.ttyd_pid_file.write_text(str(proc.pid), encoding="utf-8")
+        time.sleep(0.8)
+        if proc.poll() is not None:
+            tail = self.ttyd_log.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise TunnelError("ttyd no arrancó.\n" + tail)
+
+    def _start_cloudflared(self) -> None:
+        self.log_file.write_text("", encoding="utf-8")
+        with self.log_file.open("a", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                [
+                    "cloudflared",
+                    "tunnel",
+                    "--url",
+                    f"http://127.0.0.1:{self.port}",
+                ],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self.cf_pid_file.write_text(str(proc.pid), encoding="utf-8")
+        time.sleep(0.8)
+        if proc.poll() is not None:
+            tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise TunnelError("cloudflared no arrancó.\n" + tail)
+
+    def _wait_for_url(self, timeout: int = 60) -> str:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            url = self._url_from_log()
+            if url:
+                return url
+            if not self._alive_pid(self.cf_pid_file):
+                tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise TunnelError("cloudflared se detuvo.\n" + tail)
+            time.sleep(0.4)
+        tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
+        raise TunnelError("No salió la URL a tiempo.\n" + tail)
+
+    def _url_from_log(self) -> str | None:
+        if not self.log_file.is_file():
+            return None
+        text = self.log_file.read_text(encoding="utf-8", errors="replace")
+        matches = URL_RE.findall(text)
+        return matches[-1] if matches else None
+
+    def _prepare_ttyd_index(self) -> None:
+        html = ""
+        if self.ttyd_index.is_file() and self.ttyd_index.stat().st_size > 0:
+            html = self.ttyd_index.read_text(encoding="utf-8", errors="replace")
+        if not html:
+            html = self._fetch_ttyd_html()
+        if not html:
+            return
+        html = self._strip_injects(html)
+        self._ensure_woff2_fonts()
+        inject = self._font_css() + self._extra_keys_inject()
+        if "<head>" in html:
+            html = html.replace("<head>", "<head>" + inject, 1)
+        else:
+            html = inject + html
+        self.ttyd_index.write_text(html, encoding="utf-8")
+
+    def _fetch_ttyd_html(self) -> str:
+        ttyd = self.which("ttyd")
+        if not ttyd:
+            return ""
+        probe = self._free_port()
+        proc = subprocess.Popen(
+            [ttyd, "--interface", "127.0.0.1", "--port", str(probe), "/bin/true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        html = ""
+        try:
+            for _ in range(30):
+                try:
+                    with socket.create_connection(("127.0.0.1", probe), timeout=0.2):
+                        pass
+                    result = subprocess.run(
+                        ["curl", "-fsS", f"http://127.0.0.1:{probe}/"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        html = result.stdout
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.1)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        return html
+
+    def _strip_tagged(self, html: str, tag: str, ident: str) -> str:
+        open_tag = f'<{tag} id="{ident}"'
+        start = html.find(open_tag)
+        if start < 0:
+            return html
+        close = f"</{tag}>"
+        end = html.find(close, start)
+        if end < 0:
+            return html
+        return html[:start] + html[end + len(close) :]
+
+    def _strip_injects(self, html: str) -> str:
+        html = self._strip_tagged(html, "style", "cf-remote-theme")
+        html = self._strip_tagged(html, "style", "rc-extra-keys-css")
+        html = self._strip_tagged(html, "script", "rc-extra-keys-js")
+        token = '<meta id="rc-viewport"'
+        start = html.find(token)
+        if start >= 0:
+            end = html.find(">", start)
+            if end >= 0:
+                html = html[:start] + html[end + 1 :]
+        return html
+
+    def _extra_keys_inject(self) -> str:
+        root = Path(__file__).with_name("web")
+        css_path = root / "extra_keys.css"
+        js_path = root / "extra_keys.js"
+        if not (css_path.is_file() and js_path.is_file()):
+            return ""
+        css = css_path.read_text(encoding="utf-8")
+        js = js_path.read_text(encoding="utf-8")
+        viewport = (
+            '<meta id="rc-viewport" name="viewport" content="width=device-width,'
+            "initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,"
+            'interactive-widget=resizes-content">'
+        )
+        return (
+            viewport
+            + f'<style id="rc-extra-keys-css">{css}</style>'
+            + f'<script id="rc-extra-keys-js">{js}</script>'
+        )
+
+    def _ensure_woff2_fonts(self) -> None:
+        if self.font_reg_woff.is_file() and self.font_bold_woff.is_file():
+            return
+        if not (self.font_reg_ttf.is_file() and self.font_bold_ttf.is_file()):
+            return
+        try:
+            from fontTools.ttLib import TTFont
+        except ImportError:
+            return
+        for src, dst in (
+            (self.font_reg_ttf, self.font_reg_woff),
+            (self.font_bold_ttf, self.font_bold_woff),
+        ):
+            font = TTFont(str(src))
+            font.flavor = "woff2"
+            font.save(str(dst))
+
+    def _font_css(self) -> str:
+        if self.font_reg_woff.is_file() and self.font_bold_woff.is_file():
+            import base64
+
+            src_reg = (
+                "url(data:font/woff2;base64,"
+                + base64.b64encode(self.font_reg_woff.read_bytes()).decode("ascii")
+                + ") format('woff2')"
+            )
+            src_bold = (
+                "url(data:font/woff2;base64,"
+                + base64.b64encode(self.font_bold_woff.read_bytes()).decode("ascii")
+                + ") format('woff2')"
+            )
+        else:
+            cdn = "https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts"
+            src_reg = f"url('{cdn}/FiraCodeNerdFontMono-Regular.woff2') format('woff2')"
+            src_bold = f"url('{cdn}/FiraCodeNerdFontMono-Bold.woff2') format('woff2')"
+        return (
+            '<style id="cf-remote-theme">'
+            "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
+            f"font-weight:400;font-display:block;src:{src_reg};}}"
+            "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
+            f"font-weight:700;font-display:block;src:{src_bold};}}"
+            "html,body{{background:#011627;margin:0;height:100%;}}"
+            "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
+            ".xterm-helper-textarea{{font-family:'FiraCode Nerd Font Mono',"
+            "ui-monospace,monospace!important;font-feature-settings:'liga' 1,'calt' 1;}}"
+            "</style>"
+        )
+
+    def _resolve_user_shell(self) -> str:
+        candidates: list[str] = []
+        try:
+            import pwd
+
+            login = pwd.getpwuid(os.getuid()).pw_shell
+            if login:
+                candidates.append(login)
+        except Exception:
+            pass
+        if os.environ.get("SHELL"):
+            candidates.append(os.environ["SHELL"])
+        candidates.extend(
+            [
+                "/usr/bin/zsh",
+                "/bin/zsh",
+                "/usr/bin/bash",
+                "/bin/bash",
+                "/usr/bin/fish",
+                "/bin/fish",
+                "/bin/sh",
+            ]
+        )
+        skip = {"nologin", "false", "sync", "halt", "shutdown"}
+        for candidate in candidates:
+            name = Path(candidate).name
+            if name in skip:
+                continue
+            if os.access(candidate, os.X_OK):
+                return candidate
+            resolved = shutil.which(candidate)
+            if resolved and os.access(resolved, os.X_OK):
+                return resolved
+        raise TunnelError("No encontré un shell ejecutable.")
+
+    def _shell_login_args(self, shell: str) -> list[str]:
+        name = Path(shell).name
+        if name in {"sh", "dash", "ash"}:
+            return ["-i"]
+        return ["-il"]
+
+    def _free_port(self) -> int:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def _alive_pid(self, path: Path) -> int | None:
+        if not path.is_file():
+            return None
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            return None
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return None
+        return pid
+
+    def _kill_pidfile(self, path: Path) -> None:
+        pid = self._alive_pid(path)
+        if not pid:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            path.unlink(missing_ok=True)
+            return
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        path.unlink(missing_ok=True)
+
+    def _pkill(self, pattern: str) -> None:
+        subprocess.run(
+            ["pkill", "-f", pattern],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )

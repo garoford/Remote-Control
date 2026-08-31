@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Remote Control
+Name[es]=Remote Control
+GenericName=Remote terminal tunnel
+GenericName[es]=Túnel de terminal remota
+Comment=Enciende o apaga un túnel web para tu terminal
+Comment[es]=Enciende o apaga un túnel web para tu terminal
+Exec=remote-control
+TryExec=remote-control
+Icon=dev.garoford.RemoteControl
+Terminal=false
+Categories=Network;Utility;
+Keywords=tunnel;ssh;ttyd;cloudflare;remote;terminal;
+StartupNotify=true
+StartupWMClass=dev.garoford.RemoteControl
+DBusActivatable=false

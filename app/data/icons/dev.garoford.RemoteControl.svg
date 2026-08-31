@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="12" x2="220" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b2942"/>
+      <stop offset="1" stop-color="#011627"/>
+    </linearGradient>
+    <linearGradient id="track" x1="70" y1="128" x2="186" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#21C7A8"/>
+      <stop offset="1" stop-color="#82AAFF"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="url(#bg)"/>
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="none" stroke="#1d3b53" stroke-width="3"/>
+  <path d="M128 54c-18 14-30 34-30 56" fill="none" stroke="#82AAFF" stroke-width="6" stroke-linecap="round" opacity=".55"/>
+  <path d="M128 54c18 14 30 34 30 56" fill="none" stroke="#21C7A8" stroke-width="6" stroke-linecap="round" opacity=".7"/>
+  <rect x="64" y="108" width="128" height="52" rx="26" fill="url(#track)" filter="url(#glow)"/>
+  <circle cx="166" cy="134" r="18" fill="#011627"/>
+  <circle cx="166" cy="134" r="7" fill="#22DA6E"/>
+  <text x="128" y="198" text-anchor="middle" font-family="Fira Code, ui-monospace, monospace" font-size="22" font-weight="700" fill="#d6deeb">&gt;_</text>
+</svg>
