@@ -414,6 +414,7 @@
     bootInterceptors();
   }
 
+  if (window.__rcRedirecting) return;
   wrapWebSocket();
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);

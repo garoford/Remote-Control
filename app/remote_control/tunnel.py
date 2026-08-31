@@ -73,6 +73,8 @@ class TunnelService:
             missing.append("ttyd")
         if not self.which("cloudflared"):
             missing.append("cloudflared")
+        if not self.which("tmux"):
+            missing.append("tmux")
         return missing
 
     def status(self) -> TunnelStatus:
@@ -102,6 +104,7 @@ class TunnelService:
             )
         self.ensure_dirs()
         self.stop(silent=True)
+        self._prepare_tab_session()
         self._prepare_ttyd_index()
         self._start_ttyd()
         self._start_cloudflared()
@@ -128,13 +131,13 @@ class TunnelService:
 
     def _start_ttyd(self) -> None:
         user_shell = self._resolve_user_shell()
-        shell_args = self._shell_login_args(user_shell)
         lang = os.environ.get("LANG", "en_US.UTF-8")
         env = {
             "HOME": str(self.home),
             "USER": self.user,
             "LOGNAME": self.user,
             "SHELL": user_shell,
+            "RC_SHELL": user_shell,
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "LANG": lang,
@@ -155,6 +158,7 @@ class TunnelService:
             "--port",
             str(self.port),
             "--writable",
+            "--url-arg",
             "--cwd",
             str(self.home),
             "--terminal-type",
@@ -174,7 +178,7 @@ class TunnelService:
         ]
         if self.ttyd_index.is_file() and self.ttyd_index.stat().st_size > 0:
             cmd.extend(["--index", str(self.ttyd_index)])
-        cmd.extend([user_shell, *shell_args])
+        cmd.append(str(self.run_dir / "tab_session.sh"))
 
         with self.ttyd_log.open("w", encoding="utf-8") as log:
             proc = subprocess.Popen(
@@ -240,7 +244,7 @@ class TunnelService:
             return
         html = self._strip_injects(html)
         self._ensure_woff2_fonts()
-        inject = self._font_css() + self._extra_keys_inject()
+        inject = self._font_css() + self._web_inject()
         if "<head>" in html:
             html = html.replace("<head>", "<head>" + inject, 1)
         else:
@@ -298,6 +302,7 @@ class TunnelService:
     def _strip_injects(self, html: str) -> str:
         html = self._strip_tagged(html, "style", "cf-remote-theme")
         html = self._strip_tagged(html, "style", "rc-extra-keys-css")
+        html = self._strip_tagged(html, "script", "rc-tab-session-js")
         html = self._strip_tagged(html, "script", "rc-extra-keys-js")
         token = '<meta id="rc-viewport"'
         start = html.find(token)
@@ -307,24 +312,41 @@ class TunnelService:
                 html = html[:start] + html[end + 1 :]
         return html
 
-    def _extra_keys_inject(self) -> str:
+    def _web_inject(self) -> str:
         root = Path(__file__).with_name("web")
         css_path = root / "extra_keys.css"
-        js_path = root / "extra_keys.js"
-        if not (css_path.is_file() and js_path.is_file()):
-            return ""
-        css = css_path.read_text(encoding="utf-8")
-        js = js_path.read_text(encoding="utf-8")
-        viewport = (
+        keys_js = root / "extra_keys.js"
+        tab_js = root / "tab_session.js"
+        parts: list[str] = [
             '<meta id="rc-viewport" name="viewport" content="width=device-width,'
             "initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,"
             'interactive-widget=resizes-content">'
-        )
-        return (
-            viewport
-            + f'<style id="rc-extra-keys-css">{css}</style>'
-            + f'<script id="rc-extra-keys-js">{js}</script>'
-        )
+        ]
+        if css_path.is_file():
+            parts.append(
+                f'<style id="rc-extra-keys-css">{css_path.read_text(encoding="utf-8")}</style>'
+            )
+        if tab_js.is_file():
+            parts.append(
+                f'<script id="rc-tab-session-js">{tab_js.read_text(encoding="utf-8")}</script>'
+            )
+        if keys_js.is_file():
+            parts.append(
+                f'<script id="rc-extra-keys-js">{keys_js.read_text(encoding="utf-8")}</script>'
+            )
+        return "".join(parts)
+
+    def _prepare_tab_session(self) -> None:
+        root = Path(__file__).with_name("web")
+        wrapper_src = root / "tab_session.sh"
+        conf_src = root / "tmux.tab.conf"
+        wrapper = self.run_dir / "tab_session.sh"
+        conf = self.run_dir / "tmux.tab.conf"
+        if wrapper_src.is_file():
+            wrapper.write_text(wrapper_src.read_text(encoding="utf-8"), encoding="utf-8")
+            wrapper.chmod(0o755)
+        if conf_src.is_file():
+            conf.write_text(conf_src.read_text(encoding="utf-8"), encoding="utf-8")
 
     def _ensure_woff2_fonts(self) -> None:
         if self.font_reg_woff.is_file() and self.font_bold_woff.is_file():
