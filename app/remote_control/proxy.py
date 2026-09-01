@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import history_payload
+from remote_control.mobile import manifest_for_client, request_is_mobile, rewrite_index_for_mobile
 
 ASSET_CACHE = "public, max-age=31536000, immutable"
 SCRIPT_CACHE = "public, max-age=300"
@@ -66,6 +67,76 @@ def _read_request(sock: socket.socket) -> tuple[bytes, bytes] | None:
             break
         body += chunk
     return header, body[:need] if need else body
+
+
+def _read_chunked(sock: socket.socket, initial: bytes) -> bytes | None:
+    buf = initial
+    out = b""
+    while True:
+        while b"\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return out or None
+            buf += chunk
+        line, _, buf = buf.partition(b"\r\n")
+        try:
+            size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+        except ValueError:
+            return None
+        if size == 0:
+            return out
+        while len(buf) < size + 2:
+            chunk = sock.recv(min(65536, size + 2 - len(buf)))
+            if not chunk:
+                return None
+            buf += chunk
+        out += buf[:size]
+        buf = buf[size:]
+        if buf.startswith(b"\r\n"):
+            buf = buf[2:]
+
+
+def _read_http_response(
+    sock: socket.socket,
+) -> tuple[str, dict[str, str], bytes] | None:
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        data += chunk
+        if len(data) > MAX_HEADER:
+            return None
+    header, _, rest = data.partition(b"\r\n\r\n")
+    first = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
+    parts = first.split(" ", 2)
+    if len(parts) < 2:
+        status = "502 Bad Gateway"
+    else:
+        status = parts[1] + (" " + parts[2] if len(parts) > 2 else "")
+    headers = _header_map(header)
+    te = (headers.get("transfer-encoding") or "").lower()
+    if "chunked" in te:
+        body = _read_chunked(sock, rest)
+        if body is None:
+            return None
+        return status, headers, body
+    if "content-length" in headers:
+        need = int(headers["content-length"])
+        body = rest
+        while len(body) < need:
+            chunk = sock.recv(min(65536, need - len(body)))
+            if not chunk:
+                break
+            body += chunk
+        return status, headers, body[:need]
+    body = rest
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return status, headers, body
 
 
 def _http_response(
@@ -180,13 +251,19 @@ class Sidecar:
             method, raw_target = parts[0], parts[1]
             parsed_url = urlparse(raw_target)
             path = unquote(parsed_url.path)
+            headers = _header_map(header)
             if method in {"GET", "HEAD"} and path.startswith("/rc-assets/"):
-                self._serve_asset(conn, path[len("/rc-assets/") :], method == "HEAD")
+                self._serve_asset(
+                    conn,
+                    path[len("/rc-assets/") :],
+                    method == "HEAD",
+                    headers,
+                )
                 return
             if method == "GET" and path == "/rc-history":
                 self._serve_history(conn, parse_qs(parsed_url.query))
                 return
-            self._proxy(conn, header, body)
+            self._proxy(conn, header, body, headers)
         except OSError:
             pass
         finally:
@@ -195,10 +272,40 @@ class Sidecar:
             except OSError:
                 pass
 
-    def _serve_asset(self, conn: socket.socket, name: str, head_only: bool) -> None:
+    def _serve_asset(
+        self,
+        conn: socket.socket,
+        name: str,
+        head_only: bool,
+        req_headers: dict[str, str] | None = None,
+    ) -> None:
         path = _safe_asset(self.assets, name)
         if path is None:
             conn.sendall(_http_response("404 Not Found", b"not found", "text/plain"))
+            return
+        extra = [("Access-Control-Allow-Origin", "*")]
+        if path.name == "manifest.json":
+            extra.append(("Cache-Control", "no-store"))
+            extra.append(("Vary", "User-Agent, Sec-CH-UA-Mobile"))
+        else:
+            extra.append(
+                ("Cache-Control", ASSET_CACHE if path.suffix == ".woff2" else SCRIPT_CACHE)
+            )
+        if path.name == "sw.js":
+            extra.append(("Service-Worker-Allowed", "/"))
+        if path.name == "manifest.json":
+            try:
+                raw_man = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw_man = {}
+            if not isinstance(raw_man, dict):
+                raw_man = {}
+            payload = manifest_for_client(raw_man, request_is_mobile(req_headers or {}))
+            data = json.dumps(payload).encode("utf-8")
+            ctype = "application/json; charset=utf-8"
+            if head_only:
+                data = b""
+            conn.sendall(_http_response("200 OK", data if not head_only else b"", ctype, extra))
             return
         data = b"" if head_only else path.read_bytes()
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -206,10 +313,6 @@ class Sidecar:
             ctype = "font/woff2"
         elif path.suffix == ".js":
             ctype = "application/javascript; charset=utf-8"
-        extra = [("Cache-Control", ASSET_CACHE if path.suffix == ".woff2" else SCRIPT_CACHE)]
-        extra.append(("Access-Control-Allow-Origin", "*"))
-        if path.name == "sw.js":
-            extra.append(("Service-Worker-Allowed", "/"))
         if head_only:
             lines = [
                 "HTTP/1.1 200 OK",
@@ -251,13 +354,95 @@ class Sidecar:
             )
         )
 
-    def _proxy(self, conn: socket.socket, header: bytes, body: bytes) -> None:
+    def _proxy(
+        self,
+        conn: socket.socket,
+        header: bytes,
+        body: bytes,
+        req_headers: dict[str, str] | None = None,
+    ) -> None:
+        first = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        parts = first.split(" ")
+        method = parts[0] if parts else ""
+        raw_target = parts[1] if len(parts) > 1 else "/"
+        path = unquote(urlparse(raw_target).path)
+        headers = req_headers or _header_map(header)
+        upgrade = "upgrade" in (headers.get("connection") or "").lower()
+        if (
+            not upgrade
+            and method in {"GET", "HEAD"}
+            and path in {"/", "/index.html"}
+        ):
+            self._proxy_html(conn, header, body, headers)
+            return
         upstream = socket.create_connection(
             (self.upstream_host, self.upstream_port), timeout=10
         )
         try:
             upstream.sendall(header + b"\r\n\r\n" + body)
             _splice(conn, upstream)
+        finally:
+            try:
+                upstream.close()
+            except OSError:
+                pass
+
+    def _mobile_font_url(self) -> str:
+        path = self.assets / "manifest.json"
+        if not path.is_file():
+            return ""
+        try:
+            man = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        fonts = man.get("mobileFonts") if isinstance(man, dict) else None
+        if isinstance(fonts, list) and fonts:
+            return str(fonts[0])
+        return ""
+
+    def _proxy_html(
+        self,
+        conn: socket.socket,
+        header: bytes,
+        body: bytes,
+        req_headers: dict[str, str],
+    ) -> None:
+        upstream = socket.create_connection(
+            (self.upstream_host, self.upstream_port), timeout=10
+        )
+        try:
+            upstream.sendall(header + b"\r\n\r\n" + body)
+            raw = _read_http_response(upstream)
+            if raw is None:
+                return
+            status, resp_headers, resp_body = raw
+            ctype = resp_headers.get("content-type") or ""
+            if request_is_mobile(req_headers) and "html" in ctype.lower():
+                text = resp_body.decode("utf-8", "replace")
+                text = rewrite_index_for_mobile(text, self._mobile_font_url())
+                resp_body = text.encode("utf-8")
+            skip = {
+                "content-length",
+                "transfer-encoding",
+                "connection",
+                "content-encoding",
+                "content-type",
+            }
+            extra = [
+                (key.title() if key != "vary" else "Vary", value)
+                for key, value in resp_headers.items()
+                if key not in skip
+            ]
+            if request_is_mobile(req_headers):
+                extra.append(("Vary", "User-Agent, Sec-CH-UA-Mobile"))
+            conn.sendall(
+                _http_response(
+                    status,
+                    resp_body,
+                    ctype or "text/html; charset=utf-8",
+                    extra,
+                )
+            )
         finally:
             try:
                 upstream.close()

@@ -90,9 +90,6 @@
       /iPad/.test(ua) || (platform === "MacIntel" && touches > 1);
     if (iPad) return "tablet";
     if (/iPhone|iPod/.test(ua)) return "phone";
-    if (fineHover && !/Android/i.test(ua) && !/Tablet|Silk|Kindle/i.test(ua)) {
-      return "pc";
-    }
 
     var minCss = Math.min(window.innerWidth || 0, window.innerHeight || 0);
     var dpr = window.devicePixelRatio || 1;
@@ -100,7 +97,13 @@
     var size = Math.max(minCss, minScreen);
     var android = /Android/i.test(ua);
     var mobileToken = /Mobile/i.test(ua);
-    var touchy = coarse || touches > 0 || android || /Mobi|Tablet/i.test(ua);
+    var touchy =
+      coarse ||
+      touches > 1 ||
+      android ||
+      /Mobi|Tablet|Silk|Kindle/i.test(ua);
+
+    if (!touchy && fineHover && touches <= 1) return "pc";
 
     if (touchy) {
       if (/Tablet|Nexus 7|Nexus 9|Nexus 10|SM-T|Kindle|Silk/i.test(ua)) {
@@ -111,6 +114,7 @@
       return "phone";
     }
     if (fineHover && touches === 0) return "pc";
+    if (coarse || touches > 0) return size >= 600 ? "tablet" : "phone";
     return "pc";
   }
 
@@ -133,16 +137,33 @@
     focusTerm();
   }
 
+  function setLinkState(open) {
+    if (!bar) return;
+    bar.classList.toggle("is-offline", !open);
+    var label = bar.querySelector(".rc-ek-link");
+    if (!label) {
+      label = document.createElement("div");
+      label.className = "rc-ek-link";
+      label.setAttribute("aria-live", "polite");
+      bar.insertBefore(label, bar.firstChild);
+    }
+    label.textContent = open ? "" : "Sin conexión";
+  }
+
   function sendInput(text) {
     if (!text) return false;
     var ws = window.__rcTermSocket;
-    if (!ws || ws.readyState !== 1) return false;
+    if (!ws || ws.readyState !== 1) {
+      setLinkState(false);
+      return false;
+    }
     var body = encoder.encode(text);
     var payload = new Uint8Array(body.length + 1);
     payload[0] = INPUT;
     payload.set(body, 1);
     ws.send(payload);
     lastSentAt = Date.now();
+    setLinkState(true);
     return true;
   }
 
@@ -322,6 +343,13 @@
     });
     bindKeepFocus(bar);
     document.body.appendChild(bar);
+    setLinkState(!!(window.__rcTermSocket && window.__rcTermSocket.readyState === 1));
+    window.addEventListener("rc-ws-open", function () {
+      setLinkState(true);
+    });
+    window.addEventListener("rc-ws-close", function () {
+      setLinkState(false);
+    });
     requestLayout();
 
     if (window.visualViewport) {
@@ -334,7 +362,6 @@
     });
     document.addEventListener("focusin", function (ev) {
       if (bar.contains(ev.target)) {
-        ev.preventDefault();
         focusTerm();
       }
     });
@@ -503,6 +530,34 @@
     }, 4000);
   }
 
+  function bootTapToFocus() {
+    function fromKeys(ev) {
+      var t = ev.target;
+      return !!(t && t.closest && t.closest("#rc-extra-keys"));
+    }
+    function focus() {
+      focusTerm();
+    }
+    document.addEventListener(
+      "pointerup",
+      function (ev) {
+        if (fromKeys(ev)) return;
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        focus();
+      },
+      { passive: true }
+    );
+    document.addEventListener(
+      "touchend",
+      function (ev) {
+        if (fromKeys(ev)) return;
+        focus();
+        setTimeout(focus, 50);
+      },
+      { passive: true }
+    );
+  }
+
   function boot() {
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
@@ -512,6 +567,8 @@
     mountBar();
     bootInterceptors();
     bootTouchScroll();
+    bootTapToFocus();
+    setTimeout(focusTerm, 300);
   }
 
   if (window.__rcRedirecting) return;

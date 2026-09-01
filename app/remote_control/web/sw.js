@@ -1,10 +1,18 @@
 /* Remote Control service worker: cache fonts/JS, keep HTML+history network-first. */
-/* v=1.2.2 */
-var CACHE = "rc-tty-v1.2.2";
+/* v=1.2.3 */
+var CACHE = "rc-tty-v1.2.3";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
   return request.destination === "websocket";
+}
+
+function addBestEffort(cache, urls) {
+  return Promise.all(
+    urls.map(function (url) {
+      return cache.add(url).catch(function () {});
+    })
+  );
 }
 
 function cacheFirst(request) {
@@ -38,9 +46,8 @@ function networkFirst(request) {
 }
 
 self.addEventListener("install", function (event) {
-  self.skipWaiting();
   event.waitUntil(
-    fetch("/rc-assets/manifest.json")
+    fetch("/rc-assets/manifest.json", { cache: "no-store" })
       .then(function (resp) {
         return resp.ok ? resp.json() : { fonts: [] };
       })
@@ -50,10 +57,15 @@ self.addEventListener("install", function (event) {
       .then(function (man) {
         var urls = ["/rc-assets/cache.js", "/rc-assets/sw.js"].concat(man.fonts || []);
         return caches.open(CACHE).then(function (cache) {
-          return cache.addAll(urls);
+          return addBestEffort(cache, urls);
         });
       })
-      .catch(function () {})
+      .then(function () {
+        return self.skipWaiting();
+      })
+      .catch(function () {
+        return self.skipWaiting();
+      })
   );
 });
 
@@ -89,6 +101,10 @@ self.addEventListener("fetch", function (event) {
   }
   if (url.origin !== self.location.origin) return;
   if (url.pathname.indexOf("/ws") === 0) return;
+  if (url.pathname === "/rc-assets/manifest.json") {
+    event.respondWith(networkFirst(request));
+    return;
+  }
   if (url.pathname.indexOf("/rc-assets/") === 0) {
     event.respondWith(cacheFirst(request));
     return;

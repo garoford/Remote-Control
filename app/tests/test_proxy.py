@@ -18,6 +18,15 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+INDEX_HTML = (
+    b"<!doctype html><html><head>"
+    b'<link id="rc-font-preload-reg" rel="preload" as="font" '
+    b'href="/rc-assets/font-regular-aaa.woff2">'
+    b'<style id="cf-remote-theme">@font-face{font-family:\'FiraCode Nerd Font Mono\'}'
+    b"</style></head><body>ttyd-index</body></html>"
+)
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.startswith("/token"):
@@ -28,7 +37,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        body = b"ttyd-index"
+        body = INDEX_HTML
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -49,6 +58,16 @@ class ProxyAssetTests(unittest.TestCase):
         (self.assets / self.font_name).write_bytes(payload)
         (self.assets / "cache.js").write_text("window.RC_CACHE=1;", encoding="utf-8")
         (self.assets / "sw.js").write_text("self.RC_SW=1;", encoding="utf-8")
+        (self.assets / "font-mobile-ccc.woff2").write_bytes(b"woff2-mobile")
+        (self.assets / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "fonts": [f"/rc-assets/{self.font_name}"],
+                    "mobileFonts": ["/rc-assets/font-mobile-ccc.woff2"],
+                }
+            ),
+            encoding="utf-8",
+        )
 
         self.up_port = _free_port()
         self.listen_port = _free_port()
@@ -80,10 +99,10 @@ class ProxyAssetTests(unittest.TestCase):
                 pass
         self.fail(f"port {port} did not open")
 
-    def _get(self, path: str):
+    def _get(self, path: str, headers: dict[str, str] | None = None):
         conn = http.client.HTTPConnection("127.0.0.1", self.listen_port, timeout=3)
         try:
-            conn.request("GET", path)
+            conn.request("GET", path, headers=headers or {})
             raw = conn.getresponse()
             body = raw.read()
             headers = {key.lower(): value for key, value in raw.getheaders()}
@@ -121,8 +140,41 @@ class ProxyAssetTests(unittest.TestCase):
 
     def test_index_is_proxied(self) -> None:
         resp = self._get("/")
-        self.assertEqual(resp.read(), b"ttyd-index")
+        body = resp.read()
+        self.assertIn(b"ttyd-index", body)
+        self.assertIn(b"rc-font-preload-reg", body)
         self.assertEqual(resp.status, 200)
+
+    def test_mobile_index_drops_nerd_preload(self) -> None:
+        resp = self._get(
+            "/",
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+                    "Mobile/15E148 Safari/604.1"
+                )
+            },
+        )
+        body = resp.read()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"ttyd-index", body)
+        self.assertNotIn(b"rc-font-preload-reg", body)
+        self.assertNotIn(b"FiraCode Nerd Font Mono", body)
+        self.assertIn(b"RC Mono", body)
+        self.assertIn(b"font-mobile-ccc.woff2", body)
+        self.assertIn("User-Agent", resp.getheader("Vary") or "")
+
+    def test_manifest_follows_ua(self) -> None:
+        desktop = json.loads(self._get("/rc-assets/manifest.json").read())
+        self.assertEqual(desktop["fonts"], [f"/rc-assets/{self.font_name}"])
+        mobile = json.loads(
+            self._get(
+                "/rc-assets/manifest.json",
+                {"Sec-CH-UA-Mobile": "?1"},
+            ).read()
+        )
+        self.assertEqual(mobile["fonts"], ["/rc-assets/font-mobile-ccc.woff2"])
 
     def test_token_is_proxied(self) -> None:
         resp = self._get("/token")

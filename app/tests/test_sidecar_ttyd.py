@@ -72,6 +72,28 @@ class SidecarTtydTests(unittest.TestCase):
             self.assertIn(b"ttyd", data.lower())
             self.assertNotIn(b"data:font/woff2;base64", data)
             self.assertIn(b"/rc-assets/cache.js", data)
+            self.assertIn(b"rc-touch-boot", data)
+            phone = socket.create_connection(("127.0.0.1", listen), timeout=3)
+            phone.sendall(
+                b"GET / HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                b"AppleWebKit/605.1.15 Mobile/15E148\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            phone_chunks = []
+            while True:
+                piece = phone.recv(65536)
+                if not piece:
+                    break
+                phone_chunks.append(piece)
+            phone.close()
+            phone_data = b"".join(phone_chunks)
+            self.assertIn(b"200", phone_data.split(b"\r\n", 1)[0])
+            self.assertNotIn(b"rc-font-preload-reg", phone_data)
+            self.assertIn(b"ui-monospace", phone_data)
+            if svc.font_mobile_url:
+                self.assertIn(svc.font_mobile_url.encode(), phone_data)
             if svc.font_reg_url:
                 self.assertIn(svc.font_reg_url.encode(), data)
                 font = socket.create_connection(("127.0.0.1", listen), timeout=3)

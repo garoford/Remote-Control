@@ -1,9 +1,12 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.2.2";
+  var VERSION = "1.2.3";
   var FONT_STACK =
     "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'Courier New', monospace";
+  var MOBILE_STACK =
+    "'RC Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
+  var skipResetOnce = false;
   var DB_NAME = "rc-term-history";
   var STORE = "tabs";
   var MAX_LINES = 20000;
@@ -199,11 +202,16 @@
       return;
     }
     restoring = true;
+    if (isTouch()) skipResetOnce = true;
     holdUntil = Date.now() + RECONCILE_HOLD_MS;
     writeLines(term, rec.lines, function () {
       restoring = false;
       if (done) done();
     });
+  }
+
+  function isTouch() {
+    return document.documentElement.classList.contains("rc-touch");
   }
 
   function applyReconcile(payload) {
@@ -212,7 +220,9 @@
     holdUntil = Date.now() + RECONCILE_HOLD_MS;
     if (payload.mode === "full") {
       restoring = true;
-      if (typeof term.reset === "function") {
+      var skip = skipResetOnce && isTouch();
+      skipResetOnce = false;
+      if (!skip && typeof term.reset === "function") {
         try {
           term.reset();
         } catch (_) {}
@@ -318,11 +328,21 @@
 
   function registerSw() {
     if (!("serviceWorker" in navigator)) return;
+    var ua = navigator.userAgent || "";
+    var iosWebkit = /iPhone|iPad|iPod/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+    if (iosWebkit) return;
     navigator.serviceWorker.register("/rc-assets/sw.js?v=" + VERSION, { scope: "/" }).catch(function () {});
+  }
+
+  function activeStack() {
+    return isTouch() ? MOBILE_STACK : FONT_STACK;
   }
 
   function warmFonts() {
     if (!document.fonts || !document.fonts.load) return Promise.resolve();
+    if (isTouch()) {
+      return document.fonts.load("400 16px 'RC Mono'").catch(function () {});
+    }
     return Promise.all([
       document.fonts.load("400 15px 'FiraCode Nerd Font Mono'"),
       document.fonts.load("700 15px 'FiraCode Nerd Font Mono'"),
@@ -333,7 +353,7 @@
     var term = findTerm();
     if (!term) return;
     try {
-      if (term.options) term.options.fontFamily = FONT_STACK;
+      if (term.options) term.options.fontFamily = activeStack();
       if (typeof term.fit === "function") term.fit();
     } catch (_) {}
   }

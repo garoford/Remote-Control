@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from remote_control import __version__
+from remote_control.mobile import MOBILE_STACK, TOUCH_BOOT_JS, subset_mobile_woff2
+
 URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 REGISTERED_RE = re.compile(r"Registered tunnel connection")
 
@@ -135,6 +138,7 @@ class TunnelService:
         self.ttyd_port = self.port + 1
         self.font_reg_url = ""
         self.font_bold_url = ""
+        self.font_mobile_url = ""
         self.ttyd_index = self.run_dir / "ttyd-index.html"
         fonts = self.home / ".local" / "share" / "fonts" / "FiraCode"
         self.font_reg_ttf = fonts / "FiraCodeNerdFontMono-Regular.ttf"
@@ -265,7 +269,7 @@ class TunnelService:
             "-t",
             "fontSize=15",
             "-t",
-            "fontFamily=FiraCode Nerd Font Mono",
+            "fontFamily=FiraCode Nerd Font Mono, ui-monospace, Cascadia Mono, Courier New, monospace",
             "-t",
             "fontWeight=400",
             "-t",
@@ -492,8 +496,11 @@ class TunnelService:
     def _strip_injects(self, html: str) -> str:
         html = self._strip_void(html, "link", "rc-font-preload-reg")
         html = self._strip_void(html, "link", "rc-font-preload-bold")
+        html = self._strip_void(html, "link", "rc-font-preload-mobile")
         html = self._strip_tagged(html, "style", "cf-remote-theme")
+        html = self._strip_tagged(html, "style", "cf-remote-theme-mobile")
         html = self._strip_tagged(html, "style", "rc-extra-keys-css")
+        html = self._strip_tagged(html, "script", "rc-touch-boot")
         html = self._strip_tagged(html, "script", "rc-tab-session-js")
         html = self._strip_tagged(html, "script", "rc-extra-keys-js")
         html = self._strip_tagged(html, "script", "rc-cache-js")
@@ -513,7 +520,8 @@ class TunnelService:
         parts: list[str] = [
             '<meta id="rc-viewport" name="viewport" content="width=device-width,'
             "initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,"
-            'interactive-widget=resizes-content">'
+            'interactive-widget=resizes-content">',
+            f'<script id="rc-touch-boot">{TOUCH_BOOT_JS}</script>',
         ]
         if css_path.is_file():
             parts.append(
@@ -528,7 +536,7 @@ class TunnelService:
                 f'<script id="rc-extra-keys-js">{keys_js.read_text(encoding="utf-8")}</script>'
             )
         parts.append(
-            '<script id="rc-cache-js" src="/rc-assets/cache.js?v=1.2.2"></script>'
+            f'<script id="rc-cache-js" src="/rc-assets/cache.js?v={__version__}"></script>'
         )
         return "".join(parts)
 
@@ -568,18 +576,29 @@ class TunnelService:
         self._ensure_woff2_fonts()
         self.font_reg_url = ""
         self.font_bold_url = ""
+        self.font_mobile_url = ""
         if self.font_reg_woff.is_file():
             self.font_reg_url = self._publish_font(self.font_reg_woff, "regular")
         if self.font_bold_woff.is_file():
             self.font_bold_url = self._publish_font(self.font_bold_woff, "bold")
+        mobile_woff = self.font_dir / "FiraCode-mobile.woff2"
+        bundled = Path(__file__).with_name("web") / "font-mobile.woff2"
+        mobile_src: Path | None = None
+        if subset_mobile_woff2(self.font_reg_ttf, mobile_woff):
+            mobile_src = mobile_woff
+        elif bundled.is_file():
+            mobile_src = bundled
+        if mobile_src is not None:
+            self.font_mobile_url = self._publish_font(mobile_src, "mobile")
         web = Path(__file__).with_name("web")
         for name in ("cache.js", "sw.js"):
             src = web / name
             if src.is_file():
                 shutil.copy2(src, self.assets_dir / name)
         fonts = [url for url in (self.font_reg_url, self.font_bold_url) if url]
+        mobile_fonts = [self.font_mobile_url] if self.font_mobile_url else []
         (self.assets_dir / "manifest.json").write_text(
-            json.dumps({"fonts": fonts}),
+            json.dumps({"fonts": fonts, "mobileFonts": mobile_fonts}),
             encoding="utf-8",
         )
 
@@ -618,6 +637,11 @@ class TunnelService:
                 f"font-weight:700;font-display:swap;src:url('{self.font_bold_url}') "
                 "format('woff2');}"
             )
+        if self.font_mobile_url:
+            faces += (
+                "@font-face{font-family:'RC Mono';font-style:normal;font-weight:400;"
+                f"font-display:swap;src:url('{self.font_mobile_url}') format('woff2');}}"
+            )
         return (
             f"{preloads}"
             '<style id="cf-remote-theme">'
@@ -625,7 +649,11 @@ class TunnelService:
             "html,body{background:#011627;margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
             f".xterm-helper-textarea{{font-family:{stack}!important;"
-            "font-feature-settings:'liga' 1,'calt' 1;}</style>"
+            "font-feature-settings:'liga' 1,'calt' 1;}"
+            "html.rc-touch body,html.rc-touch .xterm,html.rc-touch .xterm-viewport,"
+            "html.rc-touch .xterm-rows,html.rc-touch .xterm-screen,"
+            "html.rc-touch .xterm-helper-textarea"
+            f"{{font-family:{MOBILE_STACK}!important;}}</style>"
         )
 
     def _pick_internal_port(self) -> int:
