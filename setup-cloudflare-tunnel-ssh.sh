@@ -141,24 +141,63 @@ cleanup_old() {
   rm -f "$TTYD_PID_FILE" "$CF_PID_FILE" "$LOG_FILE" "$URL_FILE"
 }
 
+# GitHub RPM names use uname-style arches (x86_64 / aarch64), not Debian
+# (amd64 / arm64). cloudflared-linux-amd64.rpm and -arm64.rpm 404.
+cloudflared_release_assets() {
+  case "$(uname -m)" in
+    x86_64|amd64)
+      CF_RPM="cloudflared-linux-x86_64.rpm"
+      CF_BIN="cloudflared-linux-amd64"
+      ;;
+    aarch64|arm64)
+      CF_RPM="cloudflared-linux-aarch64.rpm"
+      CF_BIN="cloudflared-linux-arm64"
+      ;;
+    *)
+      err "Arquitectura no soportada: $(uname -m)"
+      exit 1
+      ;;
+  esac
+}
+
 install_cloudflared() {
   if command -v cloudflared >/dev/null 2>&1; then
     ok "cloudflared ya instalado: $(cloudflared --version 2>&1 | head -n1)"
     return
   fi
   info "Instalando cloudflared..."
-  ARCH="$(uname -m)"
-  case "$ARCH" in
-    x86_64|amd64) CF_ARCH="amd64" ;;
-    aarch64|arm64) CF_ARCH="arm64" ;;
-    *) err "Arquitectura no soportada: $ARCH"; exit 1 ;;
-  esac
-  TMP_RPM="$(mktemp /tmp/cloudflared-XXXXXX.rpm)"
-  curl -fsSL -o "$TMP_RPM" \
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}.rpm"
-  sudo dnf install -y "$TMP_RPM"
-  rm -f "$TMP_RPM"
-  ok "cloudflared instalado"
+  cloudflared_release_assets
+
+  if command -v dnf >/dev/null 2>&1; then
+    if [[ ! -f /etc/yum.repos.d/cloudflared.repo ]]; then
+      curl -fsSL https://pkg.cloudflare.com/cloudflared.repo \
+        | sudo tee /etc/yum.repos.d/cloudflared.repo >/dev/null
+    fi
+    if sudo dnf install -y cloudflared; then
+      ok "cloudflared instalado vía repo de Cloudflare"
+      return
+    fi
+    warn "El repo de Cloudflare no trajo el paquete; bajando RPM de GitHub..."
+
+    TMP_RPM="$(mktemp /tmp/cloudflared-XXXXXX.rpm)"
+    if curl -fsSL -o "$TMP_RPM" \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/${CF_RPM}" \
+      && sudo dnf install -y "$TMP_RPM"; then
+      rm -f "$TMP_RPM"
+      ok "cloudflared instalado"
+      return
+    fi
+    rm -f "$TMP_RPM"
+    warn "RPM de GitHub falló; bajando binario..."
+  fi
+
+  TMP_BIN="$(mktemp /tmp/cloudflared-XXXXXX)"
+  curl -fsSL -o "$TMP_BIN" \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/${CF_BIN}"
+  chmod +x "$TMP_BIN"
+  sudo install -m 755 "$TMP_BIN" /usr/local/bin/cloudflared
+  rm -f "$TMP_BIN"
+  ok "cloudflared instalado en /usr/local/bin/cloudflared"
 }
 
 install_ttyd() {
