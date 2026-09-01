@@ -1,0 +1,15 @@
+---
+description: Si el usuario pide un plan, escribirlo en plan/*.md de este repo (la web no tiene modo Plan).
+alwaysApply: true
+---
+
+# Plan en archivos (este repo)
+
+Si el usuario pide planear (`hagamos un plan`, `haz un plan`, `modo plan`, `planear esto`, `let's plan`, etc.):
+
+1. **No** uses modo Plan del IDE.
+2. Escribe el plan en `plan/<tema>.md` de **este** repo (Remote Control).
+3. **No** pongas el plan ni el código en `Workspace CRM`, `PROCRM/` ni otros productos del hub.
+4. **No implementes** hasta que lo pida.
+
+`plan/` no se commitea salvo pedido explícito.

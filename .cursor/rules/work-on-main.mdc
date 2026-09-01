@@ -1,0 +1,15 @@
+---
+description: En este repo se trabaja solo en main. Sin ramas feature ni PRs de routine.
+alwaysApply: true
+---
+
+# Solo `main` (este repo)
+
+Remote Control se edita **solo en `main`**.
+
+1. **No** crees ramas `cursor/…` ni otras feature branches.
+2. Commit y push directo a `origin/main`.
+3. **No** abras PRs para el trabajo normal de este repo. El PR solo si el usuario lo pide.
+4. Esto pisa el flujo por defecto de cloud agents (branch + draft PR) **en este repositorio**.
+
+Ejemplo: un fix de `cloudflared` va a `main` en un commit, no a `cursor/fix-cloudflared-…`.
