@@ -5,7 +5,7 @@ Túnel web de terminal (ttyd + Cloudflare Quick Tunnel) con app GTK4/Adwaita.
 ## Instalar
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/refs/heads/main/install.sh | bash
 ```
 
 Instala `remote-control` en `~/.local/bin`, el launcher en el menú, y un clone git en `~/.local/share/remote-control/src`.

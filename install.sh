@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install Remote Control from GitHub. Safe to re-run.
-# curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/main/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/refs/heads/main/install.sh | bash
 set -euo pipefail
 
 REPO_URL="${REMOTE_CONTROL_REPO_URL:-https://github.com/garoford/Remote-Control.git}"
