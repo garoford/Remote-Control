@@ -4,6 +4,7 @@ import http.server
 import json
 import socket
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -148,9 +149,13 @@ class ProxyAssetTests(unittest.TestCase):
                 b"Sec-WebSocket-Version: 13\r\n"
                 b"\r\n"
             )
-            data = raw.recv(4096)
-            # Dummy upstream is HTTP/1.1 200, not 101 — splice must still
-            # deliver the upstream response through the sidecar.
+            data = b""
+            deadline = time.time() + 2
+            while time.time() < deadline and b"ttyd-index" not in data:
+                chunk = raw.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
             self.assertTrue(data.startswith(b"HTTP/1.") and b" 200" in data[:20])
             self.assertIn(b"ttyd-index", data)
         finally:

@@ -200,7 +200,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.switch.set_sensitive(False)
         self.url_card.set_visible(True)
         self.idle_label.set_visible(False)
-        self.url_entry.set_text("Creando túnel público…")
+        self.url_entry.set_text("Creando túnel y esperando DNS…")
 
         def work() -> None:
             try:

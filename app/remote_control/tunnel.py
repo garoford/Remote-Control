@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -11,10 +12,50 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+REGISTERED_RE = re.compile(r"Registered tunnel connection")
+
+
+def dns_via_doh(host: str, timeout: float = 3.0) -> bool:
+    """True if 1.1.1.1 already has A or AAAA for host."""
+    for qtype in ("A", "AAAA"):
+        url = f"https://1.1.1.1/dns-query?name={host}&type={qtype}"
+        req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+            continue
+        answers = data.get("Answer") or []
+        if any(item.get("data") for item in answers):
+            return True
+    return False
+
+
+def host_resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except OSError:
+        return False
+
+
+def flush_resolved_cache() -> None:
+    resolvectl = shutil.which("resolvectl")
+    if not resolvectl:
+        return
+    subprocess.run(
+        [resolvectl, "flush-caches"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
 DEFAULT_PORT = 7681
 NIGHT_OWL_THEME = (
     '{"background":"#011627","foreground":"#d6deeb","cursor":"#80A4C2",'
@@ -126,6 +167,7 @@ class TunnelService:
         self._start_proxy()
         self._start_cloudflared()
         url = self._wait_for_url(timeout=60)
+        self._wait_until_public(url, timeout=45)
         self.url_file.write_text(url + "\n", encoding="utf-8")
         self.url_file.chmod(0o600)
         return url
@@ -285,16 +327,52 @@ class TunnelService:
 
     def _wait_for_url(self, timeout: int = 60) -> str:
         deadline = time.time() + timeout
+        url = None
         while time.time() < deadline:
-            url = self._url_from_log()
-            if url:
+            if url is None:
+                url = self._url_from_log()
+            if url and self._tunnel_registered():
                 return url
             if not self._alive_pid(self.cf_pid_file):
                 tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
                 raise TunnelError("cloudflared se detuvo.\n" + tail)
             time.sleep(0.4)
+        if url:
+            return url
         tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
         raise TunnelError("No salió la URL a tiempo.\n" + tail)
+
+    def _tunnel_registered(self) -> bool:
+        if not self.log_file.is_file():
+            return False
+        text = self.log_file.read_text(encoding="utf-8", errors="replace")
+        return bool(REGISTERED_RE.search(text))
+
+    def _wait_until_public(self, url: str, timeout: int = 45) -> None:
+        """Don't call the tunnel ready until public DNS exists.
+
+        Querying the system resolver too early plants an NXDOMAIN in
+        systemd-resolved; Chrome then keeps failing. Ask 1.1.1.1 first,
+        flush the stub cache, then confirm getaddrinfo.
+        """
+        host = urlparse(url).hostname or ""
+        if not host:
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self._alive_pid(self.cf_pid_file):
+                tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise TunnelError("cloudflared se detuvo antes de publicar DNS.\n" + tail)
+            if dns_via_doh(host):
+                flush_resolved_cache()
+                ready_until = min(deadline, time.time() + 8)
+                while time.time() < ready_until:
+                    if host_resolves(host):
+                        return
+                    time.sleep(0.4)
+                return
+            time.sleep(0.6)
+        flush_resolved_cache()
 
     def _url_from_log(self) -> str | None:
         if not self.log_file.is_file():
