@@ -1,7 +1,9 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.2.0";
+  var VERSION = "1.2.2";
+  var FONT_STACK =
+    "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'Courier New', monospace";
   var DB_NAME = "rc-term-history";
   var STORE = "tabs";
   var MAX_LINES = 20000;
@@ -319,8 +321,37 @@
     navigator.serviceWorker.register("/rc-assets/sw.js?v=" + VERSION, { scope: "/" }).catch(function () {});
   }
 
+  function warmFonts() {
+    if (!document.fonts || !document.fonts.load) return Promise.resolve();
+    return Promise.all([
+      document.fonts.load("400 15px 'FiraCode Nerd Font Mono'"),
+      document.fonts.load("700 15px 'FiraCode Nerd Font Mono'"),
+    ]).catch(function () {});
+  }
+
+  function applyTermFont() {
+    var term = findTerm();
+    if (!term) return;
+    try {
+      if (term.options) term.options.fontFamily = FONT_STACK;
+      if (typeof term.fit === "function") term.fit();
+    } catch (_) {}
+  }
+
+  function bootFonts() {
+    warmFonts().then(function () {
+      waitForTerm(applyTermFont);
+    });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function () {
+        waitForTerm(applyTermFont);
+      });
+    }
+  }
+
   function boot() {
     registerSw();
+    bootFonts();
     bootRestore();
     window.addEventListener("online", function () {
       setBadge("");

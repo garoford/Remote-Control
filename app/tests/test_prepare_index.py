@@ -17,5 +17,10 @@ class PrepareIndexTests(unittest.TestCase):
             self.assertIn(svc.font_reg_url, html)
             self.assertTrue((svc.assets_dir / svc.font_reg_url.rsplit("/", 1)[-1]).is_file())
         css = svc._font_css()
-        self.assertIn("font-display:optional", css)
+        self.assertIn("font-display:swap", css)
+        self.assertIn('rel="preload"', css)
+        self.assertNotIn("font-display:optional", css)
         self.assertNotIn("base64", css)
+        manifest = svc.assets_dir / "manifest.json"
+        self.assertTrue(manifest.is_file())
+        self.assertIn("fonts", manifest.read_text(encoding="utf-8"))

@@ -207,6 +207,7 @@ class Sidecar:
         elif path.suffix == ".js":
             ctype = "application/javascript; charset=utf-8"
         extra = [("Cache-Control", ASSET_CACHE if path.suffix == ".woff2" else SCRIPT_CACHE)]
+        extra.append(("Access-Control-Allow-Origin", "*"))
         if path.name == "sw.js":
             extra.append(("Service-Worker-Allowed", "/"))
         if head_only:

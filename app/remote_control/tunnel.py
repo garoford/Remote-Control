@@ -434,6 +434,16 @@ class TunnelService:
                 proc.kill()
         return html
 
+    def _strip_void(self, html: str, tag: str, ident: str) -> str:
+        token = f'<{tag} id="{ident}"'
+        start = html.find(token)
+        if start < 0:
+            return html
+        end = html.find(">", start)
+        if end < 0:
+            return html
+        return html[:start] + html[end + 1 :]
+
     def _strip_tagged(self, html: str, tag: str, ident: str) -> str:
         open_tag = f'<{tag} id="{ident}"'
         start = html.find(open_tag)
@@ -446,6 +456,8 @@ class TunnelService:
         return html[:start] + html[end + len(close) :]
 
     def _strip_injects(self, html: str) -> str:
+        html = self._strip_void(html, "link", "rc-font-preload-reg")
+        html = self._strip_void(html, "link", "rc-font-preload-bold")
         html = self._strip_tagged(html, "style", "cf-remote-theme")
         html = self._strip_tagged(html, "style", "rc-extra-keys-css")
         html = self._strip_tagged(html, "script", "rc-tab-session-js")
@@ -482,7 +494,7 @@ class TunnelService:
                 f'<script id="rc-extra-keys-js">{keys_js.read_text(encoding="utf-8")}</script>'
             )
         parts.append(
-            '<script id="rc-cache-js" src="/rc-assets/cache.js?v=1.2.0"></script>'
+            '<script id="rc-cache-js" src="/rc-assets/cache.js?v=1.2.2"></script>'
         )
         return "".join(parts)
 
@@ -531,6 +543,11 @@ class TunnelService:
             src = web / name
             if src.is_file():
                 shutil.copy2(src, self.assets_dir / name)
+        fonts = [url for url in (self.font_reg_url, self.font_bold_url) if url]
+        (self.assets_dir / "manifest.json").write_text(
+            json.dumps({"fonts": fonts}),
+            encoding="utf-8",
+        )
 
     def _publish_font(self, src: Path, weight: str) -> str:
         digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
@@ -539,27 +556,42 @@ class TunnelService:
         return f"/rc-assets/{name}"
 
     def _font_css(self) -> str:
+        preloads = ""
+        if self.font_reg_url:
+            preloads += (
+                f'<link id="rc-font-preload-reg" rel="preload" as="font" '
+                f'type="font/woff2" crossorigin href="{self.font_reg_url}">'
+            )
+        if self.font_bold_url:
+            preloads += (
+                f'<link id="rc-font-preload-bold" rel="preload" as="font" '
+                f'type="font/woff2" crossorigin href="{self.font_bold_url}">'
+            )
         faces = ""
+        stack = (
+            "'FiraCode Nerd Font Mono',ui-monospace,'Cascadia Mono',"
+            "'Courier New',monospace"
+        )
         if self.font_reg_url:
             faces += (
                 "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
-                f"font-weight:400;font-display:optional;src:url('{self.font_reg_url}') "
+                f"font-weight:400;font-display:swap;src:url('{self.font_reg_url}') "
                 "format('woff2');}"
             )
         if self.font_bold_url:
             faces += (
                 "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
-                f"font-weight:700;font-display:optional;src:url('{self.font_bold_url}') "
+                f"font-weight:700;font-display:swap;src:url('{self.font_bold_url}') "
                 "format('woff2');}"
             )
         return (
+            f"{preloads}"
             '<style id="cf-remote-theme">'
             f"{faces}"
             "html,body{background:#011627;margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
-            ".xterm-helper-textarea{font-family:'FiraCode Nerd Font Mono',"
-            "ui-monospace,monospace!important;font-feature-settings:'liga' 1,'calt' 1;}"
-            "</style>"
+            f".xterm-helper-textarea{{font-family:{stack}!important;"
+            "font-feature-settings:'liga' 1,'calt' 1;}</style>"
         )
 
     def _pick_internal_port(self) -> int:

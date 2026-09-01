@@ -110,6 +110,7 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.getheader("Content-Type"), "font/woff2")
         self.assertIn("immutable", resp.getheader("Cache-Control") or "")
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
         self.assertEqual(body, b"woff2-bytes")
 
     def test_sw_allows_root_scope(self) -> None:

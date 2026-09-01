@@ -1,16 +1,15 @@
 /* Remote Control service worker: cache fonts/JS, keep HTML+history network-first. */
-/* v=1.2.0 */
-var CACHE = "rc-tty-v1.2.0";
+/* v=1.2.2 */
+var CACHE = "rc-tty-v1.2.2";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
-  var dest = request.destination;
-  return dest === "websocket";
+  return request.destination === "websocket";
 }
 
 function cacheFirst(request) {
   return caches.open(CACHE).then(function (cache) {
-    return cache.match(request).then(function (hit) {
+    return cache.match(request, { ignoreSearch: true }).then(function (hit) {
       if (hit) return hit;
       return fetch(request).then(function (resp) {
         if (resp && resp.ok) cache.put(request, resp.clone());
@@ -41,9 +40,20 @@ function networkFirst(request) {
 self.addEventListener("install", function (event) {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE).then(function (cache) {
-      return cache.addAll(["/", "/rc-assets/cache.js"]).catch(function () {});
-    })
+    fetch("/rc-assets/manifest.json")
+      .then(function (resp) {
+        return resp.ok ? resp.json() : { fonts: [] };
+      })
+      .catch(function () {
+        return { fonts: [] };
+      })
+      .then(function (man) {
+        var urls = ["/rc-assets/cache.js", "/rc-assets/sw.js"].concat(man.fonts || []);
+        return caches.open(CACHE).then(function (cache) {
+          return cache.addAll(urls);
+        });
+      })
+      .catch(function () {})
   );
 });
 
