@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from remote_control import __version__
-from remote_control.mobile import MOBILE_STACK, TOUCH_BOOT_JS, subset_mobile_woff2
+from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
 
 URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 REGISTERED_RE = re.compile(r"Registered tunnel connection")
@@ -596,7 +596,9 @@ class TunnelService:
             if src.is_file():
                 shutil.copy2(src, self.assets_dir / name)
         fonts = [url for url in (self.font_reg_url, self.font_bold_url) if url]
-        mobile_fonts = [self.font_mobile_url] if self.font_mobile_url else []
+        mobile_fonts = [self.font_reg_url] if self.font_reg_url else (
+            [self.font_mobile_url] if self.font_mobile_url else []
+        )
         (self.assets_dir / "manifest.json").write_text(
             json.dumps({"fonts": fonts, "mobileFonts": mobile_fonts}),
             encoding="utf-8",
@@ -637,11 +639,6 @@ class TunnelService:
                 f"font-weight:700;font-display:swap;src:url('{self.font_bold_url}') "
                 "format('woff2');}"
             )
-        if self.font_mobile_url:
-            faces += (
-                "@font-face{font-family:'RC Mono';font-style:normal;font-weight:400;"
-                f"font-display:swap;src:url('{self.font_mobile_url}') format('woff2');}}"
-            )
         return (
             f"{preloads}"
             '<style id="cf-remote-theme">'
@@ -649,11 +646,7 @@ class TunnelService:
             "html,body{background:#011627;margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
             f".xterm-helper-textarea{{font-family:{stack}!important;"
-            "font-feature-settings:'liga' 1,'calt' 1;}"
-            "html.rc-touch body,html.rc-touch .xterm,html.rc-touch .xterm-viewport,"
-            "html.rc-touch .xterm-rows,html.rc-touch .xterm-screen,"
-            "html.rc-touch .xterm-helper-textarea"
-            f"{{font-family:{MOBILE_STACK}!important;}}</style>"
+            "font-feature-settings:'liga' 1,'calt' 1;}</style>"
         )
 
     def _pick_internal_port(self) -> int:

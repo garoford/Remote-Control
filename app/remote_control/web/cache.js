@@ -1,11 +1,11 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.2.3";
+  var VERSION = "1.2.4";
+  var SYSTEM_MONO =
+    "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
-    "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'Courier New', monospace";
-  var MOBILE_STACK =
-    "'RC Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
+    "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
   var skipResetOnce = false;
   var DB_NAME = "rc-term-history";
   var STORE = "tabs";
@@ -334,37 +334,41 @@
     navigator.serviceWorker.register("/rc-assets/sw.js?v=" + VERSION, { scope: "/" }).catch(function () {});
   }
 
-  function activeStack() {
-    return isTouch() ? MOBILE_STACK : FONT_STACK;
-  }
-
   function warmFonts() {
     if (!document.fonts || !document.fonts.load) return Promise.resolve();
-    if (isTouch()) {
-      return document.fonts.load("400 16px 'RC Mono'").catch(function () {});
+    var size = isTouch() ? "16px" : "15px";
+    var loads = [document.fonts.load("400 " + size + " 'FiraCode Nerd Font Mono'")];
+    if (!isTouch()) {
+      loads.push(document.fonts.load("700 15px 'FiraCode Nerd Font Mono'"));
     }
-    return Promise.all([
-      document.fonts.load("400 15px 'FiraCode Nerd Font Mono'"),
-      document.fonts.load("700 15px 'FiraCode Nerd Font Mono'"),
-    ]).catch(function () {});
+    return Promise.all(loads).catch(function () {});
   }
 
-  function applyTermFont() {
+  function applyTermFont(ready) {
     var term = findTerm();
     if (!term) return;
+    var stack = FONT_STACK;
+    if (isTouch() && !ready) stack = SYSTEM_MONO;
     try {
-      if (term.options) term.options.fontFamily = activeStack();
+      if (term.options) term.options.fontFamily = stack;
       if (typeof term.fit === "function") term.fit();
     } catch (_) {}
   }
 
   function bootFonts() {
+    if (isTouch()) waitForTerm(function () {
+      applyTermFont(false);
+    });
     warmFonts().then(function () {
-      waitForTerm(applyTermFont);
+      waitForTerm(function () {
+        applyTermFont(true);
+      });
     });
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(function () {
-        waitForTerm(applyTermFont);
+        waitForTerm(function () {
+          applyTermFont(true);
+        });
       });
     }
   }

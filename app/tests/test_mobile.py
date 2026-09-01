@@ -4,6 +4,7 @@ from pathlib import Path
 
 from remote_control.mobile import (
     manifest_for_client,
+    pick_mobile_font_url,
     request_is_mobile,
     rewrite_index_for_mobile,
     subset_mobile_woff2,
@@ -55,7 +56,7 @@ class MobileUaTests(unittest.TestCase):
 
 
 class RewriteIndexTests(unittest.TestCase):
-    def test_mobile_rewrite_drops_nerd_preload(self) -> None:
+    def test_mobile_rewrite_keeps_regular_drops_bold(self) -> None:
         html = (
             "<html><head>"
             '<link id="rc-font-preload-reg" rel="preload" as="font" '
@@ -65,29 +66,49 @@ class RewriteIndexTests(unittest.TestCase):
             '<style id="cf-remote-theme">@font-face{font-family:\'FiraCode Nerd Font Mono\'}</style>'
             "</head><body>tty</body></html>"
         )
-        out = rewrite_index_for_mobile(html, "/rc-assets/font-mobile-ccc.woff2")
-        self.assertNotIn("rc-font-preload-reg", out)
+        out = rewrite_index_for_mobile(html, "/rc-assets/font-regular-aaa.woff2")
+        self.assertNotIn("font-bold-bbb", out)
         self.assertNotIn("rc-font-preload-bold", out)
-        self.assertNotIn("font-regular-aaa", out)
-        self.assertNotIn("FiraCode Nerd Font Mono", out)
-        self.assertIn("rc-font-preload-mobile", out)
-        self.assertIn("/rc-assets/font-mobile-ccc.woff2", out)
-        self.assertIn("RC Mono", out)
+        self.assertIn("rc-font-preload-reg", out)
+        self.assertIn("/rc-assets/font-regular-aaa.woff2", out)
+        self.assertIn("FiraCode Nerd Font Mono", out)
         self.assertIn("ui-monospace", out)
         self.assertIn("font-display:swap", out)
+        self.assertNotIn("RC Mono", out)
 
-    def test_manifest_picks_mobile_fonts(self) -> None:
+    def test_empty_url_recovers_regular_from_html(self) -> None:
+        html = (
+            "<html><head>"
+            '<link id="rc-font-preload-reg" rel="preload" as="font" '
+            'href="/rc-assets/font-regular-aaa.woff2">'
+            "</head><body>tty</body></html>"
+        )
+        out = rewrite_index_for_mobile(html, "")
+        self.assertIn("/rc-assets/font-regular-aaa.woff2", out)
+        self.assertIn("@font-face", out)
+        self.assertIn("FiraCode Nerd Font Mono", out)
+
+    def test_manifest_falls_back_to_regular(self) -> None:
         man = {
-            "fonts": ["/rc-assets/font-regular-aaa.woff2"],
-            "mobileFonts": ["/rc-assets/font-mobile-ccc.woff2"],
+            "fonts": [
+                "/rc-assets/font-regular-aaa.woff2",
+                "/rc-assets/font-bold-bbb.woff2",
+            ]
         }
         self.assertEqual(
+            pick_mobile_font_url(man),
+            "/rc-assets/font-regular-aaa.woff2",
+        )
+        self.assertEqual(
             manifest_for_client(man, True)["fonts"],
-            ["/rc-assets/font-mobile-ccc.woff2"],
+            ["/rc-assets/font-regular-aaa.woff2"],
         )
         self.assertEqual(
             manifest_for_client(man, False)["fonts"],
-            ["/rc-assets/font-regular-aaa.woff2"],
+            [
+                "/rc-assets/font-regular-aaa.woff2",
+                "/rc-assets/font-bold-bbb.woff2",
+            ],
         )
 
 

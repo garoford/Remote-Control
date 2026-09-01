@@ -67,7 +67,7 @@ html.rc-touch #rc-extra-keys {
   border-radius: 8px;
   background: #0b2942;
   color: #d6deeb;
-  font: 700 12px/1 "RC Mono", "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  font: 700 12px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
   letter-spacing: 0.3px;
   -webkit-tap-highlight-color: transparent;
   -webkit-user-select: none;
@@ -113,7 +113,7 @@ html.rc-touch #rc-extra-keys {
   border-radius: 999px;
   background: #1d3b53;
   color: #d6deeb;
-  font: 700 11px/1 "RC Mono", "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  font: 700 11px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
   letter-spacing: 0.2px;
   pointer-events: none;
   box-shadow: 0 2px 10px rgba(1, 22, 39, 0.45);
@@ -127,7 +127,7 @@ html.rc-touch #rc-extra-keys {
   display: none;
   text-align: center;
   color: #ffeb95;
-  font: 700 11px/1.2 "RC Mono", ui-monospace, monospace;
+  font: 700 11px/1.2 "FiraCode Nerd Font Mono", ui-monospace, monospace;
   padding: 2px 0 0;
 }
 

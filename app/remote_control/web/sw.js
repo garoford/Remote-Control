@@ -1,6 +1,6 @@
 /* Remote Control service worker: cache fonts/JS, keep HTML+history network-first. */
-/* v=1.2.3 */
-var CACHE = "rc-tty-v1.2.3";
+/* v=1.2.4 */
+var CACHE = "rc-tty-v1.2.4";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;

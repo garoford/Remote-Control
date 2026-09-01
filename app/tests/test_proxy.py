@@ -145,7 +145,7 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertIn(b"rc-font-preload-reg", body)
         self.assertEqual(resp.status, 200)
 
-    def test_mobile_index_drops_nerd_preload(self) -> None:
+    def test_mobile_index_keeps_regular_font(self) -> None:
         resp = self._get(
             "/",
             {
@@ -159,10 +159,9 @@ class ProxyAssetTests(unittest.TestCase):
         body = resp.read()
         self.assertEqual(resp.status, 200)
         self.assertIn(b"ttyd-index", body)
-        self.assertNotIn(b"rc-font-preload-reg", body)
-        self.assertNotIn(b"FiraCode Nerd Font Mono", body)
-        self.assertIn(b"RC Mono", body)
-        self.assertIn(b"font-mobile-ccc.woff2", body)
+        self.assertNotIn(b"font-bold-bbb", body)
+        self.assertIn(b"FiraCode Nerd Font Mono", body)
+        self.assertIn(self.font_name.encode(), body)
         self.assertIn("User-Agent", resp.getheader("Vary") or "")
 
     def test_manifest_follows_ua(self) -> None:
@@ -174,7 +173,7 @@ class ProxyAssetTests(unittest.TestCase):
                 {"Sec-CH-UA-Mobile": "?1"},
             ).read()
         )
-        self.assertEqual(mobile["fonts"], ["/rc-assets/font-mobile-ccc.woff2"])
+        self.assertEqual(mobile["fonts"], [f"/rc-assets/{self.font_name}"])
 
     def test_token_is_proxied(self) -> None:
         resp = self._get("/token")

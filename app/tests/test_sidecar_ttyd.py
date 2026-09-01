@@ -90,10 +90,11 @@ class SidecarTtydTests(unittest.TestCase):
             phone.close()
             phone_data = b"".join(phone_chunks)
             self.assertIn(b"200", phone_data.split(b"\r\n", 1)[0])
-            self.assertNotIn(b"rc-font-preload-reg", phone_data)
             self.assertIn(b"ui-monospace", phone_data)
-            if svc.font_mobile_url:
-                self.assertIn(svc.font_mobile_url.encode(), phone_data)
+            self.assertIn(b"FiraCode Nerd Font Mono", phone_data)
+            if svc.font_reg_url:
+                self.assertIn(svc.font_reg_url.encode(), phone_data)
+            self.assertNotIn(b"font-bold-", phone_data.split(b"<body>", 1)[0] if b"<body>" in phone_data else phone_data)
             if svc.font_reg_url:
                 self.assertIn(svc.font_reg_url.encode(), data)
                 font = socket.create_connection(("127.0.0.1", listen), timeout=3)

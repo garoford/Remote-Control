@@ -16,7 +16,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import history_payload
-from remote_control.mobile import manifest_for_client, request_is_mobile, rewrite_index_for_mobile
+from remote_control.mobile import (
+    load_manifest,
+    manifest_for_client,
+    pick_mobile_font_url,
+    request_is_mobile,
+    rewrite_index_for_mobile,
+)
 
 ASSET_CACHE = "public, max-age=31536000, immutable"
 SCRIPT_CACHE = "public, max-age=300"
@@ -300,7 +306,11 @@ class Sidecar:
                 raw_man = {}
             if not isinstance(raw_man, dict):
                 raw_man = {}
-            payload = manifest_for_client(raw_man, request_is_mobile(req_headers or {}))
+            payload = manifest_for_client(
+                raw_man,
+                request_is_mobile(req_headers or {}),
+                self.assets,
+            )
             data = json.dumps(payload).encode("utf-8")
             ctype = "application/json; charset=utf-8"
             if head_only:
@@ -388,17 +398,7 @@ class Sidecar:
                 pass
 
     def _mobile_font_url(self) -> str:
-        path = self.assets / "manifest.json"
-        if not path.is_file():
-            return ""
-        try:
-            man = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return ""
-        fonts = man.get("mobileFonts") if isinstance(man, dict) else None
-        if isinstance(fonts, list) and fonts:
-            return str(fonts[0])
-        return ""
+        return pick_mobile_font_url(load_manifest(self.assets), self.assets)
 
     def _proxy_html(
         self,

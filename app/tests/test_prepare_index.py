@@ -23,13 +23,12 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertNotIn("base64", css)
         self.assertIn("ui-monospace", css)
         self.assertIn("rc-touch-boot", html)
-        self.assertIn("cache.js?v=1.2.3", html)
+        self.assertIn("cache.js?v=1.2.4", html)
         manifest = svc.assets_dir / "manifest.json"
         self.assertTrue(manifest.is_file())
         text = manifest.read_text(encoding="utf-8")
         self.assertIn("fonts", text)
         self.assertIn("mobileFonts", text)
-        if svc.font_mobile_url:
-            self.assertIn(svc.font_mobile_url, text)
-            self.assertIn("RC Mono", css)
-            self.assertTrue((svc.assets_dir / svc.font_mobile_url.rsplit("/", 1)[-1]).is_file())
+        if svc.font_reg_url:
+            self.assertIn(svc.font_reg_url, text)
+            self.assertNotIn("RC Mono", css)
