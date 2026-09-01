@@ -56,6 +56,38 @@ def flush_resolved_cache() -> None:
         stderr=subprocess.DEVNULL,
         check=False,
     )
+
+
+def dns_via_dig(host: str, server: str) -> bool:
+    """Ask a recursive resolver directly. Does not touch systemd-resolved."""
+    dig = shutil.which("dig")
+    if not dig:
+        return False
+    for qtype in ("A", "AAAA"):
+        result = subprocess.run(
+            [dig, f"@{server}", "+time=2", "+tries=1", "+short", host, qtype],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith(";"):
+                continue
+            if line[0].isdigit() or ":" in line:
+                return True
+    return False
+
+
+def public_resolvers_ready(host: str) -> bool:
+    """1.1.1.1 is fast; Chrome here uses 8.8.8.8 via resolved. Wait for both."""
+    if not dns_via_doh(host):
+        return False
+    return dns_via_dig(host, "8.8.8.8") or dns_via_dig(host, "8.8.4.4")
+
+
 DEFAULT_PORT = 7681
 NIGHT_OWL_THEME = (
     '{"background":"#011627","foreground":"#d6deeb","cursor":"#80A4C2",'
@@ -167,7 +199,7 @@ class TunnelService:
         self._start_proxy()
         self._start_cloudflared()
         url = self._wait_for_url(timeout=60)
-        self._wait_until_public(url, timeout=45)
+        self._wait_until_public(url, timeout=70)
         self.url_file.write_text(url + "\n", encoding="utf-8")
         self.url_file.chmod(0o600)
         return url
@@ -348,12 +380,11 @@ class TunnelService:
         text = self.log_file.read_text(encoding="utf-8", errors="replace")
         return bool(REGISTERED_RE.search(text))
 
-    def _wait_until_public(self, url: str, timeout: int = 45) -> None:
-        """Don't call the tunnel ready until public DNS exists.
+    def _wait_until_public(self, url: str, timeout: int = 70) -> None:
+        """Don't mark ready until the resolver Chrome uses can see the name.
 
-        Querying the system resolver too early plants an NXDOMAIN in
-        systemd-resolved; Chrome then keeps failing. Ask 1.1.1.1 first,
-        flush the stub cache, then confirm getaddrinfo.
+        1.1.1.1 publishes first. If we getaddrinfo() before 8.8.8.8 has the
+        record, systemd-resolved caches NXDOMAIN and Chrome stays broken.
         """
         host = urlparse(url).hostname or ""
         if not host:
@@ -363,15 +394,18 @@ class TunnelService:
             if not self._alive_pid(self.cf_pid_file):
                 tail = self.log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
                 raise TunnelError("cloudflared se detuvo antes de publicar DNS.\n" + tail)
-            if dns_via_doh(host):
+            if public_resolvers_ready(host):
                 flush_resolved_cache()
-                ready_until = min(deadline, time.time() + 8)
-                while time.time() < ready_until:
-                    if host_resolves(host):
-                        return
-                    time.sleep(0.4)
-                return
-            time.sleep(0.6)
+                time.sleep(0.5)
+                if host_resolves(host):
+                    return
+                time.sleep(2.0)
+                flush_resolved_cache()
+                time.sleep(0.3)
+                if host_resolves(host):
+                    return
+                # Keep waiting; do not poll getaddrinfo in a tight loop.
+            time.sleep(0.8)
         flush_resolved_cache()
 
     def _url_from_log(self) -> str | None:

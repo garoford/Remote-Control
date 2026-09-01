@@ -335,7 +335,18 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _on_open(self, *_args) -> None:
         if not self._current_url:
             return
-        Gio.AppInfo.launch_default_for_uri(self._current_url, None)
+        from urllib.parse import urlparse
+
+        from remote_control.tunnel import host_resolves
+
+        host = urlparse(self._current_url).hostname or ""
+        if host and host_resolves(host):
+            Gio.AppInfo.launch_default_for_uri(self._current_url, None)
+            return
+        Gio.AppInfo.launch_default_for_uri(
+            f"http://127.0.0.1:{self.tunnel.port}/", None
+        )
+        self._toast("DNS público aún no; abrí en local")
 
     def _poll_status(self) -> bool:
         if self._busy:
