@@ -46,7 +46,7 @@ checkout_src() {
     git -C "$SRC" remote set-url origin "$(git -C "$here" remote get-url origin)"
     git -C "$SRC" fetch --quiet origin main || true
     # Prefer the working tree we launched from.
-    printf '%s\n' "$here"
+    TREE="$here"
     return
   fi
 
@@ -58,17 +58,18 @@ checkout_src() {
     git -C "$SRC" remote set-url origin "$REPO_URL"
     git -C "$SRC" fetch --quiet origin main
     git -C "$SRC" checkout -q main
-    git -C "$SRC" reset --hard origin/main
+    git -C "$SRC" reset --hard origin/main >/dev/null
   else
     mkdir -p "$SHARE"
     git clone --branch main --single-branch "$REPO_URL" "$SRC"
   fi
-  printf '%s\n' "$SRC"
+  TREE="$SRC"
 }
 
 install_pkgs
-TREE="$(checkout_src)"
-[[ -x "$TREE/app/install.sh" || -f "$TREE/app/install.sh" ]] || die "No encuentro app/install.sh en $TREE"
+TREE=""
+checkout_src
+[[ -f "$TREE/app/install.sh" ]] || die "No encuentro app/install.sh en $TREE"
 bash "$TREE/app/install.sh"
 
 log ""
