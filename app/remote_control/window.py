@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -12,6 +13,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from remote_control.tunnel import TunnelService
+from remote_control.updater import check_and_apply, running_from_install
 
 
 class RemoteControlWindow(Adw.ApplicationWindow):
@@ -26,11 +28,15 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._busy = False
         self._current_url: str | None = None
         self._syncing_switch = False
+        self._last_update_check = 0.0
+        self._update_debounce = 25.0
 
         self._load_css()
         self._build()
         self._refresh_from_status()
         GLib.timeout_add_seconds(2, self._poll_status)
+        self.connect("notify::is-active", self._on_is_active)
+        self._maybe_check_update(force=True)
 
     def _load_css(self) -> None:
         provider = Gtk.CssProvider()
@@ -383,7 +389,32 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.error_label.set_tooltip_text(message)
         self.error_label.set_visible(True)
 
-    def _toast(self, title: str) -> None:
+    def _on_is_active(self, *_args) -> None:
+        if self.is_active():
+            self._maybe_check_update()
+
+    def _maybe_check_update(self, force: bool = False) -> None:
+        if not running_from_install():
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_update_check) < self._update_debounce:
+            return
+        self._last_update_check = now
+        threading.Thread(target=self._run_update_check, daemon=True).start()
+
+    def _run_update_check(self) -> None:
+        try:
+            updated = check_and_apply()
+        except Exception:
+            return
+        if updated:
+            GLib.idle_add(self._on_app_updated)
+
+    def _on_app_updated(self) -> bool:
+        self._toast("Actualizado; reinicia la app para cargar todo.", timeout=6)
+        return False
+
+    def _toast(self, title: str, timeout: int = 2) -> None:
         toast = Adw.Toast(title=title)
-        toast.set_timeout(2)
+        toast.set_timeout(timeout)
         self.toasts.add_toast(toast)

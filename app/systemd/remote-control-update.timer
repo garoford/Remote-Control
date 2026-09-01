@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Remote Control updates every 3 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=3min
+Persistent=true
+Unit=remote-control-update.service
+
+[Install]
+WantedBy=timers.target

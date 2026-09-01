@@ -1,0 +1,7 @@
+[Unit]
+Description=Remote Control update from GitHub main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/remote-control/update.sh

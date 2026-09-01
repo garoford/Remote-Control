@@ -12,7 +12,10 @@ mkdir -p "$APP_SHARE" "$BIN" "$DESKTOP_DIR"
 mkdir -p "$ICON_BASE/scalable/apps"
 mkdir -p "$ICON_BASE/256x256/apps" "$ICON_BASE/128x128/apps" "$ICON_BASE/64x64/apps"
 
+# Only the Python package is replaced. The git clone lives in $APP_SHARE/src
+# and must not be deleted by this rsync.
 rsync -a --delete "$ROOT/remote_control/" "$APP_SHARE/remote_control/"
+install -m 755 "$ROOT/update.sh" "$APP_SHARE/update.sh"
 
 cat > "$BIN/remote-control" <<'EOF'
 #!/usr/bin/env python3
@@ -64,5 +67,22 @@ if command -v gio >/dev/null 2>&1; then
     metadata::trusted true >/dev/null 2>&1 || true
 fi
 
+_install_updater() {
+  local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$unit_dir"
+  install -m 644 "$ROOT/systemd/remote-control-update.service" \
+    "$unit_dir/remote-control-update.service"
+  install -m 644 "$ROOT/systemd/remote-control-update.timer" \
+    "$unit_dir/remote-control-update.timer"
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now remote-control-update.timer >/dev/null
+  else
+    printf '%s\n' "Aviso: no se activó el timer (sin sesión systemd de usuario)."
+  fi
+}
+_install_updater
+
 printf '%s\n' "Instalado: $BIN/remote-control"
 printf '%s\n' "Launcher: $DESKTOP_DIR/dev.garoford.RemoteControl.desktop"
+printf '%s\n' "Auto-update: systemctl --user disable --now remote-control-update.timer"
