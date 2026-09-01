@@ -94,3 +94,23 @@ html.rc-touch #rc-extra-keys {
   border-color: #82aaff;
   color: #011627;
 }
+
+#rc-net-badge {
+  position: fixed;
+  z-index: 2147483001;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #1d3b53;
+  color: #d6deeb;
+  font: 700 11px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(1, 22, 39, 0.45);
+}
+
+#rc-net-badge[hidden] {
+  display: none;
+}

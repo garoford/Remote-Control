@@ -1,0 +1,161 @@
+import hashlib
+import http.client
+import http.server
+import json
+import socket
+import threading
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from remote_control.proxy import Sidecar
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _Upstream(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path.startswith("/token"):
+            body = b'{"token":"test"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = b"ttyd-index"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        return
+
+
+class ProxyAssetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.assets = Path(self.tmp.name)
+        payload = b"woff2-bytes"
+        digest = hashlib.sha256(payload).hexdigest()[:12]
+        self.font_name = f"font-regular-{digest}.woff2"
+        (self.assets / self.font_name).write_bytes(payload)
+        (self.assets / "cache.js").write_text("window.RC_CACHE=1;", encoding="utf-8")
+        (self.assets / "sw.js").write_text("self.RC_SW=1;", encoding="utf-8")
+
+        self.up_port = _free_port()
+        self.listen_port = _free_port()
+        self.upstream = http.server.HTTPServer(("127.0.0.1", self.up_port), _Upstream)
+        self.up_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
+        self.up_thread.start()
+        self.sidecar = Sidecar(
+            "127.0.0.1",
+            self.listen_port,
+            "127.0.0.1",
+            self.up_port,
+            self.assets,
+        )
+        self.side_thread = threading.Thread(target=self.sidecar.serve_forever, daemon=True)
+        self.side_thread.start()
+        self._wait_port(self.listen_port)
+
+    def tearDown(self) -> None:
+        self.sidecar.stop()
+        self.upstream.shutdown()
+        self.tmp.cleanup()
+
+    def _wait_port(self, port: int) -> None:
+        for _ in range(40):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    return
+            except OSError:
+                pass
+        self.fail(f"port {port} did not open")
+
+    def _get(self, path: str):
+        conn = http.client.HTTPConnection("127.0.0.1", self.listen_port, timeout=3)
+        try:
+            conn.request("GET", path)
+            raw = conn.getresponse()
+            body = raw.read()
+            headers = {key.lower(): value for key, value in raw.getheaders()}
+
+            class _Resp:
+                def __init__(self) -> None:
+                    self.status = raw.status
+                    self._body = body
+                    self._headers = headers
+
+                def read(self) -> bytes:
+                    return self._body
+
+                def getheader(self, name: str) -> str | None:
+                    return self._headers.get(name.lower())
+
+            return _Resp()
+        finally:
+            conn.close()
+
+    def test_font_is_immutable(self) -> None:
+        resp = self._get(f"/rc-assets/{self.font_name}")
+        body = resp.read()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "font/woff2")
+        self.assertIn("immutable", resp.getheader("Cache-Control") or "")
+        self.assertEqual(body, b"woff2-bytes")
+
+    def test_sw_allows_root_scope(self) -> None:
+        resp = self._get("/rc-assets/sw.js")
+        resp.read()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Service-Worker-Allowed"), "/")
+
+    def test_index_is_proxied(self) -> None:
+        resp = self._get("/")
+        self.assertEqual(resp.read(), b"ttyd-index")
+        self.assertEqual(resp.status, 200)
+
+    def test_token_is_proxied(self) -> None:
+        resp = self._get("/token")
+        self.assertEqual(json.loads(resp.read()), {"token": "test"})
+
+    def test_unknown_asset_is_404(self) -> None:
+        resp = self._get("/rc-assets/../tunnel.py")
+        resp.read()
+        self.assertEqual(resp.status, 404)
+
+    def test_history_unknown_tab_is_404(self) -> None:
+        resp = self._get("/rc-history?tab=rcnotasession1")
+        resp.read()
+        self.assertEqual(resp.status, 404)
+
+    def test_websocket_upgrade_is_spliced(self) -> None:
+        raw = socket.create_connection(("127.0.0.1", self.listen_port), timeout=3)
+        try:
+            raw.sendall(
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n"
+                b"\r\n"
+            )
+            data = raw.recv(4096)
+            # Dummy upstream is HTTP/1.1 200, not 101 — splice must still
+            # deliver the upstream response through the sidecar.
+            self.assertTrue(data.startswith(b"HTTP/1.") and b" 200" in data[:20])
+            self.assertIn(b"ttyd-index", data)
+        finally:
+            raw.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

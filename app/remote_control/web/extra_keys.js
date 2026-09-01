@@ -56,6 +56,14 @@
           : [];
       if (list.indexOf("tty") !== -1 || /\/ws/.test(String(url))) {
         window.__rcTermSocket = ws;
+        ws.addEventListener("open", function () {
+          setTimeout(function () {
+            window.dispatchEvent(new CustomEvent("rc-ws-open"));
+          }, 0);
+        });
+        ws.addEventListener("close", function () {
+          window.dispatchEvent(new CustomEvent("rc-ws-close"));
+        });
       }
       return ws;
     }

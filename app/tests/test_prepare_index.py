@@ -1,0 +1,21 @@
+import unittest
+
+from remote_control.tunnel import TunnelService
+
+
+class PrepareIndexTests(unittest.TestCase):
+    def test_fonts_are_hashed_urls_not_base64(self) -> None:
+        svc = TunnelService()
+        svc.ensure_dirs()
+        svc._prepare_rc_assets()
+        svc._prepare_ttyd_index()
+        html = svc.ttyd_index.read_text(encoding="utf-8")
+        self.assertNotIn("data:font", html)
+        self.assertNotIn("jsdelivr.net", html)
+        self.assertIn("/rc-assets/cache.js", html)
+        if svc.font_reg_url:
+            self.assertIn(svc.font_reg_url, html)
+            self.assertTrue((svc.assets_dir / svc.font_reg_url.rsplit("/", 1)[-1]).is_file())
+        css = svc._font_css()
+        self.assertIn("font-display:optional", css)
+        self.assertNotIn("base64", css)

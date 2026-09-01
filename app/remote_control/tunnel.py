@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,7 @@ class TunnelStatus:
     port: int
     ttyd_pid: int | None
     cloudflared_pid: int | None
+    proxy_pid: int | None
 
 
 class TunnelService:
@@ -52,6 +55,13 @@ class TunnelService:
         self.pid_dir = self.run_dir / "pids"
         self.ttyd_pid_file = self.pid_dir / "ttyd.pid"
         self.cf_pid_file = self.pid_dir / "cloudflared.pid"
+        self.proxy_pid_file = self.pid_dir / "proxy.pid"
+        self.ttyd_port_file = self.pid_dir / "ttyd.port"
+        self.proxy_log = self.run_dir / "proxy.log"
+        self.assets_dir = self.run_dir / "rc-assets"
+        self.ttyd_port = self.port + 1
+        self.font_reg_url = ""
+        self.font_bold_url = ""
         self.ttyd_index = self.run_dir / "ttyd-index.html"
         fonts = self.home / ".local" / "share" / "fonts" / "FiraCode"
         self.font_reg_ttf = fonts / "FiraCodeNerdFontMono-Regular.ttf"
@@ -63,6 +73,7 @@ class TunnelService:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.pid_dir.mkdir(parents=True, exist_ok=True)
         self.font_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
@@ -80,7 +91,8 @@ class TunnelService:
     def status(self) -> TunnelStatus:
         ttyd_pid = self._alive_pid(self.ttyd_pid_file)
         cf_pid = self._alive_pid(self.cf_pid_file)
-        running = bool(ttyd_pid and cf_pid)
+        proxy_pid = self._alive_pid(self.proxy_pid_file)
+        running = bool(ttyd_pid and cf_pid and proxy_pid)
         url = None
         if self.url_file.is_file():
             text = self.url_file.read_text(encoding="utf-8").strip()
@@ -94,6 +106,7 @@ class TunnelService:
             port=self.port,
             ttyd_pid=ttyd_pid,
             cloudflared_pid=cf_pid,
+            proxy_pid=proxy_pid,
         )
 
     def start(self) -> str:
@@ -104,9 +117,13 @@ class TunnelService:
             )
         self.ensure_dirs()
         self.stop(silent=True)
+        self.ttyd_port = self._pick_internal_port()
+        self.ttyd_port_file.write_text(str(self.ttyd_port), encoding="utf-8")
         self._prepare_tab_session()
+        self._prepare_rc_assets()
         self._prepare_ttyd_index()
         self._start_ttyd()
+        self._start_proxy()
         self._start_cloudflared()
         url = self._wait_for_url(timeout=60)
         self.url_file.write_text(url + "\n", encoding="utf-8")
@@ -114,17 +131,25 @@ class TunnelService:
         return url
 
     def stop(self, silent: bool = False) -> None:
+        self._kill_pidfile(self.proxy_pid_file)
         self._kill_pidfile(self.ttyd_pid_file)
         self._kill_pidfile(self.cf_pid_file)
-        self._pkill(f"ttyd --interface 127.0.0.1 --port {self.port}")
+        self._pkill("remote_control.proxy")
+        self._pkill("ttyd --interface 127.0.0.1 --port")
         self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
+        self.ttyd_port_file.unlink(missing_ok=True)
         subprocess.run(
             ["tmux", "-L", "cf-remote", "kill-server"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        for path in (self.ttyd_pid_file, self.cf_pid_file, self.url_file):
+        for path in (
+            self.ttyd_pid_file,
+            self.cf_pid_file,
+            self.proxy_pid_file,
+            self.url_file,
+        ):
             path.unlink(missing_ok=True)
         if not silent:
             self.log_file.unlink(missing_ok=True)
@@ -156,7 +181,7 @@ class TunnelService:
             "--interface",
             "127.0.0.1",
             "--port",
-            str(self.port),
+            str(self.ttyd_port),
             "--writable",
             "--url-arg",
             "--cwd",
@@ -191,10 +216,52 @@ class TunnelService:
                 start_new_session=True,
             )
         self.ttyd_pid_file.write_text(str(proc.pid), encoding="utf-8")
-        time.sleep(0.8)
-        if proc.poll() is not None:
-            tail = self.ttyd_log.read_text(encoding="utf-8", errors="replace")[-2000:]
-            raise TunnelError("ttyd no arrancó.\n" + tail)
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                tail = self.ttyd_log.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise TunnelError("ttyd no arrancó.\n" + tail)
+            if self._port_open(self.ttyd_port):
+                return
+            time.sleep(0.1)
+        raise TunnelError("ttyd no abrió el puerto.")
+
+    def _start_proxy(self) -> None:
+        pkg_root = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(pkg_root) + (os.pathsep + prev if prev else "")
+        cmd = [
+            sys.executable,
+            "-m",
+            "remote_control.proxy",
+            "--listen",
+            f"127.0.0.1:{self.port}",
+            "--upstream",
+            f"127.0.0.1:{self.ttyd_port}",
+            "--assets",
+            str(self.assets_dir),
+            "--tmux-socket",
+            "cf-remote",
+        ]
+        with self.proxy_log.open("w", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        self.proxy_pid_file.write_text(str(proc.pid), encoding="utf-8")
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                tail = self.proxy_log.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise TunnelError("El sidecar no arrancó.\n" + tail)
+            if self._port_open(self.port):
+                return
+            time.sleep(0.1)
+        raise TunnelError("El sidecar no abrió el puerto.")
 
     def _start_cloudflared(self) -> None:
         self.log_file.write_text("", encoding="utf-8")
@@ -245,7 +312,6 @@ class TunnelService:
         if not html:
             return
         html = self._strip_injects(html)
-        self._ensure_woff2_fonts()
         inject = self._font_css() + self._web_inject()
         if "<head>" in html:
             html = html.replace("<head>", "<head>" + inject, 1)
@@ -306,6 +372,7 @@ class TunnelService:
         html = self._strip_tagged(html, "style", "rc-extra-keys-css")
         html = self._strip_tagged(html, "script", "rc-tab-session-js")
         html = self._strip_tagged(html, "script", "rc-extra-keys-js")
+        html = self._strip_tagged(html, "script", "rc-cache-js")
         token = '<meta id="rc-viewport"'
         start = html.find(token)
         if start >= 0:
@@ -336,6 +403,9 @@ class TunnelService:
             parts.append(
                 f'<script id="rc-extra-keys-js">{keys_js.read_text(encoding="utf-8")}</script>'
             )
+        parts.append(
+            '<script id="rc-cache-js" src="/rc-assets/cache.js?v=1.2.0"></script>'
+        )
         return "".join(parts)
 
     def _prepare_tab_session(self) -> None:
@@ -367,36 +437,68 @@ class TunnelService:
             font.flavor = "woff2"
             font.save(str(dst))
 
-    def _font_css(self) -> str:
-        if self.font_reg_woff.is_file() and self.font_bold_woff.is_file():
-            import base64
+    def _prepare_rc_assets(self) -> None:
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+        for stale in self.assets_dir.glob("font-*.woff2"):
+            stale.unlink(missing_ok=True)
+        self._ensure_woff2_fonts()
+        self.font_reg_url = ""
+        self.font_bold_url = ""
+        if self.font_reg_woff.is_file():
+            self.font_reg_url = self._publish_font(self.font_reg_woff, "regular")
+        if self.font_bold_woff.is_file():
+            self.font_bold_url = self._publish_font(self.font_bold_woff, "bold")
+        web = Path(__file__).with_name("web")
+        for name in ("cache.js", "sw.js"):
+            src = web / name
+            if src.is_file():
+                shutil.copy2(src, self.assets_dir / name)
 
-            src_reg = (
-                "url(data:font/woff2;base64,"
-                + base64.b64encode(self.font_reg_woff.read_bytes()).decode("ascii")
-                + ") format('woff2')"
+    def _publish_font(self, src: Path, weight: str) -> str:
+        digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+        name = f"font-{weight}-{digest}.woff2"
+        shutil.copy2(src, self.assets_dir / name)
+        return f"/rc-assets/{name}"
+
+    def _font_css(self) -> str:
+        faces = ""
+        if self.font_reg_url:
+            faces += (
+                "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
+                f"font-weight:400;font-display:optional;src:url('{self.font_reg_url}') "
+                "format('woff2');}"
             )
-            src_bold = (
-                "url(data:font/woff2;base64,"
-                + base64.b64encode(self.font_bold_woff.read_bytes()).decode("ascii")
-                + ") format('woff2')"
+        if self.font_bold_url:
+            faces += (
+                "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
+                f"font-weight:700;font-display:optional;src:url('{self.font_bold_url}') "
+                "format('woff2');}"
             )
-        else:
-            cdn = "https://cdn.jsdelivr.net/gh/mshaugh/nerdfont-webfonts@v3.3.0/build/fonts"
-            src_reg = f"url('{cdn}/FiraCodeNerdFontMono-Regular.woff2') format('woff2')"
-            src_bold = f"url('{cdn}/FiraCodeNerdFontMono-Bold.woff2') format('woff2')"
         return (
             '<style id="cf-remote-theme">'
-            "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
-            f"font-weight:400;font-display:block;src:{src_reg};}}"
-            "@font-face{font-family:'FiraCode Nerd Font Mono';font-style:normal;"
-            f"font-weight:700;font-display:block;src:{src_bold};}}"
-            "html,body{{background:#011627;margin:0;height:100%;}}"
+            f"{faces}"
+            "html,body{background:#011627;margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
-            ".xterm-helper-textarea{{font-family:'FiraCode Nerd Font Mono',"
-            "ui-monospace,monospace!important;font-feature-settings:'liga' 1,'calt' 1;}}"
+            ".xterm-helper-textarea{font-family:'FiraCode Nerd Font Mono',"
+            "ui-monospace,monospace!important;font-feature-settings:'liga' 1,'calt' 1;}"
             "</style>"
         )
+
+    def _pick_internal_port(self) -> int:
+        candidate = self.port + 1
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", candidate))
+                return candidate
+            except OSError:
+                return self._free_port()
+
+    def _port_open(self, port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
 
     def _resolve_user_shell(self) -> str:
         candidates: list[str] = []

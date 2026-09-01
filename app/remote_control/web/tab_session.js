@@ -83,19 +83,29 @@
 
   function ensureTabArg() {
     var id = getTabId();
+    document.documentElement.dataset.rcTab = id;
     if (currentArg() === id) {
-      document.documentElement.dataset.rcTab = id;
       return true;
     }
-    window.__rcRedirecting = true;
     try {
       var params = new URLSearchParams(location.search);
       params.delete("arg");
       params.append("arg", id);
       var q = params.toString();
-      location.replace(location.pathname + (q ? "?" + q : "") + location.hash);
-    } catch (_) {}
-    return false;
+      var next = location.pathname + (q ? "?" + q : "") + location.hash;
+      history.replaceState(null, "", next);
+      return true;
+    } catch (_) {
+      window.__rcRedirecting = true;
+      try {
+        var fallback = new URLSearchParams(location.search);
+        fallback.delete("arg");
+        fallback.append("arg", id);
+        var fq = fallback.toString();
+        location.replace(location.pathname + (fq ? "?" + fq : "") + location.hash);
+      } catch (__) {}
+      return false;
+    }
   }
 
   ensureTabArg();
