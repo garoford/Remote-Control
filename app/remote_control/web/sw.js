@@ -1,6 +1,6 @@
 /* Remote Control service worker: cache fonts/JS, keep HTML+history network-first. */
-/* v=1.2.4 */
-var CACHE = "rc-tty-v1.2.4";
+/* v=1.2.5 */
+var CACHE = "rc-tty-v1.2.5";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
@@ -15,9 +15,9 @@ function addBestEffort(cache, urls) {
   );
 }
 
-function cacheFirst(request) {
+function cacheFirst(request, ignoreSearch) {
   return caches.open(CACHE).then(function (cache) {
-    return cache.match(request, { ignoreSearch: true }).then(function (hit) {
+    return cache.match(request, { ignoreSearch: !!ignoreSearch }).then(function (hit) {
       if (hit) return hit;
       return fetch(request).then(function (resp) {
         if (resp && resp.ok) cache.put(request, resp.clone());
@@ -27,10 +27,10 @@ function cacheFirst(request) {
   });
 }
 
-function networkFirst(request) {
+function networkFirst(request, store) {
   return fetch(request)
     .then(function (resp) {
-      if (resp && resp.ok) {
+      if (store && resp && resp.ok) {
         var copy = resp.clone();
         caches.open(CACHE).then(function (cache) {
           cache.put(request, copy);
@@ -55,7 +55,9 @@ self.addEventListener("install", function (event) {
         return { fonts: [] };
       })
       .then(function (man) {
-        var urls = ["/rc-assets/cache.js", "/rc-assets/sw.js"].concat(man.fonts || []);
+        var urls = ["/rc-assets/cache.js?v=1.2.5", "/rc-assets/sw.js?v=1.2.5"].concat(
+          man.fonts || []
+        );
         return caches.open(CACHE).then(function (cache) {
           return addBestEffort(cache, urls);
         });
@@ -102,18 +104,22 @@ self.addEventListener("fetch", function (event) {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.indexOf("/ws") === 0) return;
   if (url.pathname === "/rc-assets/manifest.json") {
-    event.respondWith(networkFirst(request));
+    event.respondWith(networkFirst(request, false));
     return;
   }
   if (url.pathname.indexOf("/rc-assets/") === 0) {
-    event.respondWith(cacheFirst(request));
+    event.respondWith(cacheFirst(request, /\.woff2$/.test(url.pathname)));
     return;
   }
-  if (/\.(js|css|wasm|woff2)$/.test(url.pathname)) {
-    event.respondWith(cacheFirst(request));
+  if (/\.woff2$/.test(url.pathname)) {
+    event.respondWith(cacheFirst(request, true));
+    return;
+  }
+  if (/\.(js|css|wasm)$/.test(url.pathname)) {
+    event.respondWith(cacheFirst(request, false));
     return;
   }
   if (url.pathname === "/rc-history" || url.pathname === "/" || url.pathname === "/index.html") {
-    event.respondWith(networkFirst(request));
+    event.respondWith(networkFirst(request, url.pathname === "/rc-history"));
   }
 });

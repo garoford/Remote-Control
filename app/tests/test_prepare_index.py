@@ -23,7 +23,7 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertNotIn("base64", css)
         self.assertIn("ui-monospace", css)
         self.assertIn("rc-touch-boot", html)
-        self.assertIn("cache.js?v=1.2.4", html)
+        self.assertIn("cache.js?v=1.2.5", html)
         manifest = svc.assets_dir / "manifest.json"
         self.assertTrue(manifest.is_file())
         text = manifest.read_text(encoding="utf-8")

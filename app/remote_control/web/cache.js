@@ -1,12 +1,16 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.2.4";
+  var VERSION = "1.2.5";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
     "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
+  var FONT_SAMPLE = "Il|\uE0B0\uE0B2";
+  var FONT_WAIT_MS = 8000;
   var skipResetOnce = false;
+  var fontsP = null;
+  var fontsOk = false;
   var DB_NAME = "rc-term-history";
   var STORE = "tabs";
   var MAX_LINES = 20000;
@@ -206,6 +210,7 @@
     holdUntil = Date.now() + RECONCILE_HOLD_MS;
     writeLines(term, rec.lines, function () {
       restoring = false;
+      refreshTermFont();
       if (done) done();
     });
   }
@@ -229,6 +234,7 @@
       }
       writeLines(term, payload.lines, function () {
         restoring = false;
+        refreshTermFont();
         persistNow();
       });
       return;
@@ -237,6 +243,7 @@
     restoring = true;
     writeLines(term, payload.lines, function () {
       restoring = false;
+      refreshTermFont();
       persistNow();
     });
   }
@@ -264,9 +271,11 @@
       setBadge("");
       return;
     }
-    idbGet(id)
-      .catch(function () {
-        return null;
+    waitFonts()
+      .then(function () {
+        return idbGet(id).catch(function () {
+          return null;
+        });
       })
       .then(function (rec) {
         return new Promise(function (resolve) {
@@ -289,6 +298,7 @@
       })
       .catch(function () {})
       .then(function () {
+        refreshTermFont();
         setBadge(navigator.onLine ? "" : "offline");
       });
   }
@@ -316,7 +326,10 @@
   function bootRestore() {
     var id = tabId();
     if (!id) return;
-    idbGet(id)
+    waitFonts()
+      .then(function () {
+        return idbGet(id);
+      })
       .then(function (rec) {
         if (!rec) return;
         waitForTerm(function () {
@@ -334,38 +347,85 @@
     navigator.serviceWorker.register("/rc-assets/sw.js?v=" + VERSION, { scope: "/" }).catch(function () {});
   }
 
-  function warmFonts() {
-    if (!document.fonts || !document.fonts.load) return Promise.resolve();
+  function waitFonts() {
+    if (fontsP) return fontsP;
     var size = isTouch() ? "16px" : "15px";
-    var loads = [document.fonts.load("400 " + size + " 'FiraCode Nerd Font Mono'")];
-    if (!isTouch()) {
-      loads.push(document.fonts.load("700 15px 'FiraCode Nerd Font Mono'"));
+    var work = Promise.resolve();
+    if (document.fonts && document.fonts.load) {
+      work = document.fonts
+        .load("400 " + size + " 'FiraCode Nerd Font Mono'", FONT_SAMPLE)
+        .then(function () {
+          if (!isTouch()) {
+            return document.fonts.load("700 15px 'FiraCode Nerd Font Mono'", FONT_SAMPLE);
+          }
+        })
+        .then(function () {
+          if (document.fonts.ready) return document.fonts.ready;
+        })
+        .then(function () {
+          fontsOk = true;
+        })
+        .catch(function () {});
     }
-    return Promise.all(loads).catch(function () {});
+    var cap = new Promise(function (resolve) {
+      setTimeout(resolve, FONT_WAIT_MS);
+    });
+    fontsP = Promise.race([work, cap]).then(function () {
+      waitForTerm(function () {
+        applyTermFont(fontsOk);
+      });
+    });
+    return fontsP;
+  }
+
+  function forceAtlasRefresh(term) {
+    if (!term) return;
+    try {
+      if (typeof term.clearTextureAtlas === "function") term.clearTextureAtlas();
+    } catch (_) {}
+    try {
+      var svc = term._core && term._core._renderService;
+      if (svc && typeof svc.clearTextureAtlas === "function") svc.clearTextureAtlas();
+    } catch (_) {}
+    try {
+      if (typeof term.refresh === "function") {
+        term.refresh(0, Math.max(0, (term.rows || 1) - 1));
+      }
+    } catch (_) {}
+    try {
+      if (typeof term.fit === "function") term.fit();
+    } catch (_) {}
   }
 
   function applyTermFont(ready) {
     var term = findTerm();
     if (!term) return;
-    var stack = FONT_STACK;
-    if (isTouch() && !ready) stack = SYSTEM_MONO;
+    var stack = ready || !isTouch() ? FONT_STACK : SYSTEM_MONO;
     try {
-      if (term.options) term.options.fontFamily = stack;
-      if (typeof term.fit === "function") term.fit();
+      if (term.options) {
+        if (term.options.fontFamily === stack) {
+          term.options.fontFamily = SYSTEM_MONO;
+        }
+        term.options.fontFamily = stack;
+      }
     } catch (_) {}
+    forceAtlasRefresh(term);
+  }
+
+  function refreshTermFont() {
+    applyTermFont(fontsOk || !isTouch());
   }
 
   function bootFonts() {
-    if (isTouch()) waitForTerm(function () {
-      applyTermFont(false);
-    });
-    warmFonts().then(function () {
+    if (isTouch()) {
       waitForTerm(function () {
-        applyTermFont(true);
+        applyTermFont(false);
       });
-    });
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(function () {
+    }
+    waitFonts();
+    if (document.fonts && document.fonts.addEventListener) {
+      document.fonts.addEventListener("loadingdone", function () {
+        fontsOk = true;
         waitForTerm(function () {
           applyTermFont(true);
         });
