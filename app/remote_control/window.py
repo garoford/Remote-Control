@@ -12,7 +12,9 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from remote_control.tunnel import TunnelService
+from urllib.parse import urlparse
+
+from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
 
@@ -219,9 +221,13 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.url_entry.select_region(0, -1)
         self.url_card.set_visible(True)
         self.idle_label.set_visible(False)
-        self._set_status("on", "En línea")
         self._set_switch(True)
-        self._toast("Túnel listo")
+        if self._local_dns_ok(url):
+            self._set_status("on", "En línea")
+            self._toast("Túnel listo")
+        else:
+            self._set_status("busy", "Túnel ok · DNS…")
+            self._toast("URL lista; el DNS de esta PC aún no")
         return False
 
     def _on_start_failed(self, message: str) -> bool:
@@ -332,21 +338,21 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.url_entry.select_region(0, -1)
         self._toast("URL copiada")
 
+    def _local_dns_ok(self, url: str | None = None) -> bool:
+        target = url or self._current_url or ""
+        host = urlparse(target).hostname or ""
+        return bool(host and host_resolves(host))
+
     def _on_open(self, *_args) -> None:
         if not self._current_url:
             return
-        from urllib.parse import urlparse
-
-        from remote_control.tunnel import host_resolves
-
-        host = urlparse(self._current_url).hostname or ""
-        if host and host_resolves(host):
+        if self._local_dns_ok():
             Gio.AppInfo.launch_default_for_uri(self._current_url, None)
             return
         Gio.AppInfo.launch_default_for_uri(
             f"http://127.0.0.1:{self.tunnel.port}/", None
         )
-        self._toast("DNS público aún no; abrí en local")
+        self._toast("DNS de esta PC aún no; abrí en local")
 
     def _poll_status(self) -> bool:
         if self._busy:
@@ -362,7 +368,10 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self.url_entry.set_text(status.url)
             self.url_card.set_visible(True)
             self.idle_label.set_visible(False)
-            self._set_status("on", "En línea")
+            if self._local_dns_ok(status.url):
+                self._set_status("on", "En línea")
+            else:
+                self._set_status("busy", "Túnel ok · DNS…")
             self._set_switch(True)
             if changed:
                 self.url_entry.select_region(0, -1)

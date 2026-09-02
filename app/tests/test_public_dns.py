@@ -59,3 +59,9 @@ class PublicDnsTests(unittest.TestCase):
         with mock.patch("remote_control.tunnel.dns_via_doh", return_value=True):
             with mock.patch("remote_control.tunnel.dns_via_dig", return_value=True):
                 self.assertTrue(tunnel.public_resolvers_ready("x.trycloudflare.com"))
+
+    def test_dropin_routes_trycloudflare(self) -> None:
+        text = tunnel.resolved_dropin_text()
+        self.assertIn("Domains=~trycloudflare.com", text)
+        self.assertIn("1.1.1.1", text)
+        self.assertIn("8.8.8.8", text)

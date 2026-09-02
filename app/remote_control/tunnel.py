@@ -91,6 +91,61 @@ def public_resolvers_ready(host: str) -> bool:
     return dns_via_dig(host, "8.8.8.8") or dns_via_dig(host, "8.8.4.4")
 
 
+RESOLVED_DROPIN = Path("/etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf")
+RESOLVED_DROPIN_MARKER = "Domains=~trycloudflare.com"
+
+
+def resolved_dropin_text() -> str:
+    bundled = Path(__file__).resolve().parent.parent / "data" / "99-remote-control-trycloudflare.conf"
+    if bundled.is_file():
+        return bundled.read_text(encoding="utf-8")
+    return (
+        "[Resolve]\n"
+        "DNS=1.1.1.1 8.8.8.8\n"
+        "Domains=~trycloudflare.com\n"
+    )
+
+
+def trycloudflare_route_installed() -> bool:
+    if not RESOLVED_DROPIN.is_file():
+        return False
+    try:
+        text = RESOLVED_DROPIN.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return RESOLVED_DROPIN_MARKER in text
+
+
+def ensure_trycloudflare_route() -> bool:
+    """Send *.trycloudflare.com to 1.1.1.1/8.8.8.8 so the LAN router cannot NXDOMAIN it."""
+    if trycloudflare_route_installed():
+        return True
+    dest = str(RESOLVED_DROPIN)
+    body = resolved_dropin_text()
+    script = (
+        "mkdir -p /etc/systemd/resolved.conf.d && "
+        "cat > /etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf && "
+        "(systemctl reload systemd-resolved || systemctl restart systemd-resolved)"
+    )
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return False
+    try:
+        proc = subprocess.run(
+            [sudo, "-n", "sh", "-c", script],
+            input=body,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    flush_resolved_cache()
+    return trycloudflare_route_installed()
+
+
 DEFAULT_PORT = 7681
 NIGHT_OWL_THEME = (
     '{"background":"#011627","foreground":"#d6deeb","cursor":"#80A4C2",'
@@ -203,7 +258,8 @@ class TunnelService:
         self._start_proxy()
         self._start_cloudflared()
         url = self._wait_for_url(timeout=60)
-        self._wait_until_public(url, timeout=70)
+        ensure_trycloudflare_route()
+        self._wait_until_public(url, timeout=90)
         self.url_file.write_text(url + "\n", encoding="utf-8")
         self.url_file.chmod(0o600)
         return url
@@ -384,11 +440,12 @@ class TunnelService:
         text = self.log_file.read_text(encoding="utf-8", errors="replace")
         return bool(REGISTERED_RE.search(text))
 
-    def _wait_until_public(self, url: str, timeout: int = 70) -> None:
-        """Don't mark ready until the resolver Chrome uses can see the name.
+    def _wait_until_public(self, url: str, timeout: int = 90) -> None:
+        """Don't mark ready until this PC's resolver can see the name.
 
-        1.1.1.1 publishes first. If we getaddrinfo() before 8.8.8.8 has the
-        record, systemd-resolved caches NXDOMAIN and Chrome stays broken.
+        1.1.1.1 publishes first. The LAN router often answers NXDOMAIN; if
+        we getaddrinfo() then, systemd-resolved and Chrome cache the miss.
+        Wait for public resolvers, flush, then require a local resolve.
         """
         host = urlparse(url).hostname or ""
         if not host:
@@ -400,17 +457,13 @@ class TunnelService:
                 raise TunnelError("cloudflared se detuvo antes de publicar DNS.\n" + tail)
             if public_resolvers_ready(host):
                 flush_resolved_cache()
-                time.sleep(0.5)
+                time.sleep(0.4)
                 if host_resolves(host):
                     return
-                time.sleep(2.0)
-                flush_resolved_cache()
-                time.sleep(0.3)
-                if host_resolves(host):
-                    return
-                # Keep waiting; do not poll getaddrinfo in a tight loop.
             time.sleep(0.8)
         flush_resolved_cache()
+        time.sleep(0.3)
+        host_resolves(host)
 
     def _url_from_log(self) -> str | None:
         if not self.log_file.is_file():
