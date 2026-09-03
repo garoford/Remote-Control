@@ -212,6 +212,34 @@
     });
   }
 
+  function scrollToWrite() {
+    var term = xterm();
+    if (term) {
+      try {
+        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+      } catch (_) {}
+      try {
+        var buf = term.buffer && term.buffer.active;
+        if (buf && typeof term.scrollToLine === "function") {
+          term.scrollToLine(buf.baseY + buf.cursorY);
+        }
+      } catch (_) {}
+      try {
+        term.focus();
+      } catch (_) {}
+    }
+    var vp = document.querySelector(".xterm-viewport");
+    if (vp) vp.scrollTop = vp.scrollHeight;
+    var ta = termTextarea();
+    if (ta) {
+      try {
+        ta.focus({ preventScroll: true });
+      } catch (_) {
+        ta.focus();
+      }
+    }
+  }
+
   function armKeepFocus() {
     keepFocusUntil = Date.now() + 900;
     focusTerm();
@@ -684,7 +712,7 @@
     }
     if (writing) {
       requestAnimationFrame(function () {
-        focusTerm();
+        scrollToWrite();
       });
     }
   }
@@ -976,7 +1004,7 @@
 
   function beginWriting() {
     writing = true;
-    focusTerm();
+    scrollToWrite();
   }
 
   function flushTyped(text) {
