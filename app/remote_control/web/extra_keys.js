@@ -8,6 +8,7 @@
   var locks = { ctrl: false, alt: false };
   var lastTap = { ctrl: 0, alt: 0 };
   var keepFocusUntil = 0;
+  var holdIme = false;
   var lastSentAt = 0;
   var layoutRaf = 0;
   var bar = null;
@@ -166,14 +167,40 @@
     return document.querySelector(".xterm-helper-textarea");
   }
 
+  function viewportTop() {
+    var vp = document.querySelector(".xterm-viewport");
+    return vp ? vp.scrollTop : null;
+  }
+
+  function restoreViewport(top) {
+    var vp = document.querySelector(".xterm-viewport");
+    if (!vp || top === null || top === undefined) return;
+    if (vp.scrollTop !== top) vp.scrollTop = top;
+  }
+
   function focusTerm() {
     var ta = termTextarea();
     if (!ta) return;
+    var top = viewportTop();
     try {
       ta.focus({ preventScroll: true });
     } catch (_) {
       ta.focus();
     }
+    holdIme = true;
+    restoreViewport(top);
+    requestAnimationFrame(function () {
+      restoreViewport(top);
+    });
+  }
+
+  function stickIme() {
+    if (!holdIme) return;
+    var active = document.activeElement;
+    if (active && active.id === "rc-file-pick") return;
+    var ta = termTextarea();
+    if (ta && active === ta) return;
+    focusTerm();
   }
 
   function armKeepFocus() {
@@ -883,6 +910,7 @@
       acc = 0;
       scrolling = false;
       active = true;
+      if (holdIme) stickIme();
     }
 
     function onMove(ev) {
@@ -895,12 +923,15 @@
       lastY = y;
       var lines = acc / PX;
       var step = lines < 0 ? Math.ceil(lines) : Math.floor(lines);
-      if (!step) return;
-      acc -= step * PX;
-      scrollByLines(step);
+      if (step) {
+        acc -= step * PX;
+        scrollByLines(step);
+      }
+      if (holdIme) stickIme();
     }
 
     function onEnd() {
+      if (holdIme) stickIme();
       active = false;
       scrolling = false;
       acc = 0;
@@ -925,6 +956,38 @@
       mo.disconnect();
       bind(document.getElementById("terminal-container"));
     }, 4000);
+  }
+
+  function bootStickyIme() {
+    document.addEventListener(
+      "focusin",
+      function (ev) {
+        var ta = termTextarea();
+        if (ta && ev.target === ta) holdIme = true;
+      },
+      true
+    );
+    document.addEventListener(
+      "focusout",
+      function (ev) {
+        var ta = termTextarea();
+        if (!holdIme || !ta || ev.target !== ta) return;
+        var next = ev.relatedTarget;
+        if (next && (next.id === "rc-file-pick" || next.closest && next.closest("#rc-file-pick"))) {
+          holdIme = false;
+          return;
+        }
+        setTimeout(stickIme, 0);
+        setTimeout(stickIme, 40);
+      },
+      true
+    );
+    document.addEventListener(
+      "visibilitychange",
+      function () {
+        if (!document.hidden && holdIme) setTimeout(stickIme, 0);
+      }
+    );
   }
 
   function bootTapToFocus() {
@@ -969,15 +1032,20 @@
     input.addEventListener("change", function () {
       var file = input.files && input.files[0];
       input.value = "";
-      if (!file) return;
+      if (!file) {
+        focusTerm();
+        return;
+      }
       var image = (file.type || "").indexOf("image/") === 0;
       ingestBlob(file, image);
+      focusTerm();
     });
     document.body.appendChild(input);
     return input;
   }
 
   function openFilePicker() {
+    holdIme = false;
     filePicker().click();
   }
 
@@ -1058,6 +1126,7 @@
     document.documentElement.classList.add("rc-touch");
     mountBar();
     bootInterceptors();
+    bootStickyIme();
     bootTouchScroll();
     bootTapToFocus();
     setTimeout(focusTerm, 300);
