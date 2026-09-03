@@ -1,11 +1,46 @@
-"""Save a clipboard image from the web terminal onto this machine."""
+"""Reserve a paste path, then write the uploaded bytes onto it."""
 
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import re
 from pathlib import Path
 
-MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_PASTE_BYTES = 12 * 1024 * 1024
+
+ALLOWED_EXT = frozenset(
+    {
+        "webp",
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "svg",
+        "txt",
+        "md",
+        "json",
+        "csv",
+        "pdf",
+        "zip",
+        "gz",
+        "xz",
+        "tar",
+        "7z",
+        "mp4",
+        "webm",
+        "mp3",
+        "wav",
+        "bin",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+    }
+)
+
+PASTE_NAME_RE = re.compile(r"^paste-[a-f0-9]{8}\.([a-z0-9]{1,8})$")
 
 _TYPES = {
     "image/png": ".png",
@@ -44,27 +79,43 @@ def paste_dir(home: Path | None = None) -> Path:
     return home / ".cache" / "cf-quick-tunnel" / "pastes"
 
 
-def save_clipboard_image(
-    body: bytes,
-    content_type: str = "",
-    *,
-    home: Path | None = None,
-    now: datetime | None = None,
-) -> Path:
-    if not body:
-        raise PasteError("empty")
-    if len(body) > MAX_IMAGE_BYTES:
-        raise PasteError("too large")
-    ext = sniff_ext(body, content_type)
-    if ext is None:
-        raise PasteError("not an image")
+def parse_paste_name(name: str) -> str:
+    raw = (name or "").strip()
+    if not raw or "/" in raw or "\\" in raw or ".." in raw:
+        raise PasteError("bad name")
+    match = PASTE_NAME_RE.fullmatch(raw)
+    if match is None:
+        raise PasteError("bad name")
+    ext = match.group(1)
+    if ext == "jpeg":
+        raise PasteError("bad name")
+    if ext not in ALLOWED_EXT:
+        raise PasteError("bad name")
+    return raw
+
+
+def reserve_paste_file(name: str, *, home: Path | None = None) -> Path:
+    safe = parse_paste_name(name)
     dest = paste_dir(home)
     dest.mkdir(parents=True, exist_ok=True)
-    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    path = dest / f"paste-{stamp}{ext}"
-    n = 1
-    while path.exists():
-        n += 1
-        path = dest / f"paste-{stamp}-{n}{ext}"
+    path = dest / safe
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(path, flags, 0o644)
+    except FileExistsError as exc:
+        raise PasteError("exists") from exc
+    os.close(fd)
+    return path
+
+
+def write_paste_file(name: str, body: bytes, *, home: Path | None = None) -> Path:
+    if not body:
+        raise PasteError("empty")
+    if len(body) > MAX_PASTE_BYTES:
+        raise PasteError("too large")
+    safe = parse_paste_name(name)
+    path = paste_dir(home) / safe
+    if not path.is_file():
+        raise PasteError("not reserved")
     path.write_bytes(body)
     return path

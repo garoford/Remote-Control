@@ -35,6 +35,35 @@
   ];
 
   var PASTE_CHUNK = 2048;
+  var PASTE_EDGE = 1920;
+  var PASTE_QUALITY = 0.82;
+  var PASTE_EXT = {
+    webp: 1,
+    jpg: 1,
+    png: 1,
+    gif: 1,
+    svg: 1,
+    txt: 1,
+    md: 1,
+    json: 1,
+    csv: 1,
+    pdf: 1,
+    zip: 1,
+    gz: 1,
+    xz: 1,
+    tar: 1,
+    mp4: 1,
+    webm: 1,
+    mp3: 1,
+    wav: 1,
+    bin: 1,
+    doc: 1,
+    docx: 1,
+    xls: 1,
+    xlsx: 1,
+    ppt: 1,
+    pptx: 1,
+  };
 
   var ARROW_LETTER = {
     ArrowUp: "A",
@@ -122,7 +151,7 @@
   }
 
   function isPasteUi(el) {
-    return !!(el && el.closest && el.closest("#rc-paste, .is-paste"));
+    return !!(el && el.closest && el.closest(".is-paste, #rc-file-pick"));
   }
 
   function termTextarea() {
@@ -219,30 +248,162 @@
     return "'" + String(path).replace(/'/g, "'\\''") + "'";
   }
 
-  function sendImageFile(file) {
-    if (!file) return Promise.resolve(false);
-    return fetch("/rc-paste-image", {
+  function mintName(ext) {
+    var bytes = new Uint8Array(4);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+    } else {
+      bytes[0] = Math.floor(Math.random() * 256);
+      bytes[1] = Math.floor(Math.random() * 256);
+      bytes[2] = Math.floor(Math.random() * 256);
+      bytes[3] = Math.floor(Math.random() * 256);
+    }
+    var hex = "";
+    for (var i = 0; i < bytes.length; i++) {
+      hex += ("0" + bytes[i].toString(16)).slice(-2);
+    }
+    return "paste-" + hex + "." + ext;
+  }
+
+  function safeExt(raw) {
+    var ext = String(raw || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+    if (ext === "jpeg") ext = "jpg";
+    return PASTE_EXT[ext] ? ext : "bin";
+  }
+
+  function extFromType(type) {
+    var t = String(type || "").toLowerCase();
+    if (t.indexOf("image/webp") === 0) return "webp";
+    if (t.indexOf("image/jpeg") === 0) return "jpg";
+    if (t.indexOf("image/jpg") === 0) return "jpg";
+    if (t.indexOf("image/png") === 0) return "png";
+    if (t.indexOf("image/gif") === 0) return "gif";
+    var slash = t.lastIndexOf("/");
+    if (slash !== -1) return safeExt(t.slice(slash + 1));
+    return "";
+  }
+
+  function extFromName(name) {
+    var base = String(name || "").split(/[\\/]/).pop() || "";
+    var dot = base.lastIndexOf(".");
+    if (dot < 0) return "";
+    return safeExt(base.slice(dot + 1));
+  }
+
+  function preferredImageExt() {
+    if (preferredImageExt._ext) return Promise.resolve(preferredImageExt._ext);
+    return new Promise(function (resolve) {
+      var canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      try {
+        canvas.toBlob(function (blob) {
+          preferredImageExt._ext =
+            blob && blob.type === "image/webp" ? "webp" : "jpg";
+          resolve(preferredImageExt._ext);
+        }, "image/webp", PASTE_QUALITY);
+      } catch (_) {
+        preferredImageExt._ext = "jpg";
+        resolve("jpg");
+      }
+    });
+  }
+
+  function reserveName(name) {
+    return fetch("/rc-paste-reserve", {
       method: "POST",
-      headers: { "Content-Type": file.type || "application/octet-stream" },
-      body: file,
-    })
-      .then(function (resp) {
-        return resp.json().then(function (data) {
-          return { ok: resp.ok, data: data };
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name }),
+    }).then(function (resp) {
+      return resp.json().then(function (data) {
+        if (!resp.ok || !data.path) {
+          throw new Error((data && data.error) || "reserve");
+        }
+        return data;
+      });
+    });
+  }
+
+  function putPasteFile(name, blob, type) {
+    return fetch("/rc-paste-file?name=" + encodeURIComponent(name), {
+      method: "PUT",
+      headers: { "Content-Type": type || "application/octet-stream" },
+      body: blob,
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error("put");
+      return resp.json();
+    });
+  }
+
+  function compressImage(blob, ext) {
+    return new Promise(function (resolve) {
+      var url = URL.createObjectURL(blob);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var w = img.naturalWidth || img.width;
+        var h = img.naturalHeight || img.height;
+        if (!w || !h) {
+          resolve(blob);
+          return;
+        }
+        var scale = Math.min(1, PASTE_EDGE / Math.max(w, h));
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
+        var ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(blob);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        var mime = ext === "jpg" ? "image/jpeg" : "image/webp";
+        canvas.toBlob(
+          function (out) {
+            resolve(out && out.size ? out : blob);
+          },
+          mime,
+          PASTE_QUALITY
+        );
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        resolve(blob);
+      };
+      img.src = url;
+    });
+  }
+
+  function ingestBlob(blob, asImage) {
+    if (!blob) return Promise.resolve(false);
+    var extP = asImage
+      ? preferredImageExt()
+      : Promise.resolve(extFromName(blob.name) || extFromType(blob.type) || "bin");
+    return extP
+      .then(function (ext) {
+        var name = mintName(ext);
+        return reserveName(name).then(function (info) {
+          sendPaste(shellQuote(info.path));
+          showToast(info.name);
+          var work = asImage
+            ? compressImage(blob, ext)
+            : Promise.resolve(blob);
+          return work.then(function (out) {
+            var type = asImage
+              ? ext === "jpg"
+                ? "image/jpeg"
+                : "image/webp"
+              : blob.type || "application/octet-stream";
+            return putPasteFile(name, out, type).then(function () {
+              return true;
+            });
+          });
         });
       })
-      .then(function (result) {
-        var path = result.ok && result.data && result.data.path;
-        if (!path) {
-          showToast("No pude guardar la imagen");
-          return false;
-        }
-        sendPaste(shellQuote(path));
-        showToast("Imagen: " + (result.data.name || path));
-        return true;
-      })
       .catch(function () {
-        showToast("No pude guardar la imagen");
+        showToast("No pude guardar el archivo");
         return false;
       });
   }
@@ -280,7 +441,7 @@
     }
     var file = fileFromClipboardData(data);
     if (file) {
-      sendImageFile(file);
+      ingestBlob(file, true);
       return true;
     }
     return false;
@@ -288,7 +449,7 @@
 
   function pasteTextOnly() {
     if (!navigator.clipboard || !navigator.clipboard.readText) {
-      showToast("Pegá con Ctrl+V");
+      showToast("Pegá con Ctrl+Shift+V");
       return;
     }
     navigator.clipboard
@@ -298,7 +459,7 @@
         else showToast("El clipboard está vacío");
       })
       .catch(function () {
-        showToast("Pegá con Ctrl+V");
+        showToast("Pegá con Ctrl+Shift+V");
       });
   }
 
@@ -346,7 +507,7 @@
     item
       .getType(type)
       .then(function (blob) {
-        return sendImageFile(blob);
+        return ingestBlob(blob, true);
       })
       .catch(function () {
         showToast("No pude leer la imagen");
@@ -441,7 +602,7 @@
 
   function pressKey(def) {
     if (def.paste) {
-      pasteFromClipboard();
+      openFilePicker();
       return;
     }
     if (def.mod) {
@@ -523,7 +684,6 @@
           "pointerdown",
           function (ev) {
             key.classList.add("is-down");
-            if (def.paste) ev.preventDefault();
             pressKey(def);
           },
           { passive: false }
@@ -677,7 +837,7 @@
       return !!(
         t &&
         t.closest &&
-        t.closest("#rc-extra-keys, #rc-paste")
+        t.closest("#rc-extra-keys, #rc-file-pick")
       );
     }
 
@@ -740,7 +900,7 @@
       return !!(
         t &&
         t.closest &&
-        t.closest("#rc-extra-keys, #rc-paste")
+        t.closest("#rc-extra-keys, #rc-file-pick")
       );
     }
     function focus() {
@@ -766,17 +926,52 @@
     );
   }
 
-  function mountPasteChip() {
-    if (document.getElementById("rc-paste")) return;
-    var btn = document.createElement("button");
-    btn.id = "rc-paste";
-    btn.type = "button";
-    btn.textContent = "Pegar";
-    btn.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      pasteFromClipboard();
+  function filePicker() {
+    var input = document.getElementById("rc-file-pick");
+    if (input) return input;
+    input = document.createElement("input");
+    input.id = "rc-file-pick";
+    input.type = "file";
+    input.hidden = true;
+    input.addEventListener("change", function () {
+      var file = input.files && input.files[0];
+      input.value = "";
+      if (!file) return;
+      var image = (file.type || "").indexOf("image/") === 0;
+      ingestBlob(file, image);
     });
-    document.body.appendChild(btn);
+    document.body.appendChild(input);
+    return input;
+  }
+
+  function openFilePicker() {
+    filePicker().click();
+  }
+
+  function termSelection() {
+    var sel = window.getSelection && window.getSelection();
+    var text = sel && sel.toString ? sel.toString() : "";
+    return text || "";
+  }
+
+  function copySelection() {
+    var text = termSelection();
+    if (!text) {
+      showToast("Nada seleccionado");
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          showToast("Copiado");
+        },
+        function () {
+          showToast("No pude copiar");
+        }
+      );
+      return;
+    }
+    showToast("No pude copiar");
   }
 
   function bootPaste() {
@@ -784,10 +979,35 @@
       "paste",
       function (ev) {
         if (ev.defaultPrevented) return;
+        var t = ev.target;
+        if (t && t.id === "rc-file-pick") return;
         if (applyClipboardData(ev.clipboardData)) {
           ev.preventDefault();
           ev.stopPropagation();
           if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "keydown",
+      function (ev) {
+        if (ev.defaultPrevented || ev.isComposing) return;
+        var chord = ev.ctrlKey || ev.metaKey;
+        if (!chord || !ev.shiftKey || ev.altKey) return;
+        var key = ev.key;
+        if (key === "V" || key === "v") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+          pasteFromClipboard();
+          return;
+        }
+        if (key === "C" || key === "c") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+          copySelection();
         }
       },
       true
@@ -800,7 +1020,6 @@
     document.documentElement.classList.add("rc-" + device);
     bootPaste();
     if (device === "pc") {
-      mountPasteChip();
       return;
     }
     document.documentElement.classList.add("rc-touch");

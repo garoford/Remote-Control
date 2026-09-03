@@ -194,11 +194,11 @@ class ProxyAssetTests(unittest.TestCase):
         resp.read()
         self.assertEqual(resp.status, 404)
 
-    def _post(self, path: str, body: bytes, content_type: str):
+    def _request(self, method: str, path: str, body: bytes, content_type: str):
         conn = http.client.HTTPConnection("127.0.0.1", self.listen_port, timeout=3)
         try:
             conn.request(
-                "POST",
+                method,
                 path,
                 body=body,
                 headers={"Content-Type": content_type, "Content-Length": str(len(body))},
@@ -218,17 +218,43 @@ class ProxyAssetTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_paste_image_is_saved(self) -> None:
-        resp = self._post("/rc-paste-image", MINI_PNG, "image/png")
-        data = json.loads(resp.read())
-        self.assertEqual(resp.status, 200)
+    def test_paste_reserve_then_put(self) -> None:
+        reserved = self._request(
+            "POST",
+            "/rc-paste-reserve",
+            json.dumps({"name": "paste-ab12cd34.webp"}).encode(),
+            "application/json",
+        )
+        data = json.loads(reserved.read())
+        self.assertEqual(reserved.status, 200)
         path = Path(data["path"])
-        self.assertTrue(path.is_file())
-        self.assertEqual(path.read_bytes(), MINI_PNG)
         self.assertEqual(path.parent, paste_dir(self.paste_home))
+        self.assertEqual(path.stat().st_size, 0)
+        written = self._request(
+            "PUT",
+            "/rc-paste-file?name=paste-ab12cd34.webp",
+            MINI_PNG,
+            "image/png",
+        )
+        self.assertEqual(written.status, 200)
+        self.assertEqual(path.read_bytes(), MINI_PNG)
 
-    def test_paste_image_rejects_garbage(self) -> None:
-        resp = self._post("/rc-paste-image", b"nope", "text/plain")
+    def test_paste_put_without_reserve(self) -> None:
+        resp = self._request(
+            "PUT",
+            "/rc-paste-file?name=paste-ab12cd34.webp",
+            MINI_PNG,
+            "image/png",
+        )
+        self.assertEqual(resp.status, 404)
+
+    def test_paste_reserve_rejects_bad_name(self) -> None:
+        resp = self._request(
+            "POST",
+            "/rc-paste-reserve",
+            json.dumps({"name": "../evil.webp"}).encode(),
+            "application/json",
+        )
         self.assertEqual(resp.status, 400)
 
     def test_history_unknown_tab_is_empty(self) -> None:

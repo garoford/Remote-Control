@@ -1,6 +1,6 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
-Serves cacheable fonts + JS, /rc-history, clipboard image uploads,
+Serves cacheable fonts + JS, /rc-history, reserved clipboard uploads,
 and proxies everything else (including the tty WebSocket) to ttyd
 on the internal port.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import history_payload
-from remote_control.paste import PasteError, save_clipboard_image
+from remote_control.paste import PasteError, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
     load_manifest,
     manifest_for_client,
@@ -273,8 +273,14 @@ class Sidecar:
             if method == "GET" and path == "/rc-history":
                 self._serve_history(conn, parse_qs(parsed_url.query))
                 return
-            if method == "POST" and path == "/rc-paste-image":
-                self._serve_paste_image(conn, body, headers)
+            if method == "POST" and path == "/rc-paste-reserve":
+                self._serve_paste_reserve(conn, body)
+                return
+            if method == "PUT" and path == "/rc-paste-file":
+                name = (parse_qs(parsed_url.query).get("name") or [""])[0]
+                if not name:
+                    name = headers.get("x-rc-paste-name", "")
+                self._serve_paste_write(conn, body, name)
                 return
             self._proxy(conn, header, body, headers)
         except OSError:
@@ -377,29 +383,46 @@ class Sidecar:
             )
         )
 
-    def _serve_paste_image(
-        self,
-        conn: socket.socket,
-        body: bytes,
-        headers: dict[str, str],
-    ) -> None:
-        extra = [("Cache-Control", "no-store")]
+    def _paste_error(self, conn: socket.socket, exc: PasteError) -> None:
+        reason = str(exc)
+        status = "400 Bad Request"
+        if reason == "too large":
+            status = "413 Payload Too Large"
+        elif reason == "not reserved":
+            status = "404 Not Found"
+        elif reason == "exists":
+            status = "409 Conflict"
+        conn.sendall(
+            _http_response(
+                status,
+                json.dumps({"error": reason}).encode("utf-8"),
+                "application/json; charset=utf-8",
+                [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _paste_ok(self, conn: socket.socket, path: Path) -> None:
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                json.dumps({"path": str(path), "name": path.name}).encode("utf-8"),
+                "application/json; charset=utf-8",
+                [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _serve_paste_reserve(self, conn: socket.socket, body: bytes) -> None:
         try:
-            path = save_clipboard_image(
-                body,
-                headers.get("content-type", ""),
-                home=self.paste_home,
-            )
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        name = str(payload.get("name") or "")
+        try:
+            path = reserve_paste_file(name, home=self.paste_home)
         except PasteError as exc:
-            status = "413 Payload Too Large" if str(exc) == "too large" else "400 Bad Request"
-            conn.sendall(
-                _http_response(
-                    status,
-                    json.dumps({"error": str(exc)}).encode("utf-8"),
-                    "application/json; charset=utf-8",
-                    extra,
-                )
-            )
+            self._paste_error(conn, exc)
             return
         except OSError:
             conn.sendall(
@@ -407,19 +430,29 @@ class Sidecar:
                     "500 Internal Server Error",
                     b'{"error":"write failed"}',
                     "application/json; charset=utf-8",
-                    extra,
+                    [("Cache-Control", "no-store")],
                 )
             )
             return
-        payload = json.dumps({"path": str(path), "name": path.name}).encode("utf-8")
-        conn.sendall(
-            _http_response(
-                "200 OK",
-                payload,
-                "application/json; charset=utf-8",
-                extra,
+        self._paste_ok(conn, path)
+
+    def _serve_paste_write(self, conn: socket.socket, body: bytes, name: str) -> None:
+        try:
+            path = write_paste_file(name, body, home=self.paste_home)
+        except PasteError as exc:
+            self._paste_error(conn, exc)
+            return
+        except OSError:
+            conn.sendall(
+                _http_response(
+                    "500 Internal Server Error",
+                    b'{"error":"write failed"}',
+                    "application/json; charset=utf-8",
+                    [("Cache-Control", "no-store")],
+                )
             )
-        )
+            return
+        self._paste_ok(conn, path)
 
     def _proxy(
         self,
