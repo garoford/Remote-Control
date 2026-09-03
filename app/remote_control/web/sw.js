@@ -1,6 +1,6 @@
-/* Remote Control service worker: cache fonts/JS, keep HTML+history network-first. */
-/* v=1.2.5 */
-var CACHE = "rc-tty-v1.2.5";
+/* Remote Control service worker: cache fonts/JS. Never fake a 503 page. */
+/* v=1.2.7 */
+var CACHE = "rc-tty-v1.2.7";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
@@ -40,7 +40,7 @@ function networkFirst(request, store) {
     })
     .catch(function () {
       return caches.match(request).then(function (hit) {
-        return hit || new Response("offline", { status: 503, statusText: "Offline" });
+        return hit || fetch(request);
       });
     });
 }
@@ -55,7 +55,7 @@ self.addEventListener("install", function (event) {
         return { fonts: [] };
       })
       .then(function (man) {
-        var urls = ["/rc-assets/cache.js?v=1.2.5", "/rc-assets/sw.js?v=1.2.5"].concat(
+        var urls = ["/rc-assets/cache.js?v=1.2.7", "/rc-assets/sw.js?v=1.2.7"].concat(
           man.fonts || []
         );
         return caches.open(CACHE).then(function (cache) {
@@ -95,6 +95,7 @@ self.addEventListener("activate", function (event) {
 self.addEventListener("fetch", function (event) {
   var request = event.request;
   if (request.method !== "GET" || isWs(request)) return;
+  if (request.mode === "navigate") return;
   var url;
   try {
     url = new URL(request.url);
@@ -119,7 +120,7 @@ self.addEventListener("fetch", function (event) {
     event.respondWith(cacheFirst(request, false));
     return;
   }
-  if (url.pathname === "/rc-history" || url.pathname === "/" || url.pathname === "/index.html") {
-    event.respondWith(networkFirst(request, url.pathname === "/rc-history"));
+  if (url.pathname === "/rc-history") {
+    event.respondWith(networkFirst(request, false));
   }
 });

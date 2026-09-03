@@ -350,8 +350,14 @@ class Sidecar:
                 fingerprint = [raw_fp]
         payload = history_payload(tab, fingerprint, socket=self.tmux_socket)
         if payload is None:
+            body = b'{"mode":"none","lines":[],"count":0}'
             conn.sendall(
-                _http_response("404 Not Found", b'{"error":"no session"}', "application/json")
+                _http_response(
+                    "200 OK",
+                    body,
+                    "application/json; charset=utf-8",
+                    [("Cache-Control", "no-store")],
+                )
             )
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
