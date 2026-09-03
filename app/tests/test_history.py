@@ -3,7 +3,12 @@ import subprocess
 import time
 import unittest
 
-from remote_control.history import find_suffix, history_payload, normalize_line
+from remote_control.history import (
+    cancel_copy_mode,
+    find_suffix,
+    history_payload,
+    normalize_line,
+)
 
 
 class HistorySuffixTests(unittest.TestCase):
@@ -69,6 +74,68 @@ class HistorySuffixTests(unittest.TestCase):
                 self.assertNotIn("rc-hist-one", joined)
             else:
                 self.assertIn("rc-hist-three", joined)
+        finally:
+            subprocess.run(
+                ["tmux", "-L", socket, "kill-server"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    def test_cancel_unknown_tab_is_false(self) -> None:
+        self.assertFalse(cancel_copy_mode("rcnotasession1"))
+
+    def test_cancel_leaves_copy_mode(self) -> None:
+        if not shutil.which("tmux"):
+            self.skipTest("tmux missing")
+        socket = "rc-testcopy"
+        tab = "rcabc1234567bb"
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started = subprocess.run(
+            [
+                "tmux",
+                "-L",
+                socket,
+                "new-session",
+                "-d",
+                "-s",
+                tab,
+                "--",
+                "bash",
+                "--norc",
+                "--noprofile",
+            ],
+            check=False,
+        )
+        if started.returncode != 0:
+            self.skipTest("could not start tmux")
+        try:
+            entered = subprocess.run(
+                ["tmux", "-L", socket, "copy-mode", "-t", tab],
+                check=False,
+            )
+            self.assertEqual(entered.returncode, 0)
+            mode = subprocess.run(
+                ["tmux", "-L", socket, "display-message", "-p", "-t", tab, "#{pane_in_mode}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(mode.stdout.strip(), "1")
+            self.assertTrue(cancel_copy_mode(tab, socket=socket))
+            left = subprocess.run(
+                ["tmux", "-L", socket, "display-message", "-p", "-t", tab, "#{pane_in_mode}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(left.stdout.strip(), "0")
+            self.assertFalse(cancel_copy_mode(tab, socket=socket))
         finally:
             subprocess.run(
                 ["tmux", "-L", socket, "kill-server"],

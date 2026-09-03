@@ -257,6 +257,13 @@ class ProxyAssetTests(unittest.TestCase):
         )
         self.assertEqual(resp.status, 400)
 
+    def test_copy_cancel_unknown_tab(self) -> None:
+        resp = self._request("POST", "/rc-copy-cancel?tab=rcnotasession1", b"", "text/plain")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body.get("ok"))
+        self.assertFalse(body.get("cancelled"))
+
     def test_history_unknown_tab_is_empty(self) -> None:
         resp = self._get("/rc-history?tab=rcnotasession1")
         body = json.loads(resp.read())

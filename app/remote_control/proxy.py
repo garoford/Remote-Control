@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.history import history_payload
+from remote_control.history import cancel_copy_mode, history_payload
 from remote_control.paste import PasteError, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
     load_manifest,
@@ -273,6 +273,9 @@ class Sidecar:
             if method == "GET" and path == "/rc-history":
                 self._serve_history(conn, parse_qs(parsed_url.query))
                 return
+            if method == "POST" and path == "/rc-copy-cancel":
+                self._serve_copy_cancel(conn, parse_qs(parsed_url.query))
+                return
             if method == "POST" and path == "/rc-paste-reserve":
                 self._serve_paste_reserve(conn, body)
                 return
@@ -374,6 +377,19 @@ class Sidecar:
             )
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _serve_copy_cancel(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
+        tab = (query.get("tab") or [""])[0]
+        cancelled = cancel_copy_mode(tab, socket=self.tmux_socket)
+        body = json.dumps({"ok": True, "cancelled": cancelled}).encode("utf-8")
         conn.sendall(
             _http_response(
                 "200 OK",

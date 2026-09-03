@@ -9,6 +9,8 @@
   var lastTap = { ctrl: 0, alt: 0 };
   var keepFocusUntil = 0;
   var writing = false;
+  var writeBusy = false;
+  var writeQ = "";
   var lastFit = "";
   var lastSentAt = 0;
   var layoutRaf = 0;
@@ -212,6 +214,19 @@
     });
   }
 
+  function tabId() {
+    var id = "";
+    try {
+      id = document.documentElement.dataset.rcTab || "";
+    } catch (_) {}
+    if (!/^rc[a-z0-9]{10,32}$/.test(id)) {
+      try {
+        id = sessionStorage.getItem("rc-tab-id") || "";
+      } catch (_) {}
+    }
+    return /^rc[a-z0-9]{10,32}$/.test(id) ? id : "";
+  }
+
   function scrollToWrite() {
     var term = xterm();
     if (term) {
@@ -223,6 +238,9 @@
         if (buf && typeof term.scrollToLine === "function") {
           term.scrollToLine(buf.baseY + buf.cursorY);
         }
+      } catch (_) {}
+      try {
+        if (typeof term.scrollLines === "function") term.scrollLines(9999);
       } catch (_) {}
       try {
         term.focus();
@@ -238,6 +256,18 @@
         ta.focus();
       }
     }
+  }
+
+  function cancelCopyMode() {
+    var tab = tabId();
+    if (!tab) return Promise.resolve();
+    return fetch("/rc-copy-cancel?tab=" + encodeURIComponent(tab), {
+      method: "POST",
+      cache: "no-store",
+    }).then(
+      function () {},
+      function () {}
+    );
   }
 
   function armKeepFocus() {
@@ -1005,14 +1035,32 @@
   function beginWriting() {
     writing = true;
     scrollToWrite();
+    return cancelCopyMode().then(function () {
+      scrollToWrite();
+      requestAnimationFrame(function () {
+        scrollToWrite();
+      });
+    });
+  }
+
+  function pumpWrite() {
+    if (writeBusy || !writeQ) return;
+    writeBusy = true;
+    var pending = writeQ;
+    writeQ = "";
+    beginWriting().then(function () {
+      if (pending) sendInput(normalizePaste(pending));
+      var ta = termTextarea();
+      if (ta) ta.value = "";
+      writeBusy = false;
+      if (writeQ) pumpWrite();
+    });
   }
 
   function flushTyped(text) {
     if (!text) return;
-    beginWriting();
-    sendInput(normalizePaste(text));
-    var ta = termTextarea();
-    if (ta) ta.value = "";
+    writeQ += text;
+    pumpWrite();
   }
 
   function bootTypeToTty() {
@@ -1054,8 +1102,7 @@
         if (!seq) return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
-        beginWriting();
-        sendInput(seq);
+        flushTyped(seq);
       },
       true
     );

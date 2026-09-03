@@ -58,6 +58,34 @@ def capture_pane(tab: str, socket: str = TMUX_SOCKET) -> list[str] | None:
     return text.split("\n") if text else []
 
 
+def _pane_in_mode(tab: str, socket: str) -> bool:
+    result = subprocess.run(
+        ["tmux", "-L", socket, "display-message", "-p", "-t", tab, "#{pane_in_mode}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
+def cancel_copy_mode(tab: str, socket: str = TMUX_SOCKET) -> bool:
+    """Leave tmux copy-mode. No-ops (False) if the pane is already live."""
+    if not TAB_RE.match(tab) or not has_session(tab, socket):
+        return False
+    if not _pane_in_mode(tab, socket):
+        return False
+    for target in (tab, f"{tab}:1.1"):
+        result = subprocess.run(
+            ["tmux", "-L", socket, "send-keys", "-t", target, "-X", "cancel"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode == 0:
+            return not _pane_in_mode(tab, socket)
+    return False
+
+
 def history_payload(
     tab: str,
     fingerprint: list[str],
