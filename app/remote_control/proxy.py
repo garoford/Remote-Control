@@ -1,7 +1,8 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
-Serves cacheable fonts + JS, /rc-history, and proxies everything else
-(including the tty WebSocket) to ttyd on the internal port.
+Serves cacheable fonts + JS, /rc-history, clipboard image uploads,
+and proxies everything else (including the tty WebSocket) to ttyd
+on the internal port.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import history_payload
+from remote_control.paste import PasteError, save_clipboard_image
 from remote_control.mobile import (
     load_manifest,
     manifest_for_client,
@@ -197,6 +199,7 @@ class Sidecar:
         upstream_port: int,
         assets: Path,
         tmux_socket: str = "cf-remote",
+        paste_home: Path | None = None,
     ) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -204,6 +207,7 @@ class Sidecar:
         self.upstream_port = upstream_port
         self.assets = assets
         self.tmux_socket = tmux_socket
+        self.paste_home = paste_home
         self._sock: socket.socket | None = None
         self._stop = threading.Event()
 
@@ -268,6 +272,9 @@ class Sidecar:
                 return
             if method == "GET" and path == "/rc-history":
                 self._serve_history(conn, parse_qs(parsed_url.query))
+                return
+            if method == "POST" and path == "/rc-paste-image":
+                self._serve_paste_image(conn, body, headers)
                 return
             self._proxy(conn, header, body, headers)
         except OSError:
@@ -367,6 +374,50 @@ class Sidecar:
                 body,
                 "application/json; charset=utf-8",
                 [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _serve_paste_image(
+        self,
+        conn: socket.socket,
+        body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        extra = [("Cache-Control", "no-store")]
+        try:
+            path = save_clipboard_image(
+                body,
+                headers.get("content-type", ""),
+                home=self.paste_home,
+            )
+        except PasteError as exc:
+            status = "413 Payload Too Large" if str(exc) == "too large" else "400 Bad Request"
+            conn.sendall(
+                _http_response(
+                    status,
+                    json.dumps({"error": str(exc)}).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    extra,
+                )
+            )
+            return
+        except OSError:
+            conn.sendall(
+                _http_response(
+                    "500 Internal Server Error",
+                    b'{"error":"write failed"}',
+                    "application/json; charset=utf-8",
+                    extra,
+                )
+            )
+            return
+        payload = json.dumps({"path": str(path), "name": path.name}).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                payload,
+                "application/json; charset=utf-8",
+                extra,
             )
         )
 

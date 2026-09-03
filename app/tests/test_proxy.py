@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from remote_control.paste import paste_dir
 from remote_control.proxy import Sidecar
+
+MINI_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f"
+    b"\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 def _free_port() -> int:
@@ -74,12 +81,15 @@ class ProxyAssetTests(unittest.TestCase):
         self.upstream = http.server.HTTPServer(("127.0.0.1", self.up_port), _Upstream)
         self.up_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
         self.up_thread.start()
+        self.paste_home = Path(self.tmp.name) / "home"
+        (self.paste_home / "Pictures").mkdir(parents=True)
         self.sidecar = Sidecar(
             "127.0.0.1",
             self.listen_port,
             "127.0.0.1",
             self.up_port,
             self.assets,
+            paste_home=self.paste_home,
         )
         self.side_thread = threading.Thread(target=self.sidecar.serve_forever, daemon=True)
         self.side_thread.start()
@@ -183,6 +193,43 @@ class ProxyAssetTests(unittest.TestCase):
         resp = self._get("/rc-assets/../tunnel.py")
         resp.read()
         self.assertEqual(resp.status, 404)
+
+    def _post(self, path: str, body: bytes, content_type: str):
+        conn = http.client.HTTPConnection("127.0.0.1", self.listen_port, timeout=3)
+        try:
+            conn.request(
+                "POST",
+                path,
+                body=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            raw = conn.getresponse()
+            payload = raw.read()
+
+            class _Resp:
+                def __init__(self) -> None:
+                    self.status = raw.status
+                    self._body = payload
+
+                def read(self) -> bytes:
+                    return self._body
+
+            return _Resp()
+        finally:
+            conn.close()
+
+    def test_paste_image_is_saved(self) -> None:
+        resp = self._post("/rc-paste-image", MINI_PNG, "image/png")
+        data = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        path = Path(data["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_bytes(), MINI_PNG)
+        self.assertEqual(path.parent, paste_dir(self.paste_home))
+
+    def test_paste_image_rejects_garbage(self) -> None:
+        resp = self._post("/rc-paste-image", b"nope", "text/plain")
+        self.assertEqual(resp.status, 400)
 
     def test_history_unknown_tab_is_empty(self) -> None:
         resp = self._get("/rc-history?tab=rcnotasession1")

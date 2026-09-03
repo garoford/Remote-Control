@@ -122,11 +122,7 @@
   }
 
   function isPasteUi(el) {
-    return !!(
-      el &&
-      el.closest &&
-      el.closest("#rc-paste, #rc-paste-catcher, .is-paste")
-    );
+    return !!(el && el.closest && el.closest("#rc-paste, .is-paste"));
   }
 
   function termTextarea() {
@@ -204,74 +200,168 @@
     return true;
   }
 
-  function hidePasteCatcher() {
-    var box = document.getElementById("rc-paste-catcher");
-    if (box) box.remove();
+  function showToast(text) {
+    var el = document.getElementById("rc-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "rc-toast";
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.hidden = false;
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () {
+      el.hidden = true;
+    }, 2600);
   }
 
-  function showPasteCatcher() {
-    hidePasteCatcher();
-    var wrap = document.createElement("div");
-    wrap.id = "rc-paste-catcher";
-    wrap.innerHTML =
-      '<div class="rc-paste-card">' +
-      "<p>Pegá acá (Ctrl+V) y se manda al terminal</p>" +
-      '<textarea id="rc-paste-area" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>' +
-      '<div class="rc-paste-actions"><button type="button" id="rc-paste-send">Enviar</button>' +
-      '<button type="button" id="rc-paste-cancel">Cerrar</button></div></div>';
-    document.body.appendChild(wrap);
-    var area = document.getElementById("rc-paste-area");
-    var sendBtn = document.getElementById("rc-paste-send");
-    var cancel = document.getElementById("rc-paste-cancel");
-    function flush() {
-      var text = area && area.value;
-      hidePasteCatcher();
-      if (text) sendPaste(text);
-      else focusTerm();
-    }
-    if (sendBtn) sendBtn.addEventListener("click", flush);
-    if (cancel) cancel.addEventListener("click", function () {
-      hidePasteCatcher();
-      focusTerm();
-    });
-    wrap.addEventListener("click", function (ev) {
-      if (ev.target === wrap) {
-        hidePasteCatcher();
-        focusTerm();
-      }
-    });
-    wrap.addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        hidePasteCatcher();
-        focusTerm();
-      }
-    });
-    if (area) {
-      area.addEventListener("paste", function (ev) {
-        ev.stopPropagation();
-        setTimeout(flush, 0);
+  function shellQuote(path) {
+    return "'" + String(path).replace(/'/g, "'\\''") + "'";
+  }
+
+  function sendImageFile(file) {
+    if (!file) return Promise.resolve(false);
+    return fetch("/rc-paste-image", {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    })
+      .then(function (resp) {
+        return resp.json().then(function (data) {
+          return { ok: resp.ok, data: data };
+        });
+      })
+      .then(function (result) {
+        var path = result.ok && result.data && result.data.path;
+        if (!path) {
+          showToast("No pude guardar la imagen");
+          return false;
+        }
+        sendPaste(shellQuote(path));
+        showToast("Imagen: " + (result.data.name || path));
+        return true;
+      })
+      .catch(function () {
+        showToast("No pude guardar la imagen");
+        return false;
       });
-      try {
-        area.focus();
-      } catch (_) {}
+  }
+
+  function fileFromClipboardData(data) {
+    if (!data) return null;
+    var items = data.items;
+    if (items) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type && items[i].type.indexOf("image/") === 0) {
+          var file = items[i].getAsFile();
+          if (file) return file;
+        }
+      }
     }
+    var files = data.files;
+    if (files) {
+      for (var j = 0; j < files.length; j++) {
+        if (files[j].type && files[j].type.indexOf("image/") === 0) {
+          return files[j];
+        }
+      }
+    }
+    return null;
+  }
+
+  function applyClipboardData(data) {
+    var text = "";
+    try {
+      text = (data && data.getData && data.getData("text/plain")) || "";
+    } catch (_) {}
+    if (text) {
+      sendPaste(text);
+      return true;
+    }
+    var file = fileFromClipboardData(data);
+    if (file) {
+      sendImageFile(file);
+      return true;
+    }
+    return false;
+  }
+
+  function pasteTextOnly() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      showToast("Pegá con Ctrl+V");
+      return;
+    }
+    navigator.clipboard
+      .readText()
+      .then(function (text) {
+        if (text) sendPaste(text);
+        else showToast("El clipboard está vacío");
+      })
+      .catch(function () {
+        showToast("Pegá con Ctrl+V");
+      });
+  }
+
+  function applyClipboardItems(items) {
+    var i = 0;
+    function next() {
+      if (!items || i >= items.length) {
+        pasteTextOnly();
+        return;
+      }
+      var item = items[i++];
+      var types = item.types || [];
+      var textType = types.indexOf("text/plain") !== -1 ? "text/plain" : "";
+      var imageType = "";
+      for (var t = 0; t < types.length; t++) {
+        if (types[t].indexOf("image/") === 0) {
+          imageType = types[t];
+          break;
+        }
+      }
+      if (textType) {
+        item
+          .getType(textType)
+          .then(function (blob) {
+            return blob.text();
+          })
+          .then(function (text) {
+            if (text) sendPaste(text);
+            else if (imageType) return sendImageFromItem(item, imageType);
+            else next();
+          })
+          .catch(next);
+        return;
+      }
+      if (imageType) {
+        sendImageFromItem(item, imageType);
+        return;
+      }
+      next();
+    }
+    next();
+  }
+
+  function sendImageFromItem(item, type) {
+    item
+      .getType(type)
+      .then(function (blob) {
+        return sendImageFile(blob);
+      })
+      .catch(function () {
+        showToast("No pude leer la imagen");
+      });
   }
 
   function pasteFromClipboard() {
-    if (navigator.clipboard && navigator.clipboard.readText) {
+    if (navigator.clipboard && navigator.clipboard.read) {
       navigator.clipboard
-        .readText()
-        .then(function (text) {
-          if (text) sendPaste(text);
-          else showPasteCatcher();
-        })
-        .catch(function () {
-          showPasteCatcher();
-        });
+        .read()
+        .then(applyClipboardItems)
+        .catch(pasteTextOnly);
       return;
     }
-    showPasteCatcher();
+    pasteTextOnly();
   }
 
   function clearSticky() {
@@ -587,7 +677,7 @@
       return !!(
         t &&
         t.closest &&
-        t.closest("#rc-extra-keys, #rc-paste, #rc-paste-catcher")
+        t.closest("#rc-extra-keys, #rc-paste")
       );
     }
 
@@ -650,11 +740,10 @@
       return !!(
         t &&
         t.closest &&
-        t.closest("#rc-extra-keys, #rc-paste, #rc-paste-catcher")
+        t.closest("#rc-extra-keys, #rc-paste")
       );
     }
     function focus() {
-      if (document.getElementById("rc-paste-catcher")) return;
       focusTerm();
     }
     document.addEventListener(
@@ -695,29 +784,11 @@
       "paste",
       function (ev) {
         if (ev.defaultPrevented) return;
-        var t = ev.target;
-        if (t && t.id === "rc-paste-area") return;
-        var data = ev.clipboardData && ev.clipboardData.getData("text/plain");
-        if (!data) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-        sendPaste(data);
-      },
-      true
-    );
-    document.addEventListener(
-      "keydown",
-      function (ev) {
-        if (ev.defaultPrevented || ev.isComposing) return;
-        var pasteKey =
-          (ev.ctrlKey || ev.metaKey) && !ev.altKey && (ev.key === "v" || ev.key === "V");
-        var shiftIns = ev.shiftKey && ev.key === "Insert";
-        if (!pasteKey && !shiftIns) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-        pasteFromClipboard();
+        if (applyClipboardData(ev.clipboardData)) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        }
       },
       true
     );
