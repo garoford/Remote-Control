@@ -9,6 +9,8 @@
   var lastTap = { ctrl: 0, alt: 0 };
   var keepFocusUntil = 0;
   var gestureScrolled = false;
+  var wantIme = false;
+  var lastFit = "";
   var lastSentAt = 0;
   var layoutRaf = 0;
   var bar = null;
@@ -181,6 +183,18 @@
   function xterm() {
     var term = window.term;
     return term && typeof term.focus === "function" ? term : null;
+  }
+
+  function keyboardOpen() {
+    var vv = window.visualViewport;
+    if (!vv) return false;
+    return vv.height < window.innerHeight * 0.82;
+  }
+
+  function isTypeTarget(el) {
+    if (!el) return true;
+    if (el.id === "rc-file-pick") return false;
+    return !(el.closest && el.closest("#rc-file-pick"));
   }
 
   function focusTerm() {
@@ -670,7 +684,16 @@
       term.style.width = viewW + "px";
       term.style.height = Math.max(48, viewH - barH) + "px";
     }
-    window.dispatchEvent(new Event("resize"));
+    var fit = viewW + "x" + viewH + "@" + top + "," + left + ":" + barH;
+    if (fit !== lastFit) {
+      lastFit = fit;
+      window.dispatchEvent(new Event("resize"));
+    }
+    if (wantIme || keyboardOpen()) {
+      requestAnimationFrame(function () {
+        focusTerm();
+      });
+    }
   }
 
   function requestLayout() {
@@ -921,6 +944,7 @@
       if (!scrolling && Math.abs(y - startY) < 8) return;
       scrolling = true;
       gestureScrolled = true;
+      wantIme = false;
       ev.preventDefault();
       acc += lastY - y;
       lastY = y;
@@ -959,43 +983,66 @@
     }, 4000);
   }
 
-  function bindImeBridge(ta) {
-    if (!ta || ta.dataset.rcIme === "1") return;
-    ta.dataset.rcIme = "1";
-    ta.addEventListener("input", function () {
-      requestAnimationFrame(function () {
-        var v = ta.value;
-        if (!v) return;
-        ta.value = "";
-        sendInput(normalizePaste(v));
-      });
-    });
-    ta.addEventListener("keydown", function (ev) {
-      if (ev.defaultPrevented || ev.isComposing) return;
-      var term = xterm();
-      if (term && term.element && term.element.classList.contains("focus")) return;
-      var seq = "";
-      if (ev.key === "Enter") seq = "\r";
-      else if (ev.key === "Backspace") seq = "\u007f";
-      else if (ev.key === "Tab") seq = "\t";
-      else if (ev.key === "Escape") seq = "\u001b";
-      else if (ARROW_LETTER[ev.key]) seq = "\u001b[" + ARROW_LETTER[ev.key];
-      if (!seq) return;
-      ev.preventDefault();
-      sendInput(seq);
-    });
+  function flushTyped(text) {
+    if (!text) return;
+    sendInput(normalizePaste(text));
+    var ta = termTextarea();
+    if (ta) ta.value = "";
   }
 
-  function bootImeBridge() {
-    bindImeBridge(termTextarea());
-    var mo = new MutationObserver(function () {
-      bindImeBridge(termTextarea());
-    });
-    mo.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(function () {
-      mo.disconnect();
-      bindImeBridge(termTextarea());
-    }, 4000);
+  function bootTypeToTty() {
+    document.addEventListener(
+      "beforeinput",
+      function (ev) {
+        if (!ev.data || ev.isComposing) return;
+        if (ev.inputType === "insertFromPaste" || ev.inputType === "insertFromYank") {
+          return;
+        }
+        if (!isTypeTarget(ev.target)) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        flushTyped(ev.data);
+      },
+      true
+    );
+    document.addEventListener(
+      "compositionend",
+      function (ev) {
+        if (!ev.data || !isTypeTarget(ev.target)) return;
+        flushTyped(ev.data);
+      },
+      true
+    );
+    document.addEventListener(
+      "keydown",
+      function (ev) {
+        if (ev.defaultPrevented || ev.isComposing) return;
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (!isTypeTarget(ev.target)) return;
+        var seq = "";
+        if (ev.key === "Enter") seq = "\r";
+        else if (ev.key === "Backspace") seq = "\u007f";
+        else if (ev.key === "Tab") seq = "\t";
+        else if (ev.key === "Escape") seq = "\u001b";
+        else if (ev.key === "Delete") seq = "\u001b[3~";
+        else if (ARROW_LETTER[ev.key]) seq = "\u001b[" + ARROW_LETTER[ev.key];
+        if (!seq) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        sendInput(seq);
+      },
+      true
+    );
+    document.addEventListener(
+      "input",
+      function (ev) {
+        var ta = termTextarea();
+        if (!ta || ev.target !== ta) return;
+        if (!ta.value) return;
+        flushTyped(ta.value);
+      },
+      true
+    );
   }
 
   function bootTapToFocus() {
@@ -1009,6 +1056,7 @@
     }
     function focus() {
       if (gestureScrolled) return;
+      wantIme = true;
       focusTerm();
     }
     document.addEventListener(
@@ -1134,7 +1182,7 @@
     document.documentElement.classList.add("rc-touch");
     mountBar();
     bootInterceptors();
-    bootImeBridge();
+    bootTypeToTty();
     bootTouchScroll();
     bootTapToFocus();
     setTimeout(focusTerm, 300);

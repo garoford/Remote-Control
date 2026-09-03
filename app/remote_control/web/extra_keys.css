@@ -18,11 +18,18 @@ html.rc-touch .xterm-screen canvas {
 }
 
 html.rc-touch .xterm-helper-textarea {
+  position: fixed !important;
+  left: 8px !important;
+  top: auto !important;
+  bottom: calc(var(--rc-ek-h, 96px) + 12px) !important;
+  width: 18px !important;
+  height: 18px !important;
   font-size: 16px !important;
   line-height: 16px !important;
-  opacity: 0 !important;
+  opacity: 0.02 !important;
   caret-color: transparent;
   pointer-events: auto;
+  z-index: 2147482999 !important;
 }
 
 html.rc-touch .xterm-viewport {
