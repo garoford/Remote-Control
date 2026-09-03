@@ -8,8 +8,7 @@
   var locks = { ctrl: false, alt: false };
   var lastTap = { ctrl: 0, alt: 0 };
   var keepFocusUntil = 0;
-  var gestureScrolled = false;
-  var wantIme = false;
+  var writing = false;
   var lastFit = "";
   var lastSentAt = 0;
   var layoutRaf = 0;
@@ -183,12 +182,6 @@
   function xterm() {
     var term = window.term;
     return term && typeof term.focus === "function" ? term : null;
-  }
-
-  function keyboardOpen() {
-    var vv = window.visualViewport;
-    if (!vv) return false;
-    return vv.height < window.innerHeight * 0.82;
   }
 
   function isTypeTarget(el) {
@@ -689,7 +682,7 @@
       lastFit = fit;
       window.dispatchEvent(new Event("resize"));
     }
-    if (wantIme || keyboardOpen()) {
+    if (writing) {
       requestAnimationFrame(function () {
         focusTerm();
       });
@@ -934,7 +927,6 @@
       startY = lastY = ev.touches[0].clientY;
       acc = 0;
       scrolling = false;
-      gestureScrolled = false;
       active = true;
     }
 
@@ -943,8 +935,7 @@
       var y = ev.touches[0].clientY;
       if (!scrolling && Math.abs(y - startY) < 8) return;
       scrolling = true;
-      gestureScrolled = true;
-      wantIme = false;
+      writing = false;
       ev.preventDefault();
       acc += lastY - y;
       lastY = y;
@@ -983,8 +974,14 @@
     }, 4000);
   }
 
+  function beginWriting() {
+    writing = true;
+    focusTerm();
+  }
+
   function flushTyped(text) {
     if (!text) return;
+    beginWriting();
     sendInput(normalizePaste(text));
     var ta = termTextarea();
     if (ta) ta.value = "";
@@ -1029,6 +1026,7 @@
         if (!seq) return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
+        beginWriting();
         sendInput(seq);
       },
       true
@@ -1042,40 +1040,6 @@
         flushTyped(ta.value);
       },
       true
-    );
-  }
-
-  function bootTapToFocus() {
-    function fromKeys(ev) {
-      var t = ev.target;
-      return !!(
-        t &&
-        t.closest &&
-        t.closest("#rc-extra-keys, #rc-file-pick")
-      );
-    }
-    function focus() {
-      if (gestureScrolled) return;
-      wantIme = true;
-      focusTerm();
-    }
-    document.addEventListener(
-      "pointerup",
-      function (ev) {
-        if (fromKeys(ev)) return;
-        if (ev.pointerType === "mouse" && ev.button !== 0) return;
-        focus();
-      },
-      { passive: true }
-    );
-    document.addEventListener(
-      "touchend",
-      function (ev) {
-        if (fromKeys(ev)) return;
-        focus();
-        setTimeout(focus, 50);
-      },
-      { passive: true }
     );
   }
 
@@ -1184,8 +1148,6 @@
     bootInterceptors();
     bootTypeToTty();
     bootTouchScroll();
-    bootTapToFocus();
-    setTimeout(focusTerm, 300);
   }
 
   if (window.__rcRedirecting) return;
