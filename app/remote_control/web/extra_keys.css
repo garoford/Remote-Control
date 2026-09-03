@@ -35,6 +35,7 @@ html.rc-touch .xterm-viewport {
   position: fixed;
   z-index: 2147483000;
   box-sizing: border-box;
+  overflow: visible;
   padding: 5px 5px 6px;
   padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
   background: #011627;
@@ -103,9 +104,33 @@ html.rc-touch #rc-extra-keys {
   color: #011627;
 }
 
-#rc-extra-keys .rc-ek-key.is-paste {
+#rc-ek-paste {
+  position: absolute;
+  top: -13px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(195, 232, 141, 0.4);
+  border-radius: 8px;
+  background: #0b2942;
   color: #c3e88d;
-  border-color: rgba(195, 232, 141, 0.28);
+  box-shadow: 0 2px 8px rgba(1, 22, 39, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+#rc-ek-paste svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+#rc-ek-paste:active,
+#rc-ek-paste.is-down {
+  background: #1d3b53;
 }
 
 #rc-file-pick {

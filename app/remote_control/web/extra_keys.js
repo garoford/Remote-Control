@@ -31,8 +31,12 @@
       { id: "right", label: "→", seq: "\u001b[C", key: "ArrowRight" },
       { id: "pgdn", label: "PGDN", seq: "\u001b[6~", key: "PageDown" },
     ],
-    [{ id: "paste", label: "PEGAR", paste: true }],
   ];
+
+  var PASTE_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path fill="currentColor" d="M15 3h-1.2A2.8 2.8 0 0 0 11 1H9a2.8 2.8 0 0 0-2.8 2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm-6 0h2a.8.8 0 0 1 0 1.6H9A.8.8 0 0 1 9 3Zm6 16H5V5h1.2A2.8 2.8 0 0 0 9 7h2a2.8 2.8 0 0 0 2.8-2H15v14Z"/>' +
+    "</svg>";
 
   var PASTE_CHUNK = 2048;
   var PASTE_EDGE = 1920;
@@ -151,7 +155,11 @@
   }
 
   function isPasteUi(el) {
-    return !!(el && el.closest && el.closest(".is-paste, #rc-file-pick"));
+    return !!(
+      el &&
+      el.closest &&
+      el.closest(".is-paste, #rc-ek-paste, #rc-file-pick")
+    );
   }
 
   function termTextarea() {
@@ -654,6 +662,7 @@
     el.addEventListener("touchstart", hold, { passive: false });
     el.addEventListener("mousedown", hold, { passive: false });
     el.addEventListener("click", function (ev) {
+      if (isPasteUi(ev.target)) return;
       ev.preventDefault();
       ev.stopPropagation();
       armKeepFocus();
@@ -678,8 +687,7 @@
         key.setAttribute("tabindex", "-1");
         key.dataset.rcId = def.id;
         key.textContent = def.label;
-        if (def.paste) key.classList.add("is-paste");
-        if (!def.paste) bindKeepFocus(key);
+        bindKeepFocus(key);
         key.addEventListener(
           "pointerdown",
           function (ev) {
@@ -701,6 +709,31 @@
       });
       bar.appendChild(rowEl);
     });
+    var pasteBtn = document.createElement("button");
+    pasteBtn.type = "button";
+    pasteBtn.id = "rc-ek-paste";
+    pasteBtn.className = "is-paste";
+    pasteBtn.setAttribute("aria-label", "Pegar archivo");
+    pasteBtn.innerHTML = PASTE_ICON;
+    pasteBtn.addEventListener(
+      "pointerdown",
+      function (ev) {
+        ev.stopPropagation();
+        pasteBtn.classList.add("is-down");
+        openFilePicker();
+      },
+      { passive: true }
+    );
+    pasteBtn.addEventListener("pointerup", function () {
+      pasteBtn.classList.remove("is-down");
+    });
+    pasteBtn.addEventListener("pointercancel", function () {
+      pasteBtn.classList.remove("is-down");
+    });
+    pasteBtn.addEventListener("pointerleave", function () {
+      pasteBtn.classList.remove("is-down");
+    });
+    bar.appendChild(pasteBtn);
     bindKeepFocus(bar);
     document.body.appendChild(bar);
     setLinkState(!!(window.__rcTermSocket && window.__rcTermSocket.readyState === 1));
