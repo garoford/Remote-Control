@@ -103,6 +103,103 @@ html.rc-touch #rc-extra-keys {
   color: #011627;
 }
 
+#rc-extra-keys .rc-ek-key.is-paste {
+  color: #c3e88d;
+  border-color: rgba(195, 232, 141, 0.28);
+}
+
+#rc-paste {
+  position: fixed;
+  z-index: 2147483002;
+  top: 8px;
+  right: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgba(195, 232, 141, 0.35);
+  border-radius: 999px;
+  background: #0b2942;
+  color: #c3e88d;
+  font: 700 12px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(1, 22, 39, 0.45);
+}
+
+#rc-paste:hover,
+#rc-paste:focus-visible {
+  background: #1d3b53;
+  border-color: #c3e88d;
+  outline: none;
+}
+
+html.rc-touch #rc-paste {
+  display: none;
+}
+
+#rc-paste-catcher {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: rgba(1, 22, 39, 0.72);
+}
+
+#rc-paste-catcher .rc-paste-card {
+  width: min(520px, 100%);
+  background: #011627;
+  border: 1px solid rgba(130, 170, 255, 0.28);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 12px 40px rgba(1, 22, 39, 0.7);
+}
+
+#rc-paste-catcher p {
+  margin: 0 0 10px;
+  color: #d6deeb;
+  font: 600 13px/1.4 "FiraCode Nerd Font Mono", ui-monospace, system-ui, sans-serif;
+}
+
+#rc-paste-area {
+  display: block;
+  width: 100%;
+  min-height: 140px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid #1d3b53;
+  border-radius: 8px;
+  background: #0b2942;
+  color: #d6deeb;
+  font: 16px/1.4 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  padding: 8px;
+}
+
+#rc-paste-catcher .rc-paste-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#rc-paste-catcher button {
+  flex: 1;
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid #1d3b53;
+  background: #0b2942;
+  color: #d6deeb;
+  font: 700 12px/1 "FiraCode Nerd Font Mono", ui-monospace, sans-serif;
+  cursor: pointer;
+}
+
+#rc-paste-send {
+  background: #21c7a8;
+  border-color: #21c7a8;
+  color: #011627;
+}
+
 #rc-net-badge {
   position: fixed;
   z-index: 2147483001;

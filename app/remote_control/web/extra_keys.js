@@ -31,7 +31,10 @@
       { id: "right", label: "→", seq: "\u001b[C", key: "ArrowRight" },
       { id: "pgdn", label: "PGDN", seq: "\u001b[6~", key: "PageDown" },
     ],
+    [{ id: "paste", label: "PEGAR", paste: true }],
   ];
+
+  var PASTE_CHUNK = 2048;
 
   var ARROW_LETTER = {
     ArrowUp: "A",
@@ -118,6 +121,14 @@
     return "pc";
   }
 
+  function isPasteUi(el) {
+    return !!(
+      el &&
+      el.closest &&
+      el.closest("#rc-paste, #rc-paste-catcher, .is-paste")
+    );
+  }
+
   function termTextarea() {
     return document.querySelector(".xterm-helper-textarea");
   }
@@ -169,6 +180,98 @@
 
   function recentlySent() {
     return Date.now() - lastSentAt < 60;
+  }
+
+  function normalizePaste(text) {
+    return String(text || "").replace(/\r\n/g, "\n").replace(/\n/g, "\r");
+  }
+
+  function sendPaste(text) {
+    var out = normalizePaste(text);
+    if (!out) return false;
+    var i = 0;
+    function step() {
+      if (i >= out.length) {
+        focusTerm();
+        return;
+      }
+      sendInput(out.slice(i, i + PASTE_CHUNK));
+      i += PASTE_CHUNK;
+      if (i < out.length) setTimeout(step, 16);
+      else focusTerm();
+    }
+    step();
+    return true;
+  }
+
+  function hidePasteCatcher() {
+    var box = document.getElementById("rc-paste-catcher");
+    if (box) box.remove();
+  }
+
+  function showPasteCatcher() {
+    hidePasteCatcher();
+    var wrap = document.createElement("div");
+    wrap.id = "rc-paste-catcher";
+    wrap.innerHTML =
+      '<div class="rc-paste-card">' +
+      "<p>Pegá acá (Ctrl+V) y se manda al terminal</p>" +
+      '<textarea id="rc-paste-area" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>' +
+      '<div class="rc-paste-actions"><button type="button" id="rc-paste-send">Enviar</button>' +
+      '<button type="button" id="rc-paste-cancel">Cerrar</button></div></div>';
+    document.body.appendChild(wrap);
+    var area = document.getElementById("rc-paste-area");
+    var sendBtn = document.getElementById("rc-paste-send");
+    var cancel = document.getElementById("rc-paste-cancel");
+    function flush() {
+      var text = area && area.value;
+      hidePasteCatcher();
+      if (text) sendPaste(text);
+      else focusTerm();
+    }
+    if (sendBtn) sendBtn.addEventListener("click", flush);
+    if (cancel) cancel.addEventListener("click", function () {
+      hidePasteCatcher();
+      focusTerm();
+    });
+    wrap.addEventListener("click", function (ev) {
+      if (ev.target === wrap) {
+        hidePasteCatcher();
+        focusTerm();
+      }
+    });
+    wrap.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        hidePasteCatcher();
+        focusTerm();
+      }
+    });
+    if (area) {
+      area.addEventListener("paste", function (ev) {
+        ev.stopPropagation();
+        setTimeout(flush, 0);
+      });
+      try {
+        area.focus();
+      } catch (_) {}
+    }
+  }
+
+  function pasteFromClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard
+        .readText()
+        .then(function (text) {
+          if (text) sendPaste(text);
+          else showPasteCatcher();
+        })
+        .catch(function () {
+          showPasteCatcher();
+        });
+      return;
+    }
+    showPasteCatcher();
   }
 
   function clearSticky() {
@@ -247,6 +350,10 @@
   }
 
   function pressKey(def) {
+    if (def.paste) {
+      pasteFromClipboard();
+      return;
+    }
     if (def.mod) {
       toggleMod(def.mod);
       return;
@@ -288,6 +395,7 @@
 
   function bindKeepFocus(el) {
     function hold(ev) {
+      if (isPasteUi(ev.target)) return;
       ev.preventDefault();
       armKeepFocus();
     }
@@ -319,11 +427,13 @@
         key.setAttribute("tabindex", "-1");
         key.dataset.rcId = def.id;
         key.textContent = def.label;
-        bindKeepFocus(key);
+        if (def.paste) key.classList.add("is-paste");
+        if (!def.paste) bindKeepFocus(key);
         key.addEventListener(
           "pointerdown",
-          function () {
+          function (ev) {
             key.classList.add("is-down");
+            if (def.paste) ev.preventDefault();
             pressKey(def);
           },
           { passive: false }
@@ -474,7 +584,11 @@
 
     function fromKeys(ev) {
       var t = ev.target;
-      return !!(t && t.closest && t.closest("#rc-extra-keys"));
+      return !!(
+        t &&
+        t.closest &&
+        t.closest("#rc-extra-keys, #rc-paste, #rc-paste-catcher")
+      );
     }
 
     function onStart(ev) {
@@ -533,9 +647,14 @@
   function bootTapToFocus() {
     function fromKeys(ev) {
       var t = ev.target;
-      return !!(t && t.closest && t.closest("#rc-extra-keys"));
+      return !!(
+        t &&
+        t.closest &&
+        t.closest("#rc-extra-keys, #rc-paste, #rc-paste-catcher")
+      );
     }
     function focus() {
+      if (document.getElementById("rc-paste-catcher")) return;
       focusTerm();
     }
     document.addEventListener(
@@ -558,11 +677,61 @@
     );
   }
 
+  function mountPasteChip() {
+    if (document.getElementById("rc-paste")) return;
+    var btn = document.createElement("button");
+    btn.id = "rc-paste";
+    btn.type = "button";
+    btn.textContent = "Pegar";
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      pasteFromClipboard();
+    });
+    document.body.appendChild(btn);
+  }
+
+  function bootPaste() {
+    document.addEventListener(
+      "paste",
+      function (ev) {
+        if (ev.defaultPrevented) return;
+        var t = ev.target;
+        if (t && t.id === "rc-paste-area") return;
+        var data = ev.clipboardData && ev.clipboardData.getData("text/plain");
+        if (!data) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        sendPaste(data);
+      },
+      true
+    );
+    document.addEventListener(
+      "keydown",
+      function (ev) {
+        if (ev.defaultPrevented || ev.isComposing) return;
+        var pasteKey =
+          (ev.ctrlKey || ev.metaKey) && !ev.altKey && (ev.key === "v" || ev.key === "V");
+        var shiftIns = ev.shiftKey && ev.key === "Insert";
+        if (!pasteKey && !shiftIns) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        pasteFromClipboard();
+      },
+      true
+    );
+  }
+
   function boot() {
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
-    if (device === "pc") return;
+    bootPaste();
+    if (device === "pc") {
+      mountPasteChip();
+      return;
+    }
     document.documentElement.classList.add("rc-touch");
     mountBar();
     bootInterceptors();
