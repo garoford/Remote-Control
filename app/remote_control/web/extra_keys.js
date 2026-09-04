@@ -23,6 +23,7 @@
   var stickBottom = true;
   var lastOff = 0;
   var historyLines = [];
+  var histTimer = 0;
   var bar = null;
 
   var ROWS = [
@@ -431,6 +432,38 @@
     return page;
   }
 
+  function pullServerHistory() {
+    var id = tabId();
+    if (!id) return;
+    fetch("/rc-history?tab=" + encodeURIComponent(id) + "&fp=" + encodeURIComponent("[]"), {
+      cache: "no-store",
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        var all =
+          payload && payload.all && payload.all.length
+            ? payload.all
+            : payload && payload.mode === "full" && payload.lines && payload.lines.length
+              ? payload.lines
+              : [];
+        if (all.length > historyLines.length) {
+          paintHistory(all);
+          if (stickBottom) pinBottom();
+        }
+      })
+      .catch(function () {});
+  }
+
+  function scheduleServerHist() {
+    if (histTimer) return;
+    histTimer = setTimeout(function () {
+      histTimer = 0;
+      pullServerHistory();
+    }, 400);
+  }
+
   function bootHistoryPage() {
     mountHistory();
     window.__rcHistoryLines = historyLines;
@@ -441,6 +474,14 @@
       paintHistory(window.__rcPendingHistory);
       window.__rcPendingHistory = null;
     }
+    pullServerHistory();
+    setTimeout(pullServerHistory, 300);
+    setTimeout(pullServerHistory, 1000);
+    setTimeout(pullServerHistory, 2500);
+    window.addEventListener("rc-ws-open", function () {
+      pullServerHistory();
+      setTimeout(pullServerHistory, 400);
+    });
     var mo = new MutationObserver(function () {
       mountHistory();
     });
@@ -450,7 +491,6 @@
       mountHistory();
     }, 4000);
     var hooked = false;
-    var trimmedLive = false;
     var hookTries = 0;
     function hook() {
       var term = xterm();
@@ -460,13 +500,8 @@
       }
       hooked = true;
       function onOut() {
-        if (!trimmedLive && readTermLines(false).length) {
-          trimHistoryAgainstLive();
-          capHistory();
-          renderHistory();
-          trimmedLive = true;
-        }
         syncHistoryFromTerm();
+        scheduleServerHist();
         if (stickBottom) pinBottom();
       }
       if (typeof term.onWriteParsed === "function") {
