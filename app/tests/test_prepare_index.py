@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from remote_control.tunnel import TunnelService
 
@@ -23,12 +24,21 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertNotIn("base64", css)
         self.assertIn("ui-monospace", css)
         self.assertIn("rc-touch-boot", html)
-        self.assertIn("cache.js?v=1.3.15", html)
+        self.assertIn("cache.js?v=1.3.16", html)
         self.assertIn("function cellAt", html)
         self.assertIn("function applyCellSelect", html)
         self.assertIn("function readSelText", html)
+        self.assertIn("function restoreSel", html)
         self.assertIn("function wordBounds", html)
         self.assertIn("viewportY", html)
+        conf_text = (
+            Path(__file__).resolve().parents[1]
+            / "remote_control"
+            / "web"
+            / "tmux.tab.conf"
+        ).read_text(encoding="utf-8")
+        self.assertIn("set -g mouse off", conf_text)
+        self.assertNotIn("set -g mouse on", conf_text)
         self.assertNotIn("function fireMouse", html)
         self.assertIn("function saveBlob", html)
         self.assertIn("Guardando", html)

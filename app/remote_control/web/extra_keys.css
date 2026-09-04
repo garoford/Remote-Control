@@ -21,6 +21,9 @@ html.rc-touch #terminal-container {
   padding: 0 !important;
   box-sizing: border-box;
   touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 html.rc-touch .xterm,

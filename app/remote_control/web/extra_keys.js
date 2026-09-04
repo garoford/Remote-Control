@@ -185,6 +185,7 @@
     }
     ta.setAttribute("readonly", "readonly");
     ta.setAttribute("inputmode", "none");
+    if (selectMode) return;
     try {
       ta.blur();
     } catch (_) {}
@@ -195,7 +196,14 @@
     writing = false;
     keepFocusUntil = 0;
     syncImeBtn();
-    armTextarea(termTextarea());
+    var ta = termTextarea();
+    if (!ta) return;
+    ta.setAttribute("readonly", "readonly");
+    ta.setAttribute("inputmode", "none");
+    if (selectMode) return;
+    try {
+      ta.blur();
+    } catch (_) {}
   }
 
   function unlockIme() {
@@ -328,6 +336,11 @@
     }
     lastSel = { from: { col: a.col, row: a.row }, to: { col: b.col, row: b.row } };
     term.select(a.col, a.row, Math.max(1, (b.row - a.row) * term.cols + (b.col - a.col) + 1));
+  }
+
+  function restoreSel() {
+    if (!selectMode || !lastSel) return;
+    applyCellSelect(lastSel.from, lastSel.to);
   }
 
   function readSelText() {
@@ -1347,7 +1360,10 @@
       if (selecting) {
         var end = toBufferCell(cellAt(lastX, lastY));
         if (selFrom && end) applyCellSelect(selFrom, end);
-      } else if (!scrolling) {
+        requestAnimationFrame(restoreSel);
+        setTimeout(restoreSel, 0);
+        setTimeout(restoreSel, 50);
+      } else if (!scrolling && !selectMode) {
         var ta = termTextarea();
         if (ta) {
           try {
@@ -1364,16 +1380,22 @@
 
     function blockXtermFocus(ev) {
       if (fromKeys(ev)) return;
-      lockIme();
+      ev.preventDefault();
       ev.stopPropagation();
-      if (ev.type === "click" || ev.type === "mousedown") ev.preventDefault();
+      if (selectMode) {
+        restoreSel();
+        return;
+      }
+      lockIme();
     }
 
     function bind(el) {
       if (!el || el.dataset.rcTouchScroll === "1") return;
       el.dataset.rcTouchScroll = "1";
       el.addEventListener("pointerdown", blockXtermFocus, { passive: false, capture: true });
+      el.addEventListener("pointerup", blockXtermFocus, { passive: false, capture: true });
       el.addEventListener("mousedown", blockXtermFocus, { passive: false, capture: true });
+      el.addEventListener("mouseup", blockXtermFocus, { passive: false, capture: true });
       el.addEventListener("click", blockXtermFocus, { passive: false, capture: true });
       el.addEventListener("touchstart", onStart, { passive: false, capture: true });
       el.addEventListener("touchmove", onMove, { passive: false, capture: true });
@@ -1544,6 +1566,29 @@
     showToast("No pude copiar");
   }
 
+  function bootKeepSel() {
+    var tries = 0;
+    var restoring = false;
+    function arm() {
+      var term = xterm();
+      if (!term || typeof term.onSelectionChange !== "function") {
+        if (tries++ < 40) setTimeout(arm, 150);
+        return;
+      }
+      term.onSelectionChange(function () {
+        if (!selectMode || !lastSel || restoring) return;
+        if (term.hasSelection && term.hasSelection()) return;
+        restoring = true;
+        try {
+          restoreSel();
+        } finally {
+          restoring = false;
+        }
+      });
+    }
+    arm();
+  }
+
   function bootImeLock() {
     document.addEventListener(
       "focusin",
@@ -1620,6 +1665,7 @@
     document.documentElement.classList.add("rc-touch");
     lockIme();
     bootImeLock();
+    bootKeepSel();
     mountBar();
     bootInterceptors();
     bootTypeToTty();
