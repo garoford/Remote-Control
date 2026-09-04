@@ -1,6 +1,6 @@
 /* Remote Control service worker: cache fonts/JS. Never fake a 503 page. */
-/* v=1.3.10 */
-var CACHE = "rc-tty-v1.3.10";
+/* v=1.3.11 */
+var CACHE = "rc-tty-v1.3.11";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
@@ -55,7 +55,7 @@ self.addEventListener("install", function (event) {
         return { fonts: [] };
       })
       .then(function (man) {
-        var urls = ["/rc-assets/cache.js?v=1.3.10", "/rc-assets/sw.js?v=1.3.10"].concat(
+        var urls = ["/rc-assets/cache.js?v=1.3.11", "/rc-assets/sw.js?v=1.3.11"].concat(
           man.fonts || []
         );
         return caches.open(CACHE).then(function (cache) {
@@ -104,6 +104,9 @@ self.addEventListener("fetch", function (event) {
   }
   if (url.origin !== self.location.origin) return;
   if (url.pathname.indexOf("/ws") === 0) return;
+  if (url.pathname.indexOf("/rc-") === 0 && url.pathname.indexOf("/rc-assets/") !== 0) {
+    return;
+  }
   if (url.pathname === "/rc-assets/manifest.json") {
     event.respondWith(networkFirst(request, false));
     return;
@@ -118,9 +121,5 @@ self.addEventListener("fetch", function (event) {
   }
   if (/\.(js|css|wasm)$/.test(url.pathname)) {
     event.respondWith(cacheFirst(request, false));
-    return;
-  }
-  if (url.pathname === "/rc-history") {
-    event.respondWith(networkFirst(request, false));
   }
 });

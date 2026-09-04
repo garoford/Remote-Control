@@ -64,9 +64,8 @@ class PasteImageTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "Pictures").mkdir()
-            with self.assertRaises(PasteError) as ctx:
-                write_paste_file("paste-ab12cd34.webp", MINI_PNG, home=home)
-            self.assertEqual(str(ctx.exception), "not reserved")
+            path = write_paste_file("paste-ab12cd34.webp", MINI_PNG, home=home)
+            self.assertEqual(path.read_bytes(), MINI_PNG)
 
     def test_rejects_empty_write(self) -> None:
         with self.assertRaises(PasteError):

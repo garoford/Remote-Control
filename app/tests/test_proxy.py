@@ -246,7 +246,29 @@ class ProxyAssetTests(unittest.TestCase):
             MINI_PNG,
             "image/png",
         )
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertTrue(data.get("path"))
+        self.assertEqual(Path(data["path"]).read_bytes(), MINI_PNG)
+
+    def test_paste_options(self) -> None:
+        resp = self._request("OPTIONS", "/rc-paste-reserve", b"", "text/plain")
+        self.assertEqual(resp.status, 204)
+
+    def test_unknown_rc_route_is_json(self) -> None:
+        resp = self._get("/rc-does-not-exist")
         self.assertEqual(resp.status, 404)
+        self.assertEqual(json.loads(resp.read()).get("error"), "not found")
+
+    def test_paste_reserve_trailing_slash(self) -> None:
+        resp = self._request(
+            "POST",
+            "/rc-paste-reserve/",
+            json.dumps({"name": "paste-aabbccdd.webp"}).encode(),
+            "application/json",
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(resp.read()).get("path"))
 
     def test_paste_reserve_rejects_bad_name(self) -> None:
         resp = self._request(

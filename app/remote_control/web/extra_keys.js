@@ -16,6 +16,8 @@
   var layoutRaf = 0;
   var scrollBusy = false;
   var scrollPend = 0;
+  var pasteGuard = 0;
+  var pasteBusy = false;
   var bar = null;
 
   var ROWS = [
@@ -415,13 +417,19 @@
     });
   }
 
+  function readJson(resp) {
+    return resp.json().catch(function () {
+      return {};
+    });
+  }
+
   function reserveName(name) {
     return fetch("/rc-paste-reserve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name }),
     }).then(function (resp) {
-      return resp.json().then(function (data) {
+      return readJson(resp).then(function (data) {
         if (!resp.ok || !data.path) {
           throw new Error((data && data.error) || "reserve");
         }
@@ -436,9 +444,29 @@
       headers: { "Content-Type": type || "application/octet-stream" },
       body: blob,
     }).then(function (resp) {
-      if (!resp.ok) throw new Error("put");
-      return resp.json();
+      return readJson(resp).then(function (data) {
+        if (!resp.ok || !data.path) throw new Error((data && data.error) || "put");
+        return data;
+      });
     });
+  }
+
+  function saveBlob(ext, blob, type) {
+    function attempt(left) {
+      var name = mintName(ext);
+      return reserveName(name)
+        .catch(function () {
+          return { name: name };
+        })
+        .then(function () {
+          return putPasteFile(name, blob, type);
+        })
+        .catch(function (err) {
+          if (left > 1) return attempt(left - 1);
+          throw err;
+        });
+    }
+    return attempt(3);
   }
 
   function compressImage(blob, ext) {
@@ -481,34 +509,37 @@
   }
 
   function ingestBlob(blob, asImage) {
-    if (!blob) return Promise.resolve(false);
+    if (!blob || pasteBusy) return Promise.resolve(false);
+    pasteBusy = true;
+    pasteGuard = Date.now() + 800;
+    showToast("Guardando…");
     var extP = asImage
       ? preferredImageExt()
       : Promise.resolve(extFromName(blob.name) || extFromType(blob.type) || "bin");
     return extP
       .then(function (ext) {
-        var name = mintName(ext);
-        return reserveName(name).then(function (info) {
-          sendPaste(shellQuote(info.path));
-          showToast(info.name);
-          var work = asImage
-            ? compressImage(blob, ext)
-            : Promise.resolve(blob);
-          return work.then(function (out) {
-            var type = asImage
-              ? ext === "jpg"
-                ? "image/jpeg"
-                : "image/webp"
-              : blob.type || "application/octet-stream";
-            return putPasteFile(name, out, type).then(function () {
-              return true;
-            });
-          });
+        var work = asImage ? compressImage(blob, ext) : Promise.resolve(blob);
+        var type = asImage
+          ? ext === "jpg"
+            ? "image/jpeg"
+            : "image/webp"
+          : blob.type || "application/octet-stream";
+        return work.then(function (out) {
+          return saveBlob(ext, out, type);
         });
+      })
+      .then(function (info) {
+        sendPaste(shellQuote(info.path));
+        showToast(info.name);
+        return true;
       })
       .catch(function () {
         showToast("No pude guardar el archivo");
         return false;
+      })
+      .then(function (ok) {
+        pasteBusy = false;
+        return ok;
       });
   }
 
@@ -1183,6 +1214,10 @@
       "paste",
       function (ev) {
         if (ev.defaultPrevented) return;
+        if (Date.now() < pasteGuard) {
+          ev.preventDefault();
+          return;
+        }
         var t = ev.target;
         if (t && t.id === "rc-file-pick") return;
         if (applyClipboardData(ev.clipboardData)) {
@@ -1204,6 +1239,7 @@
           ev.preventDefault();
           ev.stopPropagation();
           if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+          pasteGuard = Date.now() + 800;
           pasteFromClipboard();
           return;
         }

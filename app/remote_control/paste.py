@@ -114,8 +114,8 @@ def write_paste_file(name: str, body: bytes, *, home: Path | None = None) -> Pat
     if len(body) > MAX_PASTE_BYTES:
         raise PasteError("too large")
     safe = parse_paste_name(name)
-    path = paste_dir(home) / safe
-    if not path.is_file():
-        raise PasteError("not reserved")
+    dest = paste_dir(home)
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / safe
     path.write_bytes(body)
     return path

@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import cancel_copy_mode, history_payload, scroll_history
-from remote_control.paste import PasteError, reserve_paste_file, write_paste_file
+from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
     load_manifest,
     manifest_for_client,
@@ -29,6 +29,12 @@ from remote_control.mobile import (
 ASSET_CACHE = "public, max-age=31536000, immutable"
 SCRIPT_CACHE = "public, max-age=300"
 MAX_HEADER = 1024 * 1024
+_API_EXTRA = [
+    ("Cache-Control", "no-store"),
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type, X-RC-Paste-Name"),
+]
 
 
 def _safe_asset(assets: Path, name: str) -> Path | None:
@@ -67,6 +73,10 @@ def _read_request(sock: socket.socket) -> tuple[bytes, bytes] | None:
             return None
     header, _, rest = data.partition(b"\r\n\r\n")
     headers = _header_map(header)
+    te = (headers.get("transfer-encoding") or "").lower()
+    if "chunked" in te:
+        body = _read_chunked(sock, rest)
+        return header, body or b""
     need = int(headers.get("content-length") or 0)
     body = rest
     while len(body) < need:
@@ -210,6 +220,10 @@ class Sidecar:
         self.paste_home = paste_home
         self._sock: socket.socket | None = None
         self._stop = threading.Event()
+        try:
+            paste_dir(self.paste_home).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     def serve_forever(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -261,7 +275,12 @@ class Sidecar:
             method, raw_target = parts[0], parts[1]
             parsed_url = urlparse(raw_target)
             path = unquote(parsed_url.path)
+            if path != "/" and path.endswith("/"):
+                path = path.rstrip("/")
             headers = _header_map(header)
+            if method == "OPTIONS" and path.startswith("/rc-"):
+                self._serve_options(conn)
+                return
             if method in {"GET", "HEAD"} and path.startswith("/rc-assets/"):
                 self._serve_asset(
                     conn,
@@ -287,6 +306,16 @@ class Sidecar:
                 if not name:
                     name = headers.get("x-rc-paste-name", "")
                 self._serve_paste_write(conn, body, name)
+                return
+            if path.startswith("/rc-") and not path.startswith("/rc-assets/"):
+                conn.sendall(
+                    _http_response(
+                        "404 Not Found",
+                        b'{"error":"not found"}',
+                        "application/json; charset=utf-8",
+                        _API_EXTRA,
+                    )
+                )
                 return
             self._proxy(conn, header, body, headers)
         except OSError:
@@ -356,6 +385,16 @@ class Sidecar:
             return
         conn.sendall(_http_response("200 OK", data, ctype, extra))
 
+    def _serve_options(self, conn: socket.socket) -> None:
+        conn.sendall(
+            _http_response(
+                "204 No Content",
+                b"",
+                "text/plain",
+                _API_EXTRA + [("Access-Control-Max-Age", "86400")],
+            )
+        )
+
     def _serve_history(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
         tab = (query.get("tab") or [""])[0]
         raw_fp = (query.get("fp") or [""])[0]
@@ -375,7 +414,7 @@ class Sidecar:
                     "200 OK",
                     body,
                     "application/json; charset=utf-8",
-                    [("Cache-Control", "no-store")],
+                    _API_EXTRA,
                 )
             )
             return
@@ -385,7 +424,7 @@ class Sidecar:
                 "200 OK",
                 body,
                 "application/json; charset=utf-8",
-                [("Cache-Control", "no-store")],
+                _API_EXTRA,
             )
         )
 
@@ -398,7 +437,7 @@ class Sidecar:
                 "200 OK",
                 body,
                 "application/json; charset=utf-8",
-                [("Cache-Control", "no-store")],
+                _API_EXTRA,
             )
         )
 
@@ -419,7 +458,7 @@ class Sidecar:
                 "200 OK",
                 body,
                 "application/json; charset=utf-8",
-                [("Cache-Control", "no-store")],
+                _API_EXTRA,
             )
         )
 
@@ -437,7 +476,7 @@ class Sidecar:
                 status,
                 json.dumps({"error": reason}).encode("utf-8"),
                 "application/json; charset=utf-8",
-                [("Cache-Control", "no-store")],
+                _API_EXTRA,
             )
         )
 
@@ -447,7 +486,7 @@ class Sidecar:
                 "200 OK",
                 json.dumps({"path": str(path), "name": path.name}).encode("utf-8"),
                 "application/json; charset=utf-8",
-                [("Cache-Control", "no-store")],
+                _API_EXTRA,
             )
         )
 
@@ -470,7 +509,7 @@ class Sidecar:
                     "500 Internal Server Error",
                     b'{"error":"write failed"}',
                     "application/json; charset=utf-8",
-                    [("Cache-Control", "no-store")],
+                    _API_EXTRA,
                 )
             )
             return
@@ -488,7 +527,7 @@ class Sidecar:
                     "500 Internal Server Error",
                     b'{"error":"write failed"}',
                     "application/json; charset=utf-8",
-                    [("Cache-Control", "no-store")],
+                    _API_EXTRA,
                 )
             )
             return
