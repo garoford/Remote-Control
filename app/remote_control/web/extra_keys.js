@@ -21,6 +21,8 @@
   var imeGuard = 0;
   var lastSel = null;
   var stickBottom = true;
+  var lastOff = 0;
+  var historyLines = [];
   var bar = null;
 
   var ROWS = [
@@ -256,7 +258,7 @@
   }
 
   function viewportEl() {
-    return document.querySelector(".xterm-viewport");
+    return document.getElementById("rc-term-page") || mountHistory();
   }
 
   function viewportTop() {
@@ -278,18 +280,6 @@
 
   function pinBottom() {
     stickBottom = true;
-    var term = xterm();
-    if (term) {
-      try {
-        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
-      } catch (_) {}
-      try {
-        var buf = term.buffer && term.buffer.active;
-        if (buf && typeof term.scrollToLine === "function") {
-          term.scrollToLine(buf.baseY + buf.cursorY);
-        }
-      } catch (_) {}
-    }
     var vp = viewportEl();
     if (vp) vp.scrollTop = vp.scrollHeight;
   }
@@ -297,6 +287,207 @@
   function xterm() {
     var term = window.term;
     return term && typeof term.focus === "function" ? term : null;
+  }
+
+  function normLine(s) {
+    return String(s || "").replace(/\s+$/g, "");
+  }
+
+  function readTermLines(all) {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    if (!buf || typeof buf.getLine !== "function") return [];
+    var out = [];
+    var y0 = all ? 0 : buf.baseY || 0;
+    var end = all ? buf.length : y0 + (term.rows || 24);
+    var i;
+    for (i = y0; i < end; i++) {
+      var line = buf.getLine(i);
+      out.push(
+        line && typeof line.translateToString === "function"
+          ? line.translateToString(true)
+          : ""
+      );
+    }
+    while (out.length && !normLine(out[out.length - 1])) out.pop();
+    return out;
+  }
+
+  function overlapLen(hist, live) {
+    if (!hist.length || !live.length) return 0;
+    var max = Math.min(hist.length, live.length, 80);
+    var i;
+    var j;
+    for (i = max; i > 0; i--) {
+      var ok = true;
+      for (j = 0; j < i; j++) {
+        if (normLine(hist[hist.length - i + j]) !== normLine(live[j])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return i;
+    }
+    return 0;
+  }
+
+  function trimHistoryAgainstLive() {
+    var live = readTermLines(false);
+    if (!live.length || !historyLines.length) return;
+    var n = overlapLen(historyLines, live);
+    if (n === 1 && live.length > 1) n = 0;
+    if (!n && live.length <= historyLines.length) {
+      var start = historyLines.length - live.length;
+      var ok = true;
+      var j;
+      for (j = 0; j < live.length; j++) {
+        if (normLine(historyLines[start + j]) !== normLine(live[j])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) n = live.length;
+    }
+    if (n) historyLines = historyLines.slice(0, historyLines.length - n);
+  }
+
+  function capHistory() {
+    if (historyLines.length > 20000) historyLines = historyLines.slice(-20000);
+    window.__rcHistoryLines = historyLines;
+  }
+
+  function renderHistory() {
+    var pre = document.getElementById("rc-term-history");
+    if (!pre) return;
+    pre.textContent = historyLines.length ? historyLines.join("\n") + "\n" : "";
+  }
+
+  function resetLastOff() {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    lastOff = buf ? buf.baseY || 0 : 0;
+  }
+
+  function paintHistory(lines) {
+    historyLines = (lines || []).slice();
+    mountHistory();
+    trimHistoryAgainstLive();
+    capHistory();
+    renderHistory();
+    resetLastOff();
+  }
+
+  function appendHistory(lines) {
+    if (!lines || !lines.length) return;
+    historyLines = historyLines.concat(lines);
+    trimHistoryAgainstLive();
+    capHistory();
+    renderHistory();
+  }
+
+  function syncHistoryFromTerm() {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    if (!buf || typeof buf.getLine !== "function") return;
+    var off = buf.baseY || 0;
+    if (off <= lastOff) return;
+    var add = [];
+    var i;
+    for (i = lastOff; i < off; i++) {
+      var line = buf.getLine(i);
+      add.push(
+        line && typeof line.translateToString === "function"
+          ? line.translateToString(true)
+          : ""
+      );
+    }
+    lastOff = off;
+    if (!add.length) return;
+    historyLines = historyLines.concat(add);
+    capHistory();
+    renderHistory();
+  }
+
+  function mountHistory() {
+    var page = document.getElementById("rc-term-page");
+    if (!page) {
+      page = document.createElement("div");
+      page.id = "rc-term-page";
+      var pre = document.createElement("pre");
+      pre.id = "rc-term-history";
+      page.appendChild(pre);
+      var host = document.body || document.documentElement;
+      host.appendChild(page);
+    }
+    if (!document.getElementById("rc-term-history")) {
+      var hist = document.createElement("pre");
+      hist.id = "rc-term-history";
+      page.insertBefore(hist, page.firstChild);
+    }
+    var term = document.getElementById("terminal-container");
+    if (term && term.parentNode !== page) {
+      page.appendChild(term);
+    }
+    return page;
+  }
+
+  function bootHistoryPage() {
+    mountHistory();
+    window.__rcHistoryLines = historyLines;
+    window.__rcPaintHistory = paintHistory;
+    window.__rcAppendHistory = appendHistory;
+    window.__rcPinBottom = pinBottom;
+    var mo = new MutationObserver(function () {
+      mountHistory();
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(function () {
+      mo.disconnect();
+      mountHistory();
+    }, 4000);
+    var hooked = false;
+    var trimmedLive = false;
+    var hookTries = 0;
+    function hook() {
+      var term = xterm();
+      if (!term || hooked) {
+        if (!hooked && hookTries++ < 80) setTimeout(hook, 50);
+        return;
+      }
+      hooked = true;
+      function onOut() {
+        if (!trimmedLive && readTermLines(false).length) {
+          trimHistoryAgainstLive();
+          capHistory();
+          renderHistory();
+          trimmedLive = true;
+        }
+        syncHistoryFromTerm();
+        if (stickBottom) pinBottom();
+      }
+      if (typeof term.onWriteParsed === "function") {
+        term.onWriteParsed(onOut);
+      } else if (typeof term.onRender === "function") {
+        term.onRender(onOut);
+      }
+      resetLastOff();
+    }
+    hook();
+    document.addEventListener(
+      "wheel",
+      function (ev) {
+        var page = document.getElementById("rc-term-page");
+        if (!page) return;
+        var t = ev.target;
+        if (!t || !t.closest) return;
+        if (t.closest("#rc-extra-keys, #rc-file-pick, #rc-term-history")) return;
+        if (!t.closest("#terminal-container, .xterm")) return;
+        ev.preventDefault();
+        page.scrollTop += ev.deltaY;
+        stickBottom = isNearBottom();
+      },
+      { passive: false, capture: true }
+    );
   }
 
   function setSelectMode(on) {
@@ -1006,20 +1197,10 @@
   }
 
   function scrollXtermPage(dir) {
-    var term = xterm();
-    if (!term) return;
-    var pages = dir < 0 ? -1 : 1;
-    try {
-      if (typeof term.scrollPages === "function") {
-        term.scrollPages(pages);
-        return;
-      }
-    } catch (_) {}
-    try {
-      if (typeof term.scrollLines === "function") {
-        term.scrollLines(pages * (term.rows || 24));
-      }
-    } catch (_) {}
+    var page = viewportEl();
+    if (!page) return;
+    page.scrollBy(0, dir * Math.max(48, page.clientHeight * 0.9));
+    stickBottom = isNearBottom();
   }
 
   function layout() {
@@ -1035,12 +1216,14 @@
     bar.style.top = top + viewH - barH + "px";
     bar.style.left = left + "px";
     bar.style.width = viewW + "px";
-    var term = document.getElementById("terminal-container");
-    if (term) {
-      term.style.top = top + "px";
-      term.style.left = left + "px";
-      term.style.width = viewW + "px";
-      term.style.height = Math.max(48, viewH - barH) + "px";
+    var page = document.getElementById("rc-term-page") || mountHistory();
+    if (page) {
+      page.style.top = top + "px";
+      page.style.left = left + "px";
+      page.style.right = "auto";
+      page.style.bottom = "auto";
+      page.style.width = viewW + "px";
+      page.style.height = Math.max(48, viewH - barH) + "px";
     }
     var fit = viewW + "x" + viewH + "@" + top + "," + left + ":" + barH;
     if (fit !== lastFit) {
@@ -1429,16 +1612,16 @@
     }
 
     bind(document.getElementById("terminal-container"));
-    armViewport(document.querySelector(".xterm-viewport"));
+    armViewport(document.getElementById("rc-term-page") || mountHistory());
     var mo = new MutationObserver(function () {
       bind(document.getElementById("terminal-container"));
-      armViewport(document.querySelector(".xterm-viewport"));
+      armViewport(document.getElementById("rc-term-page") || mountHistory());
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
     setTimeout(function () {
       mo.disconnect();
       bind(document.getElementById("terminal-container"));
-      armViewport(document.querySelector(".xterm-viewport"));
+      armViewport(document.getElementById("rc-term-page") || mountHistory());
     }, 4000);
   }
 
@@ -1713,6 +1896,7 @@
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
+    bootHistoryPage();
     bootPaste();
     bootPinScroll();
     if (device === "pc") {

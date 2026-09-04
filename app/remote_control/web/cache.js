@@ -1,14 +1,13 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.19";
+  var VERSION = "1.3.20";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
     "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
   var FONT_SAMPLE = "Il|\uE0B0\uE0B2";
   var FONT_WAIT_MS = 8000;
-  var skipResetOnce = false;
   var fontsP = null;
   var fontsOk = false;
   var DB_NAME = "rc-term-history";
@@ -96,20 +95,71 @@
     return null;
   }
 
-  function snapshotLines(term) {
+  function normLine(s) {
+    return String(s || "").replace(/\s+$/g, "");
+  }
+
+  function readTermLines(term) {
     var buf = term && term.buffer && term.buffer.active;
-    if (!buf || typeof buf.getLine !== "function") return null;
+    if (!buf || typeof buf.getLine !== "function") return [];
     var lines = [];
     var i;
     for (i = 0; i < buf.length; i++) {
       var line = buf.getLine(i);
-      lines.push(line && typeof line.translateToString === "function" ? line.translateToString(true) : "");
+      lines.push(
+        line && typeof line.translateToString === "function"
+          ? line.translateToString(true)
+          : ""
+      );
     }
-    while (lines.length && !String(lines[lines.length - 1] || "").replace(/\s+$/g, "")) {
-      lines.pop();
+    while (lines.length && !normLine(lines[lines.length - 1])) lines.pop();
+    return lines;
+  }
+
+  function mergeUnique(hist, live) {
+    if (!hist || !hist.length) return (live || []).slice();
+    if (!live || !live.length) return hist.slice();
+    var max = Math.min(hist.length, live.length, 80);
+    var n = 0;
+    var i;
+    var j;
+    for (i = max; i > 0; i--) {
+      var ok = true;
+      for (j = 0; j < i; j++) {
+        if (normLine(hist[hist.length - i + j]) !== normLine(live[j])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        n = i;
+        break;
+      }
     }
+    return hist.concat(live.slice(n));
+  }
+
+  function snapshotLines(term) {
+    var live = readTermLines(term);
+    var hist = window.__rcHistoryLines || [];
+    var lines = mergeUnique(hist, live);
+    if (!lines.length) return null;
     if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
     return lines;
+  }
+
+  function paintSaved(lines) {
+    if (typeof window.__rcPaintHistory === "function") {
+      window.__rcPaintHistory(lines || []);
+      return true;
+    }
+    return false;
+  }
+
+  function pinPage() {
+    if (typeof window.__rcPinBottom === "function") {
+      window.__rcPinBottom();
+    }
   }
 
   function fingerprint(lines) {
@@ -120,37 +170,6 @@
       if (text) out.push(text);
     }
     return out.reverse();
-  }
-
-  function writeLines(term, lines, onDone) {
-    if (!term || !lines || !lines.length) {
-      if (onDone) onDone();
-      return;
-    }
-    var i = 0;
-    function chunk() {
-      var part = lines.slice(i, i + 400);
-      i += 400;
-      if (!part.length) {
-        if (onDone) onDone();
-        return;
-      }
-      var text = part.join("\r\n") + "\r\n";
-      var advanced = false;
-      function next() {
-        if (advanced) return;
-        advanced = true;
-        chunk();
-      }
-      try {
-        term.write(text, next);
-      } catch (_) {
-        if (onDone) onDone();
-        return;
-      }
-      setTimeout(next, 40);
-    }
-    chunk();
   }
 
   function setBadge(kind) {
@@ -195,27 +214,17 @@
   }
 
   function restoreIfEmpty(rec, done) {
-    var term = findTerm();
-    if (!term || !rec || !rec.lines || !rec.lines.length) {
-      if (done) done();
-      return;
-    }
-    var current = snapshotLines(term) || [];
-    if (current.length >= 8) {
+    if (!rec || !rec.lines || !rec.lines.length) {
       if (done) done();
       return;
     }
     restoring = true;
-    if (isTouch()) skipResetOnce = true;
     holdUntil = Date.now() + RECONCILE_HOLD_MS;
-    writeLines(term, rec.lines, function () {
-      restoring = false;
-      refreshTermFont();
-      try {
-        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
-      } catch (_) {}
-      if (done) done();
-    });
+    paintSaved(rec.lines);
+    restoring = false;
+    refreshTermFont();
+    pinPage();
+    if (done) done();
   }
 
   function isTouch() {
@@ -223,38 +232,28 @@
   }
 
   function applyReconcile(payload) {
-    var term = findTerm();
-    if (!term || !payload || !payload.lines) return;
+    if (!payload || !payload.lines) return;
     holdUntil = Date.now() + RECONCILE_HOLD_MS;
     if (payload.mode === "full") {
       restoring = true;
-      var skip = skipResetOnce && isTouch();
-      skipResetOnce = false;
-      if (!skip && typeof term.reset === "function") {
-        try {
-          term.reset();
-        } catch (_) {}
-      }
-      writeLines(term, payload.lines, function () {
-        restoring = false;
-        refreshTermFont();
-        try {
-          if (typeof term.scrollToBottom === "function") term.scrollToBottom();
-        } catch (_) {}
-        persistNow();
-      });
+      paintSaved(payload.lines);
+      restoring = false;
+      refreshTermFont();
+      pinPage();
+      persistNow();
       return;
     }
     if (!payload.lines.length) return;
     restoring = true;
-    writeLines(term, payload.lines, function () {
-      restoring = false;
-      refreshTermFont();
-      try {
-        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
-      } catch (_) {}
-      persistNow();
-    });
+    if (typeof window.__rcAppendHistory === "function") {
+      window.__rcAppendHistory(payload.lines);
+    } else {
+      paintSaved((window.__rcHistoryLines || []).concat(payload.lines));
+    }
+    restoring = false;
+    refreshTermFont();
+    pinPage();
+    persistNow();
   }
 
   function fetchHistory(lines) {
@@ -290,7 +289,7 @@
         return new Promise(function (resolve) {
           waitForTerm(function (term) {
             var current = snapshotLines(term) || [];
-            if (rec && rec.lines && current.length < 8) {
+            if (rec && rec.lines && rec.lines.length) {
               restoreIfEmpty(rec, function () {
                 resolve(snapshotLines(term) || rec.lines);
               });

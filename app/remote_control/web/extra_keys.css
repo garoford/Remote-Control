@@ -4,6 +4,41 @@ body {
   overflow: hidden !important;
 }
 
+#rc-term-page {
+  position: absolute;
+  inset: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  background: #011627;
+  box-sizing: border-box;
+}
+
+#rc-term-history {
+  margin: 0;
+  padding: 8px 10px 0;
+  background: #011627;
+  color: #d6deeb;
+  font: 15px/1.35 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: pan-y;
+}
+
+#rc-term-page #terminal-container {
+  position: relative !important;
+  top: auto !important;
+  left: auto !important;
+  width: 100% !important;
+  height: 100%;
+  min-height: 100%;
+  margin: 0 !important;
+  box-sizing: border-box;
+}
+
 #terminal-container,
 #terminal-container .xterm-screen {
   overflow: hidden !important;
@@ -17,8 +52,7 @@ body {
 .xterm-viewport {
   position: absolute !important;
   inset: 0 !important;
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  overflow: hidden !important;
 }
 
 #terminal-container .xterm-selection {
@@ -33,11 +67,12 @@ html.rc-touch body {
   overflow: hidden;
 }
 
-html.rc-touch #terminal-container {
+html.rc-touch #rc-term-page {
   position: fixed !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  box-sizing: border-box;
+  touch-action: pan-y;
+}
+
+html.rc-touch #rc-term-page #terminal-container {
   touch-action: pan-y;
   -webkit-user-select: none;
   user-select: none;
@@ -78,11 +113,7 @@ html.rc-touch .xterm-helper-textarea {
 }
 
 html.rc-touch .xterm-viewport {
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-  touch-action: pan-y;
+  overflow: hidden !important;
 }
 
 #rc-extra-keys {
