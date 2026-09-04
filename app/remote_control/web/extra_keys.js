@@ -14,6 +14,8 @@
   var lastFit = "";
   var lastSentAt = 0;
   var layoutRaf = 0;
+  var scrollBusy = false;
+  var scrollPend = 0;
   var bar = null;
 
   var ROWS = [
@@ -935,29 +937,35 @@
     );
   }
 
-  function scrollLocal(lines) {
-    var vp = document.querySelector(".xterm-viewport");
-    if (!vp) return false;
-    var max = vp.scrollHeight - vp.clientHeight;
-    if (max <= 2) return false;
-    var next = Math.max(0, Math.min(max, vp.scrollTop + lines * 20));
-    if (next === vp.scrollTop) return false;
-    vp.scrollTop = next;
-    return true;
+  function postScroll(lines) {
+    var tab = tabId();
+    if (!tab || !lines) return Promise.resolve();
+    var n = Math.max(-80, Math.min(80, lines | 0));
+    if (!n) return Promise.resolve();
+    return fetch(
+      "/rc-scroll?tab=" + encodeURIComponent(tab) + "&lines=" + n,
+      { method: "POST", cache: "no-store" }
+    ).then(
+      function () {},
+      function () {}
+    );
   }
 
-  function scrollTmux(lines) {
-    if (!lines) return;
-    var btn = lines < 0 ? 64 : 65;
-    var count = Math.min(12, Math.abs(lines));
-    var seq = "";
-    for (var i = 0; i < count; i++) seq += "\u001b[<" + btn + ";10;10M";
-    sendInput(seq);
+  function pumpScroll() {
+    if (scrollBusy || !scrollPend) return;
+    scrollBusy = true;
+    var n = scrollPend;
+    scrollPend = 0;
+    postScroll(n).then(function () {
+      scrollBusy = false;
+      if (scrollPend) pumpScroll();
+    });
   }
 
   function scrollByLines(lines) {
     if (!lines) return;
-    if (!scrollLocal(lines)) scrollTmux(lines);
+    scrollPend += lines;
+    pumpScroll();
   }
 
   function bootTouchScroll() {

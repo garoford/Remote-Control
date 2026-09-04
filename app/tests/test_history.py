@@ -8,6 +8,7 @@ from remote_control.history import (
     find_suffix,
     history_payload,
     normalize_line,
+    scroll_history,
 )
 
 
@@ -136,6 +137,92 @@ class HistorySuffixTests(unittest.TestCase):
             )
             self.assertEqual(left.stdout.strip(), "0")
             self.assertFalse(cancel_copy_mode(tab, socket=socket))
+        finally:
+            subprocess.run(
+                ["tmux", "-L", socket, "kill-server"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    def test_scroll_unknown_tab_is_none(self) -> None:
+        self.assertIsNone(scroll_history("rcnotasession1", -8))
+
+    def test_scroll_history_clamps_and_returns(self) -> None:
+        if not shutil.which("tmux"):
+            self.skipTest("tmux missing")
+        socket = "rc-testscroll"
+        tab = "rcabc1234567cc"
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started = subprocess.run(
+            [
+                "tmux",
+                "-L",
+                socket,
+                "new-session",
+                "-d",
+                "-s",
+                tab,
+                "--",
+                "bash",
+                "--norc",
+                "--noprofile",
+            ],
+            check=False,
+        )
+        if started.returncode != 0:
+            self.skipTest("could not start tmux")
+        try:
+            for i in range(1, 60):
+                subprocess.run(
+                    ["tmux", "-L", socket, "send-keys", "-t", tab, f"echo line-{i}", "Enter"],
+                    check=True,
+                )
+            time.sleep(0.4)
+            up = scroll_history(tab, -12, socket=socket)
+            self.assertIsNotNone(up)
+            self.assertTrue(up["ok"])
+            self.assertTrue(up["in_mode"])
+            self.assertEqual(up["position"], 12)
+            self.assertEqual(up["moved"], -12)
+            top = scroll_history(tab, -80, socket=socket)
+            self.assertIsNotNone(top)
+            if top["position"] < top["history"]:
+                top = scroll_history(tab, -80, socket=socket)
+            self.assertIsNotNone(top)
+            self.assertTrue(top["in_mode"])
+            self.assertEqual(top["position"], top["history"])
+            stuck = scroll_history(tab, -20, socket=socket)
+            self.assertIsNotNone(stuck)
+            self.assertEqual(stuck["position"], stuck["history"])
+            self.assertEqual(stuck["moved"], 0)
+            view = subprocess.run(
+                ["tmux", "-L", socket, "capture-pane", "-p", "-t", tab],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("line-", view.stdout)
+            down = scroll_history(tab, 4, socket=socket)
+            self.assertIsNotNone(down)
+            self.assertTrue(down["in_mode"])
+            self.assertEqual(down["position"], top["history"] - 4)
+            live = scroll_history(tab, 80, socket=socket)
+            self.assertIsNotNone(live)
+            if live["in_mode"]:
+                live = scroll_history(tab, 80, socket=socket)
+            self.assertIsNotNone(live)
+            self.assertFalse(live["in_mode"])
+            self.assertEqual(live["position"], 0)
+            again = scroll_history(tab, 5, socket=socket)
+            self.assertIsNotNone(again)
+            self.assertFalse(again["in_mode"])
+            self.assertEqual(again["moved"], 0)
         finally:
             subprocess.run(
                 ["tmux", "-L", socket, "kill-server"],

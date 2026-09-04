@@ -264,6 +264,12 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertTrue(body.get("ok"))
         self.assertFalse(body.get("cancelled"))
 
+    def test_scroll_unknown_tab(self) -> None:
+        resp = self._request("POST", "/rc-scroll?tab=rcnotasession1&lines=-6", b"", "text/plain")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertFalse(body.get("ok"))
+
     def test_history_unknown_tab_is_empty(self) -> None:
         resp = self._get("/rc-history?tab=rcnotasession1")
         body = json.loads(resp.read())

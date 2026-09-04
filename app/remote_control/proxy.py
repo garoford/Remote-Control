@@ -1,6 +1,6 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
-Serves cacheable fonts + JS, /rc-history, reserved clipboard uploads,
+Serves cacheable fonts + JS, /rc-history, /rc-scroll, reserved clipboard uploads,
 and proxies everything else (including the tty WebSocket) to ttyd
 on the internal port.
 """
@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.history import cancel_copy_mode, history_payload
+from remote_control.history import cancel_copy_mode, history_payload, scroll_history
 from remote_control.paste import PasteError, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
     load_manifest,
@@ -276,6 +276,9 @@ class Sidecar:
             if method == "POST" and path == "/rc-copy-cancel":
                 self._serve_copy_cancel(conn, parse_qs(parsed_url.query))
                 return
+            if method == "POST" and path == "/rc-scroll":
+                self._serve_scroll(conn, parse_qs(parsed_url.query))
+                return
             if method == "POST" and path == "/rc-paste-reserve":
                 self._serve_paste_reserve(conn, body)
                 return
@@ -390,6 +393,27 @@ class Sidecar:
         tab = (query.get("tab") or [""])[0]
         cancelled = cancel_copy_mode(tab, socket=self.tmux_socket)
         body = json.dumps({"ok": True, "cancelled": cancelled}).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _serve_scroll(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
+        tab = (query.get("tab") or [""])[0]
+        raw = (query.get("lines") or ["0"])[0]
+        try:
+            lines = int(raw)
+        except ValueError:
+            lines = 0
+        payload = scroll_history(tab, lines, socket=self.tmux_socket)
+        if payload is None:
+            body = b'{"ok":false,"moved":0}'
+        else:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         conn.sendall(
             _http_response(
                 "200 OK",

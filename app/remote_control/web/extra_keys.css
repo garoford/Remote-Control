@@ -33,8 +33,9 @@ html.rc-touch .xterm-helper-textarea {
 }
 
 html.rc-touch .xterm-viewport {
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  overflow: hidden !important;
+  -webkit-overflow-scrolling: auto;
+  overscroll-behavior: none;
 }
 
 #rc-extra-keys {
