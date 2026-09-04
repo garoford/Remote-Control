@@ -114,8 +114,10 @@ html.rc-touch #rc-extra-keys {
 
 #rc-ek-paste {
   position: absolute;
-  top: -22px;
+  top: auto;
+  bottom: 100%;
   right: 8px;
+  margin-bottom: 6px;
   width: 44px;
   height: 44px;
   min-width: 44px;
