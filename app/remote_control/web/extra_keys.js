@@ -14,8 +14,6 @@
   var lastFit = "";
   var lastSentAt = 0;
   var layoutRaf = 0;
-  var scrollBusy = false;
-  var scrollPend = 0;
   var pasteGuard = 0;
   var pasteBusy = false;
   var selectMode = false;
@@ -983,9 +981,31 @@
       toggleMod(def.mod);
       return;
     }
+    if ((def.id === "pgup" || def.id === "pgdn") && !mods.ctrl && !mods.alt) {
+      endSelect();
+      scrollXtermPage(def.id === "pgup" ? -1 : 1);
+      return;
+    }
     endSelect();
     sendInput(specialWithMods(def));
     clearSticky();
+  }
+
+  function scrollXtermPage(dir) {
+    var term = xterm();
+    if (!term) return;
+    var pages = dir < 0 ? -1 : 1;
+    try {
+      if (typeof term.scrollPages === "function") {
+        term.scrollPages(pages);
+        return;
+      }
+    } catch (_) {}
+    try {
+      if (typeof term.scrollLines === "function") {
+        term.scrollLines(pages * (term.rows || 24));
+      }
+    } catch (_) {}
   }
 
   function layout() {
@@ -1270,49 +1290,16 @@
     );
   }
 
-  function postScroll(lines) {
-    var tab = tabId();
-    if (!tab || !lines) return Promise.resolve();
-    var n = Math.max(-80, Math.min(80, lines | 0));
-    if (!n) return Promise.resolve();
-    return fetch(
-      "/rc-scroll?tab=" + encodeURIComponent(tab) + "&lines=" + n,
-      { method: "POST", cache: "no-store" }
-    ).then(
-      function () {},
-      function () {}
-    );
-  }
-
-  function pumpScroll() {
-    if (scrollBusy || !scrollPend) return;
-    scrollBusy = true;
-    var n = scrollPend;
-    scrollPend = 0;
-    postScroll(n).then(function () {
-      scrollBusy = false;
-      if (scrollPend) pumpScroll();
-    });
-  }
-
-  function scrollByLines(lines) {
-    if (!lines) return;
-    scrollPend += lines;
-    pumpScroll();
-  }
-
   function bootTouchScroll() {
     var startX = 0;
     var startY = 0;
     var lastX = 0;
     var lastY = 0;
-    var acc = 0;
     var scrolling = false;
     var selecting = false;
     var active = false;
     var holdTimer = 0;
     var selFrom = null;
-    var PX = 16;
     var HOLD_MS = 450;
 
     function fromKeys(ev) {
@@ -1336,22 +1323,19 @@
         active = false;
         return;
       }
-      var t = ev.touches[0];
-      ev.preventDefault();
-      ev.stopPropagation();
       if (imeGuarded()) {
         active = false;
         return;
       }
-      lockIme();
+      var t = ev.touches[0];
       startX = lastX = t.clientX;
       startY = lastY = t.clientY;
-      acc = 0;
       scrolling = false;
       selecting = false;
       selFrom = null;
       active = true;
       if (selectMode) {
+        ev.preventDefault();
         selecting = true;
         selFrom = toBufferCell(cellAt(t.clientX, t.clientY));
         if (selFrom) applyCellSelect(selFrom, selFrom);
@@ -1374,33 +1358,22 @@
 
     function onMove(ev) {
       if (!active || !ev.touches || ev.touches.length !== 1) return;
-      ev.preventDefault();
-      ev.stopPropagation();
       var t = ev.touches[0];
       var x = t.clientX;
       var y = t.clientY;
+      lastX = x;
+      lastY = y;
       if (selectMode || selecting) {
-        lastX = x;
-        lastY = y;
+        ev.preventDefault();
         var to = toBufferCell(cellAt(x, y));
         if (selFrom && to) applyCellSelect(selFrom, to);
         return;
       }
-      if (!scrolling && Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) {
-        return;
-      }
+      if (Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) return;
       clearHold();
       scrolling = true;
       writing = false;
-      acc += lastY - y;
-      lastX = x;
-      lastY = y;
-      var lines = acc / PX;
-      var step = lines < 0 ? Math.ceil(lines) : Math.floor(lines);
-      if (step) {
-        acc -= step * PX;
-        scrollByLines(step);
-      }
+      if (imeOpen && !imeGuarded()) lockIme();
     }
 
     function onEnd() {
@@ -1411,56 +1384,48 @@
         requestAnimationFrame(restoreSel);
         setTimeout(restoreSel, 0);
         setTimeout(restoreSel, 50);
-      } else if (!scrolling && !selectMode) {
-        var ta = termTextarea();
-        if (ta) {
-          try {
-            ta.blur();
-          } catch (_) {}
-        }
+      } else if (!scrolling) {
+        lockIme();
       }
       active = false;
       scrolling = false;
       selecting = false;
       selFrom = null;
-      acc = 0;
-    }
-
-    function blockXtermFocus(ev) {
-      if (fromKeys(ev)) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (imeGuarded()) return;
-      if (selectMode) {
-        restoreSel();
-        return;
-      }
-      lockIme();
     }
 
     function bind(el) {
       if (!el || el.dataset.rcTouchScroll === "1") return;
       el.dataset.rcTouchScroll = "1";
-      el.addEventListener("pointerdown", blockXtermFocus, { passive: false, capture: true });
-      el.addEventListener("pointerup", blockXtermFocus, { passive: false, capture: true });
-      el.addEventListener("mousedown", blockXtermFocus, { passive: false, capture: true });
-      el.addEventListener("mouseup", blockXtermFocus, { passive: false, capture: true });
-      el.addEventListener("click", blockXtermFocus, { passive: false, capture: true });
-      el.addEventListener("touchstart", onStart, { passive: false, capture: true });
-      el.addEventListener("touchmove", onMove, { passive: false, capture: true });
-      el.addEventListener("touchend", onEnd, { passive: true, capture: true });
-      el.addEventListener("touchcancel", onEnd, { passive: true, capture: true });
+      el.addEventListener("touchstart", onStart, { passive: false });
+      el.addEventListener("touchmove", onMove, { passive: false });
+      el.addEventListener("touchend", onEnd, { passive: true });
+      el.addEventListener("touchcancel", onEnd, { passive: true });
     }
 
-    bind(document.body);
+    function armViewport(vp) {
+      if (!vp || vp.dataset.rcNativeScroll === "1") return;
+      vp.dataset.rcNativeScroll = "1";
+      vp.addEventListener(
+        "scroll",
+        function () {
+          if (imeGuarded()) return;
+          if (imeOpen) lockIme();
+        },
+        { passive: true }
+      );
+    }
+
+    bind(document.getElementById("terminal-container"));
+    armViewport(document.querySelector(".xterm-viewport"));
     var mo = new MutationObserver(function () {
       bind(document.getElementById("terminal-container"));
+      armViewport(document.querySelector(".xterm-viewport"));
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    bind(document.getElementById("terminal-container"));
     setTimeout(function () {
       mo.disconnect();
       bind(document.getElementById("terminal-container"));
+      armViewport(document.querySelector(".xterm-viewport"));
     }, 4000);
   }
 

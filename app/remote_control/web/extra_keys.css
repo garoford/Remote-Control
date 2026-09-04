@@ -20,7 +20,7 @@ html.rc-touch #terminal-container {
   margin: 0 !important;
   padding: 0 !important;
   box-sizing: border-box;
-  touch-action: manipulation;
+  touch-action: pan-y;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
@@ -29,12 +29,13 @@ html.rc-touch #terminal-container {
 html.rc-touch .xterm,
 html.rc-touch .xterm-screen,
 html.rc-touch .xterm-screen canvas {
-  touch-action: manipulation;
+  touch-action: pan-y;
 }
 
 html.rc-select .xterm,
 html.rc-select .xterm-screen,
-html.rc-select .xterm-screen canvas {
+html.rc-select .xterm-screen canvas,
+html.rc-select .xterm-viewport {
   touch-action: none;
 }
 
@@ -59,9 +60,11 @@ html.rc-touch .xterm-helper-textarea {
 }
 
 html.rc-touch .xterm-viewport {
-  overflow: hidden !important;
-  -webkit-overflow-scrolling: auto;
-  overscroll-behavior: none;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
 }
 
 #rc-extra-keys {
