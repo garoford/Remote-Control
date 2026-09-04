@@ -1,3 +1,15 @@
+#terminal-container,
+#terminal-container .xterm-screen {
+  overflow: hidden !important;
+}
+
+#terminal-container .xterm-selection {
+  overflow: hidden !important;
+  max-width: 100%;
+  max-height: 100%;
+  contain: paint;
+}
+
 html.rc-touch,
 html.rc-touch body {
   overflow: hidden;
@@ -36,7 +48,7 @@ html.rc-touch .xterm-helper-textarea {
   height: 18px !important;
   font-size: 16px !important;
   line-height: 16px !important;
-  opacity: 0.02 !important;
+  opacity: 0 !important;
   caret-color: transparent;
   pointer-events: auto;
   z-index: 2147482999 !important;

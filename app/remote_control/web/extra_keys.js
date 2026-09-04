@@ -198,26 +198,36 @@
     setSelectMode(false);
   }
 
-  function fireMouse(type, x, y, buttons) {
+  function cellAt(clientX, clientY) {
+    var term = xterm();
+    if (!term || !term.cols || !term.rows) return null;
     var screen =
       document.querySelector("#terminal-container .xterm-screen") ||
       document.querySelector(".xterm-screen") ||
-      document.querySelector(".xterm canvas") ||
-      document.getElementById("terminal-container");
-    if (!screen) return;
-    screen.dispatchEvent(
-      new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: x,
-        clientY: y,
-        screenX: x,
-        screenY: y,
-        buttons: buttons,
-        button: 0,
-      })
-    );
+      (term.element && term.element.querySelector(".xterm-screen")) ||
+      term.element;
+    if (!screen || !screen.getBoundingClientRect) return null;
+    var rect = screen.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return null;
+    var col = Math.floor((clientX - rect.left) / (rect.width / term.cols));
+    var row = Math.floor((clientY - rect.top) / (rect.height / term.rows));
+    return {
+      col: Math.max(0, Math.min(term.cols - 1, col)),
+      row: Math.max(0, Math.min(term.rows - 1, row)),
+    };
+  }
+
+  function applyCellSelect(from, to) {
+    var term = xterm();
+    if (!term || !from || !to || typeof term.select !== "function") return;
+    var a = from.row * term.cols + from.col;
+    var b = to.row * term.cols + to.col;
+    if (b < a) {
+      var tmp = a;
+      a = b;
+      b = tmp;
+    }
+    term.select(a % term.cols, Math.floor(a / term.cols), Math.max(1, b - a + 1));
   }
 
   function isTypeTarget(el) {
@@ -1065,6 +1075,7 @@
     var selecting = false;
     var active = false;
     var holdTimer = 0;
+    var selFrom = null;
     var PX = 16;
     var HOLD_MS = 450;
 
@@ -1096,11 +1107,12 @@
       acc = 0;
       scrolling = false;
       selecting = false;
+      selFrom = null;
       active = true;
       if (selectMode) {
         selecting = true;
-        ev.preventDefault();
-        fireMouse("mousedown", t.clientX, t.clientY, 1);
+        selFrom = cellAt(t.clientX, t.clientY);
+        if (selFrom) applyCellSelect(selFrom, selFrom);
         return;
       }
       clearHold();
@@ -1109,7 +1121,8 @@
         if (!active || scrolling) return;
         selecting = true;
         setSelectMode(true);
-        fireMouse("mousedown", lastX, lastY, 1);
+        selFrom = cellAt(lastX, lastY);
+        if (selFrom) applyCellSelect(selFrom, selFrom);
       }, HOLD_MS);
     }
 
@@ -1120,9 +1133,10 @@
       var y = t.clientY;
       if (selectMode || selecting) {
         ev.preventDefault();
-        fireMouse("mousemove", x, y, 1);
         lastX = x;
         lastY = y;
+        var to = cellAt(x, y);
+        if (selFrom && to) applyCellSelect(selFrom, to);
         return;
       }
       if (!scrolling && Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) {
@@ -1146,7 +1160,8 @@
     function onEnd() {
       clearHold();
       if (selecting) {
-        fireMouse("mouseup", lastX, lastY, 0);
+        var end = cellAt(lastX, lastY);
+        if (selFrom && end) applyCellSelect(selFrom, end);
       } else if (!scrolling) {
         var ta = termTextarea();
         if (ta) {
@@ -1158,6 +1173,7 @@
       active = false;
       scrolling = false;
       selecting = false;
+      selFrom = null;
       acc = 0;
     }
 
@@ -1300,7 +1316,7 @@
     if (term && typeof term.getSelection === "function") {
       try {
         var fromTerm = term.getSelection();
-        if (fromTerm) return fromTerm;
+        if (fromTerm) return String(fromTerm).replace(/[ \t]+$/gm, "");
       } catch (_) {}
     }
     var sel = window.getSelection && window.getSelection();
