@@ -20,6 +20,7 @@
   var imeOpen = false;
   var imeGuard = 0;
   var lastSel = null;
+  var stickBottom = true;
   var bar = null;
 
   var ROWS = [
@@ -254,15 +255,43 @@
     unlockIme();
   }
 
+  function viewportEl() {
+    return document.querySelector(".xterm-viewport");
+  }
+
   function viewportTop() {
-    var vp = document.querySelector(".xterm-viewport");
+    var vp = viewportEl();
     return vp ? vp.scrollTop : null;
   }
 
   function restoreViewport(top) {
-    var vp = document.querySelector(".xterm-viewport");
+    var vp = viewportEl();
     if (!vp || top === null || top === undefined) return;
     if (vp.scrollTop !== top) vp.scrollTop = top;
+  }
+
+  function isNearBottom() {
+    var vp = viewportEl();
+    if (!vp) return true;
+    return vp.scrollHeight - vp.scrollTop - vp.clientHeight < 64;
+  }
+
+  function pinBottom() {
+    stickBottom = true;
+    var term = xterm();
+    if (term) {
+      try {
+        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+      } catch (_) {}
+      try {
+        var buf = term.buffer && term.buffer.active;
+        if (buf && typeof term.scrollToLine === "function") {
+          term.scrollToLine(buf.baseY + buf.cursorY);
+        }
+      } catch (_) {}
+    }
+    var vp = viewportEl();
+    if (vp) vp.scrollTop = vp.scrollHeight;
   }
 
   function xterm() {
@@ -463,28 +492,13 @@
   }
 
   function scrollToWrite() {
+    pinBottom();
     var term = xterm();
-    if (term) {
+    if (imeOpen && term) {
       try {
-        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+        term.focus();
       } catch (_) {}
-      try {
-        var buf = term.buffer && term.buffer.active;
-        if (buf && typeof term.scrollToLine === "function") {
-          term.scrollToLine(buf.baseY + buf.cursorY);
-        }
-      } catch (_) {}
-      try {
-        if (typeof term.scrollLines === "function") term.scrollLines(9999);
-      } catch (_) {}
-      if (imeOpen) {
-        try {
-          term.focus();
-        } catch (_) {}
-      }
     }
-    var vp = document.querySelector(".xterm-viewport");
-    if (vp) vp.scrollTop = vp.scrollHeight;
     var ta = termTextarea();
     if (ta) {
       armTextarea(ta);
@@ -1035,10 +1049,8 @@
     }
     if (imeOpen && imeGuarded()) {
       keepImeFocus();
-    } else if (writing) {
-      requestAnimationFrame(function () {
-        scrollToWrite();
-      });
+    } else if (writing || stickBottom) {
+      requestAnimationFrame(pinBottom);
     }
   }
 
@@ -1408,8 +1420,9 @@
       vp.addEventListener(
         "scroll",
         function () {
+          stickBottom = isNearBottom();
           if (imeGuarded()) return;
-          if (imeOpen) lockIme();
+          if (imeOpen && !stickBottom) lockIme();
         },
         { passive: true }
       );
@@ -1668,11 +1681,40 @@
     );
   }
 
+  function bootPinScroll() {
+    function arm(vp) {
+      if (!vp || vp.dataset.rcPin === "1") return;
+      vp.dataset.rcPin = "1";
+      vp.addEventListener(
+        "scroll",
+        function () {
+          stickBottom = isNearBottom();
+        },
+        { passive: true }
+      );
+      pinBottom();
+    }
+    arm(viewportEl());
+    var mo = new MutationObserver(function () {
+      arm(viewportEl());
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(function () {
+      mo.disconnect();
+      arm(viewportEl());
+      if (stickBottom) pinBottom();
+    }, 800);
+    window.addEventListener("resize", function () {
+      if (stickBottom) requestAnimationFrame(pinBottom);
+    });
+  }
+
   function boot() {
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
     bootPaste();
+    bootPinScroll();
     if (device === "pc") {
       document.documentElement.classList.remove("rc-touch");
       return;

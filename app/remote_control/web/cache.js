@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.18";
+  var VERSION = "1.3.19";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
@@ -211,6 +211,9 @@
     writeLines(term, rec.lines, function () {
       restoring = false;
       refreshTermFont();
+      try {
+        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+      } catch (_) {}
       if (done) done();
     });
   }
@@ -235,6 +238,9 @@
       writeLines(term, payload.lines, function () {
         restoring = false;
         refreshTermFont();
+        try {
+          if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+        } catch (_) {}
         persistNow();
       });
       return;
@@ -244,6 +250,9 @@
     writeLines(term, payload.lines, function () {
       restoring = false;
       refreshTermFont();
+      try {
+        if (typeof term.scrollToBottom === "function") term.scrollToBottom();
+      } catch (_) {}
       persistNow();
     });
   }

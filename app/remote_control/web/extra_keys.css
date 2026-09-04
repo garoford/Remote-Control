@@ -1,6 +1,24 @@
+html,
+body {
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
 #terminal-container,
 #terminal-container .xterm-screen {
   overflow: hidden !important;
+}
+
+#terminal-container .xterm {
+  height: 100%;
+  width: 100%;
+}
+
+.xterm-viewport {
+  position: absolute !important;
+  inset: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
 }
 
 #terminal-container .xterm-selection {
