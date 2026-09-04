@@ -289,7 +289,7 @@ class Sidecar:
                     headers,
                 )
                 return
-            if method == "GET" and path == "/rc-history":
+            if method == "GET" and path.rstrip("/").endswith("/rc-history"):
                 self._serve_history(conn, parse_qs(parsed_url.query))
                 return
             if method == "POST" and path == "/rc-copy-cancel":
@@ -408,7 +408,7 @@ class Sidecar:
                 fingerprint = [raw_fp]
         payload = history_payload(tab, fingerprint, socket=self.tmux_socket)
         if payload is None:
-            body = b'{"mode":"none","lines":[],"count":0}'
+            body = b'{"mode":"none","lines":[],"all":[],"count":0}'
             conn.sendall(
                 _http_response(
                     "200 OK",
@@ -544,7 +544,8 @@ class Sidecar:
         parts = first.split(" ")
         method = parts[0] if parts else ""
         raw_target = parts[1] if len(parts) > 1 else "/"
-        path = unquote(urlparse(raw_target).path)
+        parsed_req = urlparse(raw_target)
+        path = unquote(parsed_req.path)
         headers = req_headers or _header_map(header)
         upgrade = "upgrade" in (headers.get("connection") or "").lower()
         if (
@@ -552,7 +553,7 @@ class Sidecar:
             and method in {"GET", "HEAD"}
             and path in {"/", "/index.html"}
         ):
-            self._proxy_html(conn, header, body, headers)
+            self._proxy_html(conn, header, body, headers, parse_qs(parsed_req.query))
             return
         upstream = socket.create_connection(
             (self.upstream_host, self.upstream_port), timeout=10
@@ -569,12 +570,29 @@ class Sidecar:
     def _mobile_font_url(self) -> str:
         return pick_mobile_font_url(load_manifest(self.assets), self.assets)
 
+    def _inject_boot_history(self, html: str, query: dict[str, list[str]]) -> str:
+        tab = (query.get("arg") or [""])[0]
+        lines: list[str] = []
+        if tab:
+            payload = history_payload(tab, [], socket=self.tmux_socket)
+            if payload:
+                lines = payload.get("all") or payload.get("lines") or []
+        script = (
+            '<script id="rc-boot-history">window.__rcBootHistory='
+            + json.dumps(lines, ensure_ascii=False)
+            + ";</script>"
+        )
+        if "</head>" in html:
+            return html.replace("</head>", script + "</head>", 1)
+        return script + html
+
     def _proxy_html(
         self,
         conn: socket.socket,
         header: bytes,
         body: bytes,
         req_headers: dict[str, str],
+        query: dict[str, list[str]] | None = None,
     ) -> None:
         upstream = socket.create_connection(
             (self.upstream_host, self.upstream_port), timeout=10
@@ -586,9 +604,11 @@ class Sidecar:
                 return
             status, resp_headers, resp_body = raw
             ctype = resp_headers.get("content-type") or ""
-            if request_is_mobile(req_headers) and "html" in ctype.lower():
+            if "html" in ctype.lower():
                 text = resp_body.decode("utf-8", "replace")
-                text = rewrite_index_for_mobile(text, self._mobile_font_url())
+                if request_is_mobile(req_headers):
+                    text = rewrite_index_for_mobile(text, self._mobile_font_url())
+                text = self._inject_boot_history(text, query or {})
                 resp_body = text.encode("utf-8")
             skip = {
                 "content-length",

@@ -470,6 +470,9 @@
     window.__rcPaintHistory = paintHistory;
     window.__rcAppendHistory = appendHistory;
     window.__rcPinBottom = pinBottom;
+    if (window.__rcBootHistory && window.__rcBootHistory.length) {
+      paintHistory(window.__rcBootHistory);
+    }
     if (window.__rcPendingHistory && window.__rcPendingHistory.length) {
       paintHistory(window.__rcPendingHistory);
       window.__rcPendingHistory = null;
@@ -482,6 +485,10 @@
       pullServerHistory();
       setTimeout(pullServerHistory, 400);
     });
+    setInterval(function () {
+      syncHistoryFromTerm();
+      pullServerHistory();
+    }, 800);
     var mo = new MutationObserver(function () {
       mountHistory();
     });

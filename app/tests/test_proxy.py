@@ -153,6 +153,8 @@ class ProxyAssetTests(unittest.TestCase):
         body = resp.read()
         self.assertIn(b"ttyd-index", body)
         self.assertIn(b"rc-font-preload-reg", body)
+        self.assertIn(b"rc-boot-history", body)
+        self.assertIn(b"__rcBootHistory", body)
         self.assertEqual(resp.status, 200)
 
     def test_mobile_index_keeps_regular_font(self) -> None:
