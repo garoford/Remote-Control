@@ -298,6 +298,7 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(body.get("mode"), "none")
         self.assertEqual(body.get("lines"), [])
+        self.assertEqual(body.get("all") or [], [])
 
     def test_websocket_upgrade_is_spliced(self) -> None:
         raw = socket.create_connection(("127.0.0.1", self.listen_port), timeout=3)

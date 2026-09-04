@@ -1,6 +1,6 @@
 /* Remote Control service worker: cache fonts/JS. Never fake a 503 page. */
-/* v=1.3.20 */
-var CACHE = "rc-tty-v1.3.20";
+/* v=1.3.21 */
+var CACHE = "rc-tty-v1.3.21";
 
 function isWs(request) {
   if (request.url.indexOf("/ws") !== -1) return true;
@@ -55,7 +55,7 @@ self.addEventListener("install", function (event) {
         return { fonts: [] };
       })
       .then(function (man) {
-        var urls = ["/rc-assets/cache.js?v=1.3.20", "/rc-assets/sw.js?v=1.3.20"].concat(
+        var urls = ["/rc-assets/cache.js?v=1.3.21", "/rc-assets/sw.js?v=1.3.21"].concat(
           man.fonts || []
         );
         return caches.open(CACHE).then(function (cache) {

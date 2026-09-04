@@ -68,6 +68,9 @@ class HistorySuffixTests(unittest.TestCase):
             time.sleep(0.4)
             payload = history_payload(tab, ["rc-hist-one"], socket=socket)
             self.assertIsNotNone(payload)
+            self.assertIn("all", payload)
+            self.assertIn("rc-hist-one", "\n".join(payload["all"]))
+            self.assertIn("rc-hist-three", "\n".join(payload["all"]))
             joined = "\n".join(payload["lines"])
             if payload["mode"] == "suffix":
                 self.assertIn("rc-hist-two", joined)

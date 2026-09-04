@@ -170,5 +170,6 @@ def history_payload(
     lines = capture_pane(tab, socket)
     if lines is None:
         return None
+    capped = lines[-MAX_RETURN_LINES:]
     mode, out = find_suffix(lines, fingerprint)
-    return {"mode": mode, "lines": out, "count": len(lines)}
+    return {"mode": mode, "lines": out, "all": capped, "count": len(lines)}

@@ -15,6 +15,11 @@ body {
   box-sizing: border-box;
 }
 
+#rc-term-history:empty {
+  display: none;
+  padding: 0;
+}
+
 #rc-term-history {
   margin: 0;
   padding: 8px 10px 0;

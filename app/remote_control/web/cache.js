@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.20";
+  var VERSION = "1.3.21";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
@@ -149,10 +149,12 @@
   }
 
   function paintSaved(lines) {
+    var out = lines || [];
     if (typeof window.__rcPaintHistory === "function") {
-      window.__rcPaintHistory(lines || []);
+      window.__rcPaintHistory(out);
       return true;
     }
+    window.__rcPendingHistory = out;
     return false;
   }
 
@@ -231,19 +233,28 @@
     return document.documentElement.classList.contains("rc-touch");
   }
 
+  function historyLinesFrom(payload) {
+    if (!payload) return [];
+    if (payload.all && payload.all.length) return payload.all;
+    if (payload.mode === "full" && payload.lines && payload.lines.length) {
+      return payload.lines;
+    }
+    return [];
+  }
+
   function applyReconcile(payload) {
-    if (!payload || !payload.lines) return;
-    holdUntil = Date.now() + RECONCILE_HOLD_MS;
-    if (payload.mode === "full") {
+    var all = historyLinesFrom(payload);
+    if (all.length) {
+      holdUntil = Date.now() + RECONCILE_HOLD_MS;
       restoring = true;
-      paintSaved(payload.lines);
+      paintSaved(all);
       restoring = false;
       refreshTermFont();
       pinPage();
-      persistNow();
       return;
     }
-    if (!payload.lines.length) return;
+    if (!payload || !payload.lines || !payload.lines.length) return;
+    holdUntil = Date.now() + RECONCILE_HOLD_MS;
     restoring = true;
     if (typeof window.__rcAppendHistory === "function") {
       window.__rcAppendHistory(payload.lines);
@@ -253,18 +264,52 @@
     restoring = false;
     refreshTermFont();
     pinPage();
-    persistNow();
   }
 
-  function fetchHistory(lines) {
+  function fetchHistory(full) {
     var id = tabId();
     if (!id) return Promise.resolve(null);
-    var fp = encodeURIComponent(JSON.stringify(fingerprint(lines || [])));
+    var fp = full ? encodeURIComponent("[]") : encodeURIComponent(JSON.stringify(fingerprint(window.__rcHistoryLines || [])));
     var url = "/rc-history?tab=" + encodeURIComponent(id) + "&fp=" + fp;
     return fetch(url, { cache: "no-store" }).then(function (resp) {
       if (!resp.ok) return null;
       return resp.json();
     });
+  }
+
+  function pullHistory(retry) {
+    var id = tabId();
+    if (!id) return;
+    fetchHistory(true)
+      .then(function (payload) {
+        var all = historyLinesFrom(payload);
+        if (all.length) {
+          applyReconcile(payload);
+          return;
+        }
+        if (retry) {
+          setTimeout(function () {
+            pullHistory(false);
+          }, 400);
+          setTimeout(function () {
+            pullHistory(false);
+          }, 1200);
+        }
+        return idbGet(id)
+          .then(function (rec) {
+            if ((!window.__rcHistoryLines || !window.__rcHistoryLines.length) && rec) {
+              restoreIfEmpty(rec);
+            }
+          })
+          .catch(function () {});
+      })
+      .catch(function () {
+        if (retry) {
+          setTimeout(function () {
+            pullHistory(false);
+          }, 600);
+        }
+      });
   }
 
   function onWsOpen() {
@@ -273,40 +318,13 @@
       return;
     }
     setBadge("reconnecting");
-    holdUntil = Date.now() + RECONCILE_HOLD_MS;
-    var id = tabId();
-    if (!id) {
-      setBadge("");
-      return;
-    }
+    pullHistory(true);
     waitFonts()
       .then(function () {
-        return idbGet(id).catch(function () {
-          return null;
-        });
-      })
-      .then(function (rec) {
-        return new Promise(function (resolve) {
-          waitForTerm(function (term) {
-            var current = snapshotLines(term) || [];
-            if (rec && rec.lines && rec.lines.length) {
-              restoreIfEmpty(rec, function () {
-                resolve(snapshotLines(term) || rec.lines);
-              });
-            } else {
-              resolve(current.length ? current : (rec && rec.lines) || []);
-            }
-          });
-        });
-      })
-      .then(function (lines) {
-        return fetchHistory(lines).then(function (payload) {
-          if (payload) applyReconcile(payload);
-        });
+        refreshTermFont();
       })
       .catch(function () {})
       .then(function () {
-        refreshTermFont();
         setBadge(navigator.onLine ? "" : "offline");
       });
   }
@@ -332,19 +350,7 @@
   }
 
   function bootRestore() {
-    var id = tabId();
-    if (!id) return;
-    waitFonts()
-      .then(function () {
-        return idbGet(id);
-      })
-      .then(function (rec) {
-        if (!rec) return;
-        waitForTerm(function () {
-          restoreIfEmpty(rec);
-        });
-      })
-      .catch(function () {});
+    pullHistory(true);
   }
 
   function registerSw() {
@@ -465,6 +471,9 @@
   if (window.__rcRedirecting) return;
   window.addEventListener("rc-ws-open", onWsOpen);
   window.addEventListener("rc-ws-close", onWsClose);
+  if (window.__rcTermSocket && window.__rcTermSocket.readyState === 1) {
+    onWsOpen();
+  }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
   } else {

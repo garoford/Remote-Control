@@ -437,6 +437,10 @@
     window.__rcPaintHistory = paintHistory;
     window.__rcAppendHistory = appendHistory;
     window.__rcPinBottom = pinBottom;
+    if (window.__rcPendingHistory && window.__rcPendingHistory.length) {
+      paintHistory(window.__rcPendingHistory);
+      window.__rcPendingHistory = null;
+    }
     var mo = new MutationObserver(function () {
       mountHistory();
     });
