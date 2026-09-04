@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.3.16";
+  var VERSION = "1.3.17";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =

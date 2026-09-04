@@ -20,6 +20,7 @@
   var pasteBusy = false;
   var selectMode = false;
   var imeOpen = false;
+  var imeGuard = 0;
   var lastSel = null;
   var bar = null;
 
@@ -191,8 +192,30 @@
     } catch (_) {}
   }
 
+  function imeGuarded() {
+    return Date.now() < imeGuard;
+  }
+
+  function keepImeFocus() {
+    if (!imeOpen) return;
+    var ta = termTextarea();
+    if (!ta) return;
+    ta.removeAttribute("readonly");
+    ta.removeAttribute("inputmode");
+    ta.removeAttribute("disabled");
+    try {
+      ta.focus({ preventScroll: true });
+    } catch (_) {
+      try {
+        ta.focus();
+      } catch (__) {}
+    }
+  }
+
   function lockIme() {
+    if (imeOpen && imeGuarded()) return;
     imeOpen = false;
+    imeGuard = 0;
     writing = false;
     keepFocusUntil = 0;
     syncImeBtn();
@@ -209,18 +232,28 @@
   function unlockIme() {
     endSelect();
     imeOpen = true;
+    imeGuard = Date.now() + 1000;
     syncImeBtn();
     var ta = termTextarea();
     if (ta) {
       ta.removeAttribute("readonly");
       ta.removeAttribute("inputmode");
+      ta.removeAttribute("disabled");
     }
     focusTerm();
+    keepImeFocus();
+    requestAnimationFrame(keepImeFocus);
+    setTimeout(keepImeFocus, 0);
+    setTimeout(keepImeFocus, 80);
   }
 
   function toggleIme() {
-    if (imeOpen) lockIme();
-    else unlockIme();
+    if (imeOpen) {
+      imeGuard = 0;
+      lockIme();
+      return;
+    }
+    unlockIme();
   }
 
   function viewportTop() {
@@ -980,7 +1013,9 @@
       lastFit = fit;
       window.dispatchEvent(new Event("resize"));
     }
-    if (writing) {
+    if (imeOpen && imeGuarded()) {
+      keepImeFocus();
+    } else if (writing) {
       requestAnimationFrame(function () {
         scrollToWrite();
       });
@@ -1111,11 +1146,20 @@
     imeBtn.addEventListener(
       "pointerdown",
       function (ev) {
+        ev.preventDefault();
         ev.stopPropagation();
         imeBtn.classList.add("is-down");
         toggleIme();
       },
-      { passive: true }
+      { passive: false }
+    );
+    imeBtn.addEventListener(
+      "click",
+      function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      },
+      { passive: false }
     );
     imeBtn.addEventListener("pointerup", function () {
       imeBtn.classList.remove("is-down");
@@ -1295,6 +1339,10 @@
       var t = ev.touches[0];
       ev.preventDefault();
       ev.stopPropagation();
+      if (imeGuarded()) {
+        active = false;
+        return;
+      }
       lockIme();
       startX = lastX = t.clientX;
       startY = lastY = t.clientY;
@@ -1382,6 +1430,7 @@
       if (fromKeys(ev)) return;
       ev.preventDefault();
       ev.stopPropagation();
+      if (imeGuarded()) return;
       if (selectMode) {
         restoreSel();
         return;
@@ -1603,6 +1652,7 @@
     );
     var mo = new MutationObserver(function () {
       armTextarea(termTextarea());
+      if (imeOpen) keepImeFocus();
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
     armTextarea(termTextarea());
