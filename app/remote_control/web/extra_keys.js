@@ -19,6 +19,7 @@
   var pasteGuard = 0;
   var pasteBusy = false;
   var selectMode = false;
+  var imeOpen = false;
   var bar = null;
 
   var ROWS = [
@@ -49,6 +50,10 @@
   var COPY_ICON =
     '<svg viewBox="0 0 24 24" aria-hidden="true">' +
     '<path fill="currentColor" d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1Zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H10V7h9v14Z"/>' +
+    "</svg>";
+  var IME_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path fill="currentColor" d="M20 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 12H4V7h16v10ZM5 9h2v2H5V9Zm3 0h2v2H8V9Zm3 0h2v2h-2V9Zm3 0h2v2h-2V9Zm3 0h3v2h-3V9ZM5 12h2v2H5v-2Zm3 0h2v2H8v-2Zm3 0h2v2h-2v-2Zm3 0h6v2h-6v-2ZM7 15h10v2H7v-2Z"/>' +
     "</svg>";
 
   var PASTE_CHUNK = 2048;
@@ -154,12 +159,59 @@
     return !!(
       el &&
       el.closest &&
-      el.closest(".is-paste, .is-copy, #rc-ek-paste, #rc-ek-copy, #rc-file-pick")
+      el.closest(
+        ".is-paste, .is-copy, .is-ime, #rc-ek-paste, #rc-ek-copy, #rc-ek-ime, #rc-file-pick"
+      )
     );
   }
 
   function termTextarea() {
     return document.querySelector(".xterm-helper-textarea");
+  }
+
+  function syncImeBtn() {
+    var btn = document.getElementById("rc-ek-ime");
+    if (btn) btn.classList.toggle("is-on", imeOpen);
+    document.documentElement.classList.toggle("rc-ime", imeOpen);
+  }
+
+  function armTextarea(ta) {
+    if (!ta) return;
+    if (imeOpen) {
+      ta.removeAttribute("readonly");
+      ta.removeAttribute("inputmode");
+      return;
+    }
+    ta.setAttribute("readonly", "readonly");
+    ta.setAttribute("inputmode", "none");
+    try {
+      ta.blur();
+    } catch (_) {}
+  }
+
+  function lockIme() {
+    imeOpen = false;
+    writing = false;
+    keepFocusUntil = 0;
+    syncImeBtn();
+    armTextarea(termTextarea());
+  }
+
+  function unlockIme() {
+    endSelect();
+    imeOpen = true;
+    syncImeBtn();
+    var ta = termTextarea();
+    if (ta) {
+      ta.removeAttribute("readonly");
+      ta.removeAttribute("inputmode");
+    }
+    focusTerm();
+  }
+
+  function toggleIme() {
+    if (imeOpen) lockIme();
+    else unlockIme();
   }
 
   function viewportTop() {
@@ -182,13 +234,7 @@
     selectMode = !!on;
     document.documentElement.classList.toggle("rc-select", selectMode);
     if (selectMode) {
-      writing = false;
-      var ta = termTextarea();
-      if (ta) {
-        try {
-          ta.blur();
-        } catch (_) {}
-      }
+      lockIme();
       showToast("Seleccioná");
     }
   }
@@ -237,6 +283,10 @@
   }
 
   function focusTerm() {
+    if (!imeOpen) {
+      armTextarea(termTextarea());
+      return;
+    }
     var top = viewportTop();
     var term = xterm();
     if (term) {
@@ -246,6 +296,7 @@
     }
     var ta = termTextarea();
     if (ta) {
+      armTextarea(ta);
       try {
         ta.focus({ preventScroll: true });
       } catch (_) {
@@ -286,18 +337,23 @@
       try {
         if (typeof term.scrollLines === "function") term.scrollLines(9999);
       } catch (_) {}
-      try {
-        term.focus();
-      } catch (_) {}
+      if (imeOpen) {
+        try {
+          term.focus();
+        } catch (_) {}
+      }
     }
     var vp = document.querySelector(".xterm-viewport");
     if (vp) vp.scrollTop = vp.scrollHeight;
     var ta = termTextarea();
     if (ta) {
-      try {
-        ta.focus({ preventScroll: true });
-      } catch (_) {
-        ta.focus();
+      armTextarea(ta);
+      if (imeOpen) {
+        try {
+          ta.focus({ preventScroll: true });
+        } catch (_) {
+          ta.focus();
+        }
       }
     }
   }
@@ -315,6 +371,7 @@
   }
 
   function armKeepFocus() {
+    if (!imeOpen) return;
     keepFocusUntil = Date.now() + 900;
     focusTerm();
   }
@@ -936,6 +993,32 @@
       copyBtn.classList.remove("is-down");
     });
     bar.appendChild(copyBtn);
+    var imeBtn = document.createElement("button");
+    imeBtn.type = "button";
+    imeBtn.id = "rc-ek-ime";
+    imeBtn.className = "is-ime";
+    imeBtn.setAttribute("aria-label", "Teclado");
+    imeBtn.innerHTML = IME_ICON;
+    imeBtn.addEventListener(
+      "pointerdown",
+      function (ev) {
+        ev.stopPropagation();
+        imeBtn.classList.add("is-down");
+        toggleIme();
+      },
+      { passive: true }
+    );
+    imeBtn.addEventListener("pointerup", function () {
+      imeBtn.classList.remove("is-down");
+    });
+    imeBtn.addEventListener("pointercancel", function () {
+      imeBtn.classList.remove("is-down");
+    });
+    imeBtn.addEventListener("pointerleave", function () {
+      imeBtn.classList.remove("is-down");
+    });
+    bar.appendChild(imeBtn);
+    syncImeBtn();
     bindKeepFocus(bar);
     document.body.appendChild(bar);
     setLinkState(!!(window.__rcTermSocket && window.__rcTermSocket.readyState === 1));
@@ -956,12 +1039,12 @@
       setTimeout(requestLayout, 80);
     });
     document.addEventListener("focusin", function (ev) {
-      if (bar.contains(ev.target)) {
+      if (imeOpen && bar.contains(ev.target)) {
         focusTerm();
       }
     });
     document.addEventListener("focusout", function () {
-      if (Date.now() < keepFocusUntil) {
+      if (imeOpen && Date.now() < keepFocusUntil) {
         setTimeout(focusTerm, 0);
       }
     });
@@ -1102,6 +1185,8 @@
       }
       var t = ev.touches[0];
       ev.preventDefault();
+      ev.stopPropagation();
+      lockIme();
       startX = lastX = t.clientX;
       startY = lastY = t.clientY;
       acc = 0;
@@ -1128,11 +1213,12 @@
 
     function onMove(ev) {
       if (!active || !ev.touches || ev.touches.length !== 1) return;
+      ev.preventDefault();
+      ev.stopPropagation();
       var t = ev.touches[0];
       var x = t.clientX;
       var y = t.clientY;
       if (selectMode || selecting) {
-        ev.preventDefault();
         lastX = x;
         lastY = y;
         var to = cellAt(x, y);
@@ -1145,7 +1231,6 @@
       clearHold();
       scrolling = true;
       writing = false;
-      ev.preventDefault();
       acc += lastY - y;
       lastX = x;
       lastY = y;
@@ -1177,13 +1262,23 @@
       acc = 0;
     }
 
+    function blockXtermFocus(ev) {
+      if (fromKeys(ev)) return;
+      lockIme();
+      ev.stopPropagation();
+      if (ev.type === "click" || ev.type === "mousedown") ev.preventDefault();
+    }
+
     function bind(el) {
       if (!el || el.dataset.rcTouchScroll === "1") return;
       el.dataset.rcTouchScroll = "1";
-      el.addEventListener("touchstart", onStart, { passive: false });
-      el.addEventListener("touchmove", onMove, { passive: false });
-      el.addEventListener("touchend", onEnd, { passive: true });
-      el.addEventListener("touchcancel", onEnd, { passive: true });
+      el.addEventListener("pointerdown", blockXtermFocus, { passive: false, capture: true });
+      el.addEventListener("mousedown", blockXtermFocus, { passive: false, capture: true });
+      el.addEventListener("click", blockXtermFocus, { passive: false, capture: true });
+      el.addEventListener("touchstart", onStart, { passive: false, capture: true });
+      el.addEventListener("touchmove", onMove, { passive: false, capture: true });
+      el.addEventListener("touchend", onEnd, { passive: true, capture: true });
+      el.addEventListener("touchcancel", onEnd, { passive: true, capture: true });
     }
 
     bind(document.body);
@@ -1345,6 +1440,25 @@
     showToast("No pude copiar");
   }
 
+  function bootImeLock() {
+    document.addEventListener(
+      "focusin",
+      function (ev) {
+        var t = ev.target;
+        if (!t || !t.classList || !t.classList.contains("xterm-helper-textarea")) {
+          return;
+        }
+        armTextarea(t);
+      },
+      true
+    );
+    var mo = new MutationObserver(function () {
+      armTextarea(termTextarea());
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    armTextarea(termTextarea());
+  }
+
   function bootPaste() {
     document.addEventListener(
       "paste",
@@ -1400,6 +1514,8 @@
       return;
     }
     document.documentElement.classList.add("rc-touch");
+    lockIme();
+    bootImeLock();
     mountBar();
     bootInterceptors();
     bootTypeToTty();
