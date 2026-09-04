@@ -473,6 +473,9 @@
     if (window.__rcBootHistory && window.__rcBootHistory.length) {
       paintHistory(window.__rcBootHistory);
     }
+    if (window.__rcBootHistory && window.__rcBootHistory.length) {
+      paintHistory(window.__rcBootHistory);
+    }
     if (window.__rcPendingHistory && window.__rcPendingHistory.length) {
       paintHistory(window.__rcPendingHistory);
       window.__rcPendingHistory = null;

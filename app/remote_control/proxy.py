@@ -580,7 +580,8 @@ class Sidecar:
         script = (
             '<script id="rc-boot-history">window.__rcBootHistory='
             + json.dumps(lines, ensure_ascii=False)
-            + ";</script>"
+            + ";if(typeof window.__rcPaintHistory===\"function\")"
+            + "window.__rcPaintHistory(window.__rcBootHistory);</script>"
         )
         if "</head>" in html:
             return html.replace("</head>", script + "</head>", 1)
@@ -616,12 +617,14 @@ class Sidecar:
                 "connection",
                 "content-encoding",
                 "content-type",
+                "cache-control",
             }
             extra = [
                 (key.title() if key != "vary" else "Vary", value)
                 for key, value in resp_headers.items()
                 if key not in skip
             ]
+            extra.append(("Cache-Control", "no-store"))
             if request_is_mobile(req_headers):
                 extra.append(("Vary", "User-Agent, Sec-CH-UA-Mobile"))
             conn.sendall(
