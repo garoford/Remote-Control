@@ -35,8 +35,11 @@ TOUCH_BOOT_JS = (
     "(function(){try{"
     "var ua=navigator.userAgent||'';"
     "var mobile=false;"
+    "var fine=false;"
     "try{mobile=!!(navigator.userAgentData&&navigator.userAgentData.mobile);}catch(e){}"
-    "if(mobile||/Mobi|Android|iPhone|iPad|iPod/i.test(ua)||(navigator.maxTouchPoints||0)>1)"
+    "try{fine=window.matchMedia('(hover: hover) and (pointer: fine)').matches;}catch(e){}"
+    "if(fine)return;"
+    "if(mobile||/Mobi|Android|iPhone|iPad|iPod/i.test(ua))"
     "{document.documentElement.classList.add('rc-touch');}"
     "}catch(e){}})();"
 )

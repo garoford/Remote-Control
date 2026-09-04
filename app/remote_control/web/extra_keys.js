@@ -18,6 +18,7 @@
   var scrollPend = 0;
   var pasteGuard = 0;
   var pasteBusy = false;
+  var selectMode = false;
   var bar = null;
 
   var ROWS = [
@@ -44,6 +45,10 @@
   var PASTE_ICON =
     '<svg viewBox="0 0 24 24" aria-hidden="true">' +
     '<path fill="currentColor" d="M15 3h-1.2A2.8 2.8 0 0 0 11 1H9a2.8 2.8 0 0 0-2.8 2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm-6 0h2a.8.8 0 0 1 0 1.6H9A.8.8 0 0 1 9 3Zm6 16H5V5h1.2A2.8 2.8 0 0 0 9 7h2a2.8 2.8 0 0 0 2.8-2H15v14Z"/>' +
+    "</svg>";
+  var COPY_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path fill="currentColor" d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1Zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H10V7h9v14Z"/>' +
     "</svg>";
 
   var PASTE_CHUNK = 2048;
@@ -122,43 +127,26 @@
 
   function detectDevice() {
     var ua = navigator.userAgent || "";
-    var platform = navigator.platform || "";
-    var touches = navigator.maxTouchPoints || 0;
-    var coarse = false;
     var fineHover = false;
+    var coarse = false;
     try {
       coarse = window.matchMedia("(pointer: coarse)").matches;
       fineHover = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
     } catch (_) {}
-    var iPad =
-      /iPad/.test(ua) || (platform === "MacIntel" && touches > 1);
-    if (iPad) return "tablet";
     if (/iPhone|iPod/.test(ua)) return "phone";
-
-    var minCss = Math.min(window.innerWidth || 0, window.innerHeight || 0);
-    var dpr = window.devicePixelRatio || 1;
-    var minScreen = Math.min(screen.width || 0, screen.height || 0) / dpr;
-    var size = Math.max(minCss, minScreen);
+    if (/iPad/.test(ua)) return "tablet";
     var android = /Android/i.test(ua);
     var mobileToken = /Mobile/i.test(ua);
-    var touchy =
-      coarse ||
-      touches > 1 ||
-      android ||
-      /Mobi|Tablet|Silk|Kindle/i.test(ua);
-
-    if (!touchy && fineHover && touches <= 1) return "pc";
-
-    if (touchy) {
-      if (/Tablet|Nexus 7|Nexus 9|Nexus 10|SM-T|Kindle|Silk/i.test(ua)) {
-        return "tablet";
-      }
-      if (android && !mobileToken && size >= 500) return "tablet";
-      if (size >= 600) return "tablet";
-      return "phone";
+    if (android && mobileToken) return "phone";
+    if (android || /Tablet|Silk|Kindle/i.test(ua)) return "tablet";
+    if (fineHover) return "pc";
+    if (coarse || /Mobi/i.test(ua)) {
+      var minCss = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+      var dpr = window.devicePixelRatio || 1;
+      var minScreen = Math.min(screen.width || 0, screen.height || 0) / dpr;
+      var size = Math.max(minCss, minScreen);
+      return size >= 600 ? "tablet" : "phone";
     }
-    if (fineHover && touches === 0) return "pc";
-    if (coarse || touches > 0) return size >= 600 ? "tablet" : "phone";
     return "pc";
   }
 
@@ -166,7 +154,7 @@
     return !!(
       el &&
       el.closest &&
-      el.closest(".is-paste, #rc-ek-paste, #rc-file-pick")
+      el.closest(".is-paste, .is-copy, #rc-ek-paste, #rc-ek-copy, #rc-file-pick")
     );
   }
 
@@ -188,6 +176,48 @@
   function xterm() {
     var term = window.term;
     return term && typeof term.focus === "function" ? term : null;
+  }
+
+  function setSelectMode(on) {
+    selectMode = !!on;
+    document.documentElement.classList.toggle("rc-select", selectMode);
+    if (selectMode) {
+      writing = false;
+      var ta = termTextarea();
+      if (ta) {
+        try {
+          ta.blur();
+        } catch (_) {}
+      }
+      showToast("Seleccioná");
+    }
+  }
+
+  function endSelect() {
+    if (!selectMode) return;
+    setSelectMode(false);
+  }
+
+  function fireMouse(type, x, y, buttons) {
+    var screen =
+      document.querySelector("#terminal-container .xterm-screen") ||
+      document.querySelector(".xterm-screen") ||
+      document.querySelector(".xterm canvas") ||
+      document.getElementById("terminal-container");
+    if (!screen) return;
+    screen.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        buttons: buttons,
+        button: 0,
+      })
+    );
   }
 
   function isTypeTarget(el) {
@@ -744,6 +774,7 @@
       toggleMod(def.mod);
       return;
     }
+    endSelect();
     sendInput(specialWithMods(def));
     clearSticky();
   }
@@ -870,6 +901,31 @@
       pasteBtn.classList.remove("is-down");
     });
     bar.appendChild(pasteBtn);
+    var copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.id = "rc-ek-copy";
+    copyBtn.className = "is-copy";
+    copyBtn.setAttribute("aria-label", "Copiar selección");
+    copyBtn.innerHTML = COPY_ICON;
+    copyBtn.addEventListener(
+      "pointerdown",
+      function (ev) {
+        ev.stopPropagation();
+        copyBtn.classList.add("is-down");
+        copySelection();
+      },
+      { passive: true }
+    );
+    copyBtn.addEventListener("pointerup", function () {
+      copyBtn.classList.remove("is-down");
+    });
+    copyBtn.addEventListener("pointercancel", function () {
+      copyBtn.classList.remove("is-down");
+    });
+    copyBtn.addEventListener("pointerleave", function () {
+      copyBtn.classList.remove("is-down");
+    });
+    bar.appendChild(copyBtn);
     bindKeepFocus(bar);
     document.body.appendChild(bar);
     setLinkState(!!(window.__rcTermSocket && window.__rcTermSocket.readyState === 1));
@@ -1000,12 +1056,17 @@
   }
 
   function bootTouchScroll() {
+    var startX = 0;
     var startY = 0;
+    var lastX = 0;
     var lastY = 0;
     var acc = 0;
     var scrolling = false;
+    var selecting = false;
     var active = false;
+    var holdTimer = 0;
     var PX = 16;
+    var HOLD_MS = 450;
 
     function fromKeys(ev) {
       var t = ev.target;
@@ -1016,25 +1077,63 @@
       );
     }
 
+    function clearHold() {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = 0;
+      }
+    }
+
     function onStart(ev) {
       if (!ev.touches || ev.touches.length !== 1 || fromKeys(ev)) {
         active = false;
         return;
       }
-      startY = lastY = ev.touches[0].clientY;
+      var t = ev.touches[0];
+      ev.preventDefault();
+      startX = lastX = t.clientX;
+      startY = lastY = t.clientY;
       acc = 0;
       scrolling = false;
+      selecting = false;
       active = true;
+      if (selectMode) {
+        selecting = true;
+        ev.preventDefault();
+        fireMouse("mousedown", t.clientX, t.clientY, 1);
+        return;
+      }
+      clearHold();
+      holdTimer = setTimeout(function () {
+        holdTimer = 0;
+        if (!active || scrolling) return;
+        selecting = true;
+        setSelectMode(true);
+        fireMouse("mousedown", lastX, lastY, 1);
+      }, HOLD_MS);
     }
 
     function onMove(ev) {
       if (!active || !ev.touches || ev.touches.length !== 1) return;
-      var y = ev.touches[0].clientY;
-      if (!scrolling && Math.abs(y - startY) < 8) return;
+      var t = ev.touches[0];
+      var x = t.clientX;
+      var y = t.clientY;
+      if (selectMode || selecting) {
+        ev.preventDefault();
+        fireMouse("mousemove", x, y, 1);
+        lastX = x;
+        lastY = y;
+        return;
+      }
+      if (!scrolling && Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) {
+        return;
+      }
+      clearHold();
       scrolling = true;
       writing = false;
       ev.preventDefault();
       acc += lastY - y;
+      lastX = x;
       lastY = y;
       var lines = acc / PX;
       var step = lines < 0 ? Math.ceil(lines) : Math.floor(lines);
@@ -1045,15 +1144,27 @@
     }
 
     function onEnd() {
+      clearHold();
+      if (selecting) {
+        fireMouse("mouseup", lastX, lastY, 0);
+      } else if (!scrolling) {
+        var ta = termTextarea();
+        if (ta) {
+          try {
+            ta.blur();
+          } catch (_) {}
+        }
+      }
       active = false;
       scrolling = false;
+      selecting = false;
       acc = 0;
     }
 
     function bind(el) {
       if (!el || el.dataset.rcTouchScroll === "1") return;
       el.dataset.rcTouchScroll = "1";
-      el.addEventListener("touchstart", onStart, { passive: true });
+      el.addEventListener("touchstart", onStart, { passive: false });
       el.addEventListener("touchmove", onMove, { passive: false });
       el.addEventListener("touchend", onEnd, { passive: true });
       el.addEventListener("touchcancel", onEnd, { passive: true });
@@ -1072,6 +1183,7 @@
   }
 
   function beginWriting() {
+    endSelect();
     writing = true;
     scrollToWrite();
     return cancelCopyMode().then(function () {
@@ -1184,6 +1296,13 @@
   }
 
   function termSelection() {
+    var term = xterm();
+    if (term && typeof term.getSelection === "function") {
+      try {
+        var fromTerm = term.getSelection();
+        if (fromTerm) return fromTerm;
+      } catch (_) {}
+    }
     var sel = window.getSelection && window.getSelection();
     var text = sel && sel.toString ? sel.toString() : "";
     return text || "";
@@ -1199,6 +1318,7 @@
       navigator.clipboard.writeText(text).then(
         function () {
           showToast("Copiado");
+          endSelect();
         },
         function () {
           showToast("No pude copiar");
@@ -1260,6 +1380,7 @@
     document.documentElement.classList.add("rc-" + device);
     bootPaste();
     if (device === "pc") {
+      document.documentElement.classList.remove("rc-touch");
       return;
     }
     document.documentElement.classList.add("rc-touch");
