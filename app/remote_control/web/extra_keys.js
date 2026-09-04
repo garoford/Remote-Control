@@ -20,6 +20,7 @@
   var pasteBusy = false;
   var selectMode = false;
   var imeOpen = false;
+  var lastSel = null;
   var bar = null;
 
   var ROWS = [
@@ -236,6 +237,14 @@
     if (selectMode) {
       lockIme();
       showToast("Seleccioná");
+      return;
+    }
+    lastSel = null;
+    var term = xterm();
+    if (term && typeof term.clearSelection === "function") {
+      try {
+        term.clearSelection();
+      } catch (_) {}
     }
   }
 
@@ -248,7 +257,9 @@
     var term = xterm();
     if (!term || !term.cols || !term.rows) return null;
     var screen =
+      document.querySelector("#terminal-container .xterm-screen canvas") ||
       document.querySelector("#terminal-container .xterm-screen") ||
+      document.querySelector(".xterm-screen canvas") ||
       document.querySelector(".xterm-screen") ||
       (term.element && term.element.querySelector(".xterm-screen")) ||
       term.element;
@@ -263,17 +274,102 @@
     };
   }
 
+  function bufferTop() {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    if (buf && typeof buf.viewportY === "number") return buf.viewportY;
+    return 0;
+  }
+
+  function toBufferCell(cell) {
+    if (!cell) return null;
+    return { col: cell.col, row: cell.row + bufferTop() };
+  }
+
+  function wordBounds(col, bufRow) {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    if (!buf || typeof buf.getLine !== "function") {
+      return { col: col, end: col };
+    }
+    var line = buf.getLine(bufRow);
+    var text =
+      line && typeof line.translateToString === "function"
+        ? line.translateToString(false)
+        : "";
+    if (!text) return { col: col, end: col };
+    if (col >= text.length) col = text.length - 1;
+    if (col < 0) return { col: 0, end: 0 };
+    function span(at) {
+      var a = at;
+      var b = at;
+      while (a > 0 && !/\s/.test(text.charAt(a - 1))) a--;
+      while (b + 1 < text.length && !/\s/.test(text.charAt(b + 1))) b++;
+      return { col: a, end: b };
+    }
+    if (!/\s/.test(text.charAt(col))) return span(col);
+    var left = col - 1;
+    while (left >= 0 && /\s/.test(text.charAt(left))) left--;
+    var right = col + 1;
+    while (right < text.length && /\s/.test(text.charAt(right))) right++;
+    if (left >= 0 && (right >= text.length || col - left <= right - col)) return span(left);
+    if (right < text.length) return span(right);
+    return { col: col, end: col };
+  }
+
   function applyCellSelect(from, to) {
     var term = xterm();
     if (!term || !from || !to || typeof term.select !== "function") return;
-    var a = from.row * term.cols + from.col;
-    var b = to.row * term.cols + to.col;
-    if (b < a) {
-      var tmp = a;
-      a = b;
-      b = tmp;
+    var a = from;
+    var b = to;
+    if (b.row < a.row || (b.row === a.row && b.col < a.col)) {
+      a = to;
+      b = from;
     }
-    term.select(a % term.cols, Math.floor(a / term.cols), Math.max(1, b - a + 1));
+    lastSel = { from: { col: a.col, row: a.row }, to: { col: b.col, row: b.row } };
+    term.select(a.col, a.row, Math.max(1, (b.row - a.row) * term.cols + (b.col - a.col) + 1));
+  }
+
+  function readSelText() {
+    var term = xterm();
+    var from = lastSel && lastSel.from;
+    var to = lastSel && lastSel.to;
+    if ((!from || !to) && term && typeof term.getSelectionPosition === "function") {
+      try {
+        var pos = term.getSelectionPosition();
+        if (pos && pos.startColumn != null) {
+          from = { col: pos.startColumn, row: pos.startRow };
+          to = {
+            col: Math.max(0, (pos.endColumn || 1) - 1),
+            row: pos.endRow,
+          };
+        } else if (pos && pos.start && pos.end) {
+          from = { col: pos.start.x, row: pos.start.y };
+          to = { col: Math.max(0, pos.end.x - 1), row: pos.end.y };
+        }
+      } catch (_) {}
+    }
+    if (!term || !from || !to) return "";
+    var buf = term.buffer && term.buffer.active;
+    if (!buf || typeof buf.getLine !== "function") return "";
+    if (to.row < from.row || (to.row === from.row && to.col < from.col)) {
+      var swap = from;
+      from = to;
+      to = swap;
+    }
+    var lines = [];
+    var y;
+    for (y = from.row; y <= to.row; y++) {
+      var line = buf.getLine(y);
+      if (!line || typeof line.translateToString !== "function") {
+        lines.push("");
+        continue;
+      }
+      var start = y === from.row ? from.col : 0;
+      var end = y === to.row ? to.col + 1 : term.cols;
+      lines.push(line.translateToString(false, start, end).replace(/[ \t]+$/g, ""));
+    }
+    return lines.join("\n").replace(/\n+$/g, "");
   }
 
   function isTypeTarget(el) {
@@ -1196,7 +1292,7 @@
       active = true;
       if (selectMode) {
         selecting = true;
-        selFrom = cellAt(t.clientX, t.clientY);
+        selFrom = toBufferCell(cellAt(t.clientX, t.clientY));
         if (selFrom) applyCellSelect(selFrom, selFrom);
         return;
       }
@@ -1206,8 +1302,12 @@
         if (!active || scrolling) return;
         selecting = true;
         setSelectMode(true);
-        selFrom = cellAt(lastX, lastY);
-        if (selFrom) applyCellSelect(selFrom, selFrom);
+        var at = toBufferCell(cellAt(lastX, lastY));
+        if (at) {
+          var word = wordBounds(at.col, at.row);
+          selFrom = { col: word.col, row: at.row };
+          applyCellSelect(selFrom, { col: word.end, row: at.row });
+        }
       }, HOLD_MS);
     }
 
@@ -1221,7 +1321,7 @@
       if (selectMode || selecting) {
         lastX = x;
         lastY = y;
-        var to = cellAt(x, y);
+        var to = toBufferCell(cellAt(x, y));
         if (selFrom && to) applyCellSelect(selFrom, to);
         return;
       }
@@ -1245,7 +1345,7 @@
     function onEnd() {
       clearHold();
       if (selecting) {
-        var end = cellAt(lastX, lastY);
+        var end = toBufferCell(cellAt(lastX, lastY));
         if (selFrom && end) applyCellSelect(selFrom, end);
       } else if (!scrolling) {
         var ta = termTextarea();
@@ -1407,16 +1507,20 @@
   }
 
   function termSelection() {
+    var own = readSelText();
+    if (own) return own;
     var term = xterm();
     if (term && typeof term.getSelection === "function") {
       try {
         var fromTerm = term.getSelection();
-        if (fromTerm) return String(fromTerm).replace(/[ \t]+$/gm, "");
+        if (fromTerm && String(fromTerm).replace(/\s+/g, "")) {
+          return String(fromTerm).replace(/[ \t]+$/gm, "");
+        }
       } catch (_) {}
     }
     var sel = window.getSelection && window.getSelection();
     var text = sel && sel.toString ? sel.toString() : "";
-    return text || "";
+    return text ? String(text).replace(/[ \t]+$/gm, "") : "";
   }
 
   function copySelection() {
