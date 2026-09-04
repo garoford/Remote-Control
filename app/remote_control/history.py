@@ -173,3 +173,126 @@ def history_payload(
     capped = lines[-MAX_RETURN_LINES:]
     mode, out = find_suffix(lines, fingerprint)
     return {"mode": mode, "lines": out, "all": capped, "count": len(lines)}
+
+
+def _empty_scrollback() -> dict:
+    return {"size": 0, "w": 0, "h": 0, "alt": 0, "mode": "none", "lines": []}
+
+
+def scrollback_state(tab: str, socket: str = TMUX_SOCKET) -> dict | None:
+    if not TAB_RE.match(tab) or not has_session(tab, socket):
+        return None
+    result = _tmux(
+        socket,
+        "display-message",
+        "-p",
+        "-t",
+        tab,
+        "#{history_size}\t#{pane_width}\t#{pane_height}\t#{alternate_on}",
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.strip().split("\t")
+    if len(parts) < 4:
+        return None
+    return {
+        "history_size": int(parts[0]) if parts[0].isdigit() else 0,
+        "pane_width": int(parts[1]) if parts[1].isdigit() else 0,
+        "pane_height": int(parts[2]) if parts[2].isdigit() else 0,
+        "alternate_on": 1 if parts[3] == "1" else 0,
+    }
+
+
+def capture_scrollback(
+    tab: str,
+    count: int | None = None,
+    socket: str = TMUX_SOCKET,
+) -> list[str] | None:
+    if not TAB_RE.match(tab):
+        return None
+    if count is not None and count <= 0:
+        return []
+    start = f"-{int(count)}" if count is not None else "-"
+    result = subprocess.run(
+        [
+            "tmux",
+            "-L",
+            socket,
+            "capture-pane",
+            "-p",
+            "-e",
+            "-S",
+            start,
+            "-E",
+            "-1",
+            "-t",
+            tab,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n") if text else []
+
+
+def capture_visible(tab: str, socket: str = TMUX_SOCKET) -> list[str] | None:
+    if not TAB_RE.match(tab):
+        return None
+    result = subprocess.run(
+        ["tmux", "-L", socket, "capture-pane", "-p", "-e", "-S", "0", "-t", tab],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n") if text else []
+
+
+def scrollback_payload(
+    tab: str,
+    since: int | None,
+    w: int | None,
+    socket: str = TMUX_SOCKET,
+) -> dict:
+    if not TAB_RE.match(tab) or not has_session(tab, socket):
+        return _empty_scrollback()
+    state = scrollback_state(tab, socket)
+    if state is None:
+        return _empty_scrollback()
+    size = state["history_size"]
+    pane_w = state["pane_width"]
+    pane_h = state["pane_height"]
+    alt = state["alternate_on"]
+    need_full = since is None or w is None or int(w) != pane_w or int(since) > size
+    if need_full:
+        lines = capture_scrollback(tab, None, socket) or []
+        if len(lines) > MAX_RETURN_LINES:
+            lines = lines[-MAX_RETURN_LINES:]
+        return {
+            "size": size,
+            "w": pane_w,
+            "h": pane_h,
+            "alt": alt,
+            "mode": "full",
+            "lines": lines,
+        }
+    delta = size - int(since)
+    lines = capture_scrollback(tab, delta, socket) or [] if delta > 0 else []
+    return {
+        "size": size,
+        "w": pane_w,
+        "h": pane_h,
+        "alt": alt,
+        "mode": "append",
+        "lines": lines,
+    }

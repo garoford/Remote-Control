@@ -1,8 +1,8 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
-Serves cacheable fonts + JS, /rc-history, /rc-scroll, reserved clipboard uploads,
-and proxies everything else (including the tty WebSocket) to ttyd
-on the internal port.
+Serves cacheable fonts + JS, /rc-scrollback, /rc-history, /rc-scroll,
+reserved clipboard uploads, and proxies everything else (including the
+tty WebSocket) to ttyd on the internal port.
 """
 
 from __future__ import annotations
@@ -16,7 +16,12 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.history import cancel_copy_mode, history_payload, scroll_history
+from remote_control.history import (
+    cancel_copy_mode,
+    history_payload,
+    scroll_history,
+    scrollback_payload,
+)
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
     load_manifest,
@@ -50,6 +55,21 @@ def _safe_asset(assets: Path, name: str) -> Path | None:
     if path.is_file():
         return path
     return None
+
+
+def _rewrite_connection_close(header: bytes) -> bytes:
+    lines = header.split(b"\r\n")
+    if not lines:
+        return header
+    out = [lines[0]]
+    for line in lines[1:]:
+        if not line:
+            continue
+        if line.lower().startswith(b"connection:"):
+            continue
+        out.append(line)
+    out.append(b"Connection: close")
+    return b"\r\n".join(out)
 
 
 def _header_map(header_block: bytes) -> dict[str, str]:
@@ -289,6 +309,9 @@ class Sidecar:
                     headers,
                 )
                 return
+            if method == "GET" and path.rstrip("/").endswith("/rc-scrollback"):
+                self._serve_scrollback(conn, parse_qs(parsed_url.query))
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-history"):
                 self._serve_history(conn, parse_qs(parsed_url.query))
                 return
@@ -392,6 +415,33 @@ class Sidecar:
                 b"",
                 "text/plain",
                 _API_EXTRA + [("Access-Control-Max-Age", "86400")],
+            )
+        )
+
+    def _serve_scrollback(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
+        tab = (query.get("tab") or [""])[0]
+        raw_since = (query.get("since") or [""])[0]
+        raw_w = (query.get("w") or [""])[0]
+        since: int | None = None
+        width: int | None = None
+        if raw_since != "":
+            try:
+                since = int(raw_since)
+            except ValueError:
+                since = None
+        if raw_w != "":
+            try:
+                width = int(raw_w)
+            except ValueError:
+                width = None
+        payload = scrollback_payload(tab, since, width, socket=self.tmux_socket)
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                _API_EXTRA,
             )
         )
 
@@ -555,6 +605,8 @@ class Sidecar:
         ):
             self._proxy_html(conn, header, body, headers, parse_qs(parsed_req.query))
             return
+        if not upgrade:
+            header = _rewrite_connection_close(header)
         upstream = socket.create_connection(
             (self.upstream_host, self.upstream_port), timeout=10
         )
@@ -572,16 +624,21 @@ class Sidecar:
 
     def _inject_boot_history(self, html: str, query: dict[str, list[str]]) -> str:
         tab = (query.get("arg") or [""])[0]
-        lines: list[str] = []
+        payload = {
+            "size": 0,
+            "w": 0,
+            "h": 0,
+            "alt": 0,
+            "mode": "none",
+            "lines": [],
+        }
         if tab:
-            payload = history_payload(tab, [], socket=self.tmux_socket)
-            if payload:
-                lines = payload.get("all") or payload.get("lines") or []
+            payload = scrollback_payload(tab, None, None, socket=self.tmux_socket)
         script = (
-            '<script id="rc-boot-history">window.__rcBootHistory='
-            + json.dumps(lines, ensure_ascii=False)
-            + ";if(typeof window.__rcPaintHistory===\"function\")"
-            + "window.__rcPaintHistory(window.__rcBootHistory);</script>"
+            '<script id="rc-boot-scrollback">window.__rcBootScrollback='
+            + json.dumps(payload, ensure_ascii=False)
+            + ";if(typeof window.applyScrollback===\"function\")"
+            + "window.applyScrollback(window.__rcBootScrollback);</script>"
         )
         if "</head>" in html:
             return html.replace("</head>", script + "</head>", 1)
@@ -595,6 +652,7 @@ class Sidecar:
         req_headers: dict[str, str],
         query: dict[str, list[str]] | None = None,
     ) -> None:
+        header = _rewrite_connection_close(header)
         upstream = socket.create_connection(
             (self.upstream_host, self.upstream_port), timeout=10
         )
@@ -605,7 +663,8 @@ class Sidecar:
                 return
             status, resp_headers, resp_body = raw
             ctype = resp_headers.get("content-type") or ""
-            if "html" in ctype.lower():
+            is_html = "html" in ctype.lower() or not ctype
+            if is_html:
                 text = resp_body.decode("utf-8", "replace")
                 if request_is_mobile(req_headers):
                     text = rewrite_index_for_mobile(text, self._mobile_font_url())
@@ -627,11 +686,12 @@ class Sidecar:
             extra.append(("Cache-Control", "no-store"))
             if request_is_mobile(req_headers):
                 extra.append(("Vary", "User-Agent, Sec-CH-UA-Mobile"))
+            out_type = "text/html; charset=utf-8" if is_html else ctype
             conn.sendall(
                 _http_response(
                     status,
                     resp_body,
-                    ctype or "text/html; charset=utf-8",
+                    out_type,
                     extra,
                 )
             )

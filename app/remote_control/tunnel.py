@@ -333,7 +333,7 @@ class TunnelService:
             "-t",
             "cursorBlink=true",
             "-t",
-            "scrollback=200",
+            "scrollback=0",
             "-t",
             f"theme={NIGHT_OWL_THEME}",
         ]
@@ -481,7 +481,11 @@ class TunnelService:
         if not html:
             return
         html = self._strip_injects(html)
-        inject = self._font_css() + self._web_inject()
+        inject = (
+            '<meta charset="utf-8" id="rc-charset">'
+            + self._font_css()
+            + self._web_inject()
+        )
         if "<head>" in html:
             html = html.replace("<head>", "<head>" + inject, 1)
         else:
@@ -547,11 +551,13 @@ class TunnelService:
         return html[:start] + html[end + len(close) :]
 
     def _strip_injects(self, html: str) -> str:
+        html = self._strip_void(html, "meta", "rc-charset")
         html = self._strip_void(html, "link", "rc-font-preload-reg")
         html = self._strip_void(html, "link", "rc-font-preload-bold")
         html = self._strip_void(html, "link", "rc-font-preload-mobile")
         html = self._strip_tagged(html, "style", "cf-remote-theme")
         html = self._strip_tagged(html, "style", "cf-remote-theme-mobile")
+        html = self._strip_tagged(html, "style", "rc-ansi-palette")
         html = self._strip_tagged(html, "style", "rc-extra-keys-css")
         html = self._strip_tagged(html, "script", "rc-touch-boot")
         html = self._strip_tagged(html, "script", "rc-tab-session-js")
@@ -565,6 +571,33 @@ class TunnelService:
                 html = html[:start] + html[end + 1 :]
         return html
 
+    def _ansi_palette_css(self) -> str:
+        theme = json.loads(NIGHT_OWL_THEME)
+        keys = (
+            "black",
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "white",
+            "brightBlack",
+            "brightRed",
+            "brightGreen",
+            "brightYellow",
+            "brightBlue",
+            "brightMagenta",
+            "brightCyan",
+            "brightWhite",
+        )
+        rules = [f"--rc-c{i}:{theme[name]}" for i, name in enumerate(keys)]
+        rules.append(f"--rc-fg:{theme['foreground']}")
+        rules.append(f"--rc-bg:{theme['background']}")
+        return (
+            '<style id="rc-ansi-palette">:root{' + ";".join(rules) + "}</style>"
+        )
+
     def _web_inject(self) -> str:
         root = Path(__file__).with_name("web")
         css_path = root / "extra_keys.css"
@@ -574,6 +607,7 @@ class TunnelService:
             '<meta id="rc-viewport" name="viewport" content="width=device-width,'
             "initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,"
             'interactive-widget=resizes-content">',
+            self._ansi_palette_css(),
             f'<script id="rc-touch-boot">{TOUCH_BOOT_JS}</script>',
         ]
         if css_path.is_file():

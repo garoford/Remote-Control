@@ -5,13 +5,17 @@ body {
 }
 
 #rc-term-page {
+  --rc-cell-h: 20.25px;
+  --rc-font-size: 15px;
+  --rc-font-family: "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  --rc-hist-pad: 10px;
   position: absolute;
   inset: 0;
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  background: #011627;
+  background: var(--rc-bg, #011627);
   box-sizing: border-box;
 }
 
@@ -22,12 +26,15 @@ body {
 
 #rc-term-history {
   margin: 0;
-  padding: 8px 10px 0;
-  background: #011627;
-  color: #d6deeb;
-  font: 15px/1.35 "FiraCode Nerd Font Mono", ui-monospace, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
+  padding: 0 0 0 var(--rc-hist-pad, 10px);
+  background: var(--rc-bg, #011627);
+  color: var(--rc-fg, #d6deeb);
+  font-family: var(--rc-font-family);
+  font-size: var(--rc-font-size);
+  line-height: var(--rc-cell-h);
+  white-space: pre;
+  overflow-x: hidden;
+  word-break: normal;
   -webkit-user-select: text;
   user-select: text;
   touch-action: pan-y;

@@ -5,10 +5,14 @@ import unittest
 
 from remote_control.history import (
     cancel_copy_mode,
+    capture_scrollback,
+    capture_visible,
     find_suffix,
     history_payload,
     normalize_line,
     scroll_history,
+    scrollback_payload,
+    scrollback_state,
 )
 
 
@@ -226,6 +230,97 @@ class HistorySuffixTests(unittest.TestCase):
             self.assertIsNotNone(again)
             self.assertFalse(again["in_mode"])
             self.assertEqual(again["moved"], 0)
+        finally:
+            subprocess.run(
+                ["tmux", "-L", socket, "kill-server"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    def test_scrollback_unknown_tab_is_none(self) -> None:
+        payload = scrollback_payload("rcnotasession1", None, None)
+        self.assertEqual(payload["mode"], "none")
+        self.assertEqual(payload["lines"], [])
+        self.assertEqual(payload["size"], 0)
+
+    def test_scrollback_excludes_visible_and_append(self) -> None:
+        if not shutil.which("tmux"):
+            self.skipTest("tmux missing")
+        socket = "rc-testsb"
+        tab = "rcabc1234567dd"
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started = subprocess.run(
+            [
+                "tmux",
+                "-L",
+                socket,
+                "new-session",
+                "-d",
+                "-s",
+                tab,
+                "-x",
+                "80",
+                "-y",
+                "10",
+                "--",
+                "bash",
+                "--norc",
+                "--noprofile",
+            ],
+            check=False,
+        )
+        if started.returncode != 0:
+            self.skipTest("could not start tmux")
+        try:
+            subprocess.run(
+                ["tmux", "-L", socket, "resize-window", "-t", tab, "-x", "80", "-y", "10"],
+                check=False,
+            )
+            subprocess.run(
+                ["tmux", "-L", socket, "send-keys", "-t", tab, "seq 1 60", "Enter"],
+                check=True,
+            )
+            time.sleep(0.5)
+            state = scrollback_state(tab, socket)
+            self.assertIsNotNone(state)
+            lines = capture_scrollback(tab, None, socket)
+            self.assertIsNotNone(lines)
+            self.assertEqual(state["history_size"], len(lines))
+            self.assertGreater(state["history_size"], 0)
+            visible = capture_visible(tab, socket)
+            self.assertIsNotNone(visible)
+            self.assertTrue(visible)
+            if lines:
+                self.assertNotEqual(
+                    normalize_line(lines[-1]),
+                    normalize_line(visible[0]),
+                )
+            full = scrollback_payload(tab, None, None, socket=socket)
+            self.assertEqual(full["mode"], "full")
+            self.assertEqual(full["size"], len(full["lines"]))
+            self.assertEqual(full["w"], state["pane_width"])
+            same = scrollback_payload(tab, full["size"], full["w"], socket=socket)
+            self.assertEqual(same["mode"], "append")
+            self.assertEqual(same["lines"], [])
+            subprocess.run(
+                ["tmux", "-L", socket, "send-keys", "-t", tab, "echo rc-sb-more", "Enter"],
+                check=True,
+            )
+            time.sleep(0.4)
+            after = scrollback_payload(tab, full["size"], full["w"], socket=socket)
+            self.assertEqual(after["mode"], "append")
+            self.assertGreater(after["size"], full["size"])
+            self.assertEqual(after["size"] - full["size"], len(after["lines"]))
+            wrong_w = scrollback_payload(tab, after["size"], full["w"] + 11, socket=socket)
+            self.assertEqual(wrong_w["mode"], "full")
+            stale = scrollback_payload(tab, after["size"] + 50, after["w"], socket=socket)
+            self.assertEqual(stale["mode"], "full")
         finally:
             subprocess.run(
                 ["tmux", "-L", socket, "kill-server"],

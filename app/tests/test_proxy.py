@@ -153,8 +153,9 @@ class ProxyAssetTests(unittest.TestCase):
         body = resp.read()
         self.assertIn(b"ttyd-index", body)
         self.assertIn(b"rc-font-preload-reg", body)
-        self.assertIn(b"rc-boot-history", body)
-        self.assertIn(b"__rcBootHistory", body)
+        self.assertIn(b"rc-boot-scrollback", body)
+        self.assertIn(b"__rcBootScrollback", body)
+        self.assertIn("charset=utf-8", (resp.getheader("Content-Type") or "").lower())
         self.assertEqual(resp.status, 200)
 
     def test_mobile_index_keeps_regular_font(self) -> None:
@@ -301,6 +302,70 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertEqual(body.get("mode"), "none")
         self.assertEqual(body.get("lines"), [])
         self.assertEqual(body.get("all") or [], [])
+
+    def test_scrollback_unknown_tab_is_empty(self) -> None:
+        resp = self._get("/rc-scrollback?tab=rcnotasession1")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body.get("mode"), "none")
+        self.assertEqual(body.get("lines"), [])
+        self.assertEqual(body.get("size"), 0)
+
+    def test_index_declares_utf8(self) -> None:
+        resp = self._get("/")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("charset=utf-8", (resp.getheader("Content-Type") or "").lower())
+
+    def test_pipelined_history_is_not_ttyd_404(self) -> None:
+        raw = socket.create_connection(("127.0.0.1", self.listen_port), timeout=3)
+        try:
+            raw.sendall(
+                b"GET /token HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: keep-alive\r\n"
+                b"\r\n"
+            )
+            first = b""
+            deadline = time.time() + 2
+            while time.time() < deadline and b"\r\n\r\n" not in first:
+                chunk = raw.recv(4096)
+                if not chunk:
+                    break
+                first += chunk
+            if b"Content-Length:" in first:
+                header, _, rest = first.partition(b"\r\n\r\n")
+                length = 0
+                for line in header.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1].strip() or 0)
+                while len(rest) < length:
+                    chunk = raw.recv(4096)
+                    if not chunk:
+                        break
+                    rest += chunk
+            try:
+                raw.sendall(
+                    b"GET /rc-history?tab=rcnotasession1 HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\n"
+                    b"Connection: close\r\n"
+                    b"\r\n"
+                )
+                second = b""
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    chunk = raw.recv(4096)
+                    if not chunk:
+                        break
+                    second += chunk
+            except OSError:
+                second = b""
+            if second:
+                head = second.split(b"\r\n\r\n", 1)[0].lower()
+                self.assertFalse(b"404" in second[:80] and b"ttyd" in head)
+                if b"{" in second:
+                    self.assertNotIn(b"server: ttyd", head)
+        finally:
+            raw.close()
 
     def test_websocket_upgrade_is_spliced(self) -> None:
         raw = socket.create_connection(("127.0.0.1", self.listen_port), timeout=3)

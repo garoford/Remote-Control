@@ -21,9 +21,11 @@
   var imeGuard = 0;
   var lastSel = null;
   var stickBottom = true;
-  var lastOff = 0;
-  var historyLines = [];
+  var sbSize = 0;
+  var sbW = 0;
+  var historyHtml = [];
   var histTimer = 0;
+  var pullingSb = false;
   var bar = null;
 
   var ROWS = [
@@ -118,6 +120,9 @@
           setTimeout(function () {
             window.dispatchEvent(new CustomEvent("rc-ws-open"));
           }, 0);
+        });
+        ws.addEventListener("message", function () {
+          scheduleScrollback();
         });
         ws.addEventListener("close", function () {
           window.dispatchEvent(new CustomEvent("rc-ws-close"));
@@ -290,123 +295,263 @@
     return term && typeof term.focus === "function" ? term : null;
   }
 
-  function normLine(s) {
-    return String(s || "").replace(/\s+$/g, "");
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
   }
 
-  function readTermLines(all) {
-    var term = xterm();
-    var buf = term && term.buffer && term.buffer.active;
-    if (!buf || typeof buf.getLine !== "function") return [];
-    var out = [];
-    var y0 = all ? 0 : buf.baseY || 0;
-    var end = all ? buf.length : y0 + (term.rows || 24);
-    var i;
-    for (i = y0; i < end; i++) {
-      var line = buf.getLine(i);
-      out.push(
-        line && typeof line.translateToString === "function"
-          ? line.translateToString(true)
-          : ""
+  function stripOtherEsc(s) {
+    return String(s)
+      .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+      .replace(/\u001b./g, "");
+  }
+
+  function color256(n) {
+    n = n | 0;
+    if (n < 0) n = 0;
+    if (n < 16) return "var(--rc-c" + n + ")";
+    if (n < 232) {
+      var i = n - 16;
+      var ramp = [0, 95, 135, 175, 215, 255];
+      return (
+        "rgb(" +
+        ramp[Math.floor(i / 36)] +
+        "," +
+        ramp[Math.floor((i % 36) / 6)] +
+        "," +
+        ramp[i % 6] +
+        ")"
       );
     }
-    while (out.length && !normLine(out[out.length - 1])) out.pop();
+    var g = 8 + (n - 232) * 10;
+    return "rgb(" + g + "," + g + "," + g + ")";
+  }
+
+  function applySgr(st, raw) {
+    var parts =
+      raw === ""
+        ? [0]
+        : raw.split(";").map(function (x) {
+            return x === "" ? 0 : parseInt(x, 10);
+          });
+    var i = 0;
+    while (i < parts.length) {
+      var n = parts[i++];
+      if (n !== n) n = 0;
+      if (n === 0) {
+        st.bold = false;
+        st.dim = false;
+        st.italic = false;
+        st.underline = false;
+        st.inverse = false;
+        st.fg = null;
+        st.bg = null;
+        st.fgRgb = null;
+        st.bgRgb = null;
+      } else if (n === 1) st.bold = true;
+      else if (n === 2) st.dim = true;
+      else if (n === 3) st.italic = true;
+      else if (n === 4) st.underline = true;
+      else if (n === 7) st.inverse = true;
+      else if (n === 22) {
+        st.bold = false;
+        st.dim = false;
+      } else if (n === 23) st.italic = false;
+      else if (n === 24) st.underline = false;
+      else if (n === 27) st.inverse = false;
+      else if (n >= 30 && n <= 37) {
+        st.fg = n - 30;
+        st.fgRgb = null;
+      } else if (n === 39) {
+        st.fg = null;
+        st.fgRgb = null;
+      } else if (n >= 40 && n <= 47) {
+        st.bg = n - 40;
+        st.bgRgb = null;
+      } else if (n === 49) {
+        st.bg = null;
+        st.bgRgb = null;
+      } else if (n >= 90 && n <= 97) {
+        st.fg = n - 90 + 8;
+        st.fgRgb = null;
+      } else if (n >= 100 && n <= 107) {
+        st.bg = n - 100 + 8;
+        st.bgRgb = null;
+      } else if (n === 38 || n === 48) {
+        var isFg = n === 38;
+        var mode = parts[i++];
+        if (mode === 5) {
+          var css = color256(parts[i++]);
+          if (isFg) {
+            st.fg = null;
+            st.fgRgb = css;
+          } else {
+            st.bg = null;
+            st.bgRgb = css;
+          }
+        } else if (mode === 2) {
+          var css2 =
+            "rgb(" +
+            (parts[i++] || 0) +
+            "," +
+            (parts[i++] || 0) +
+            "," +
+            (parts[i++] || 0) +
+            ")";
+          if (isFg) {
+            st.fg = null;
+            st.fgRgb = css2;
+          } else {
+            st.bg = null;
+            st.bgRgb = css2;
+          }
+        }
+      }
+    }
+  }
+
+  function openSpan(st) {
+    var styles = [];
+    var fg = st.fgRgb ? st.fgRgb : st.fg != null ? "var(--rc-c" + st.fg + ")" : "";
+    var bg = st.bgRgb ? st.bgRgb : st.bg != null ? "var(--rc-c" + st.bg + ")" : "";
+    if (st.inverse) {
+      var tmp = fg || "var(--rc-fg)";
+      fg = bg || "var(--rc-bg)";
+      bg = tmp;
+    }
+    if (fg) styles.push("color:" + fg);
+    if (bg) styles.push("background:" + bg);
+    if (st.bold) styles.push("font-weight:700");
+    if (st.dim) styles.push("opacity:.6");
+    if (st.italic) styles.push("font-style:italic");
+    if (st.underline) styles.push("text-decoration:underline");
+    if (!styles.length) return "";
+    return '<span style="' + styles.join(";") + '">';
+  }
+
+  function ansiToHtml(line) {
+    var text = String(line == null ? "" : line);
+    var csi = /\u001b\[([0-9;]*)m/g;
+    var out = "";
+    var last = 0;
+    var st = {
+      bold: false,
+      dim: false,
+      italic: false,
+      underline: false,
+      inverse: false,
+      fg: null,
+      bg: null,
+      fgRgb: null,
+      bgRgb: null,
+    };
+    var m;
+    while ((m = csi.exec(text))) {
+      var chunk = text.slice(last, m.index);
+      if (chunk) {
+        var wrap = openSpan(st);
+        out += wrap + escHtml(stripOtherEsc(chunk)) + (wrap ? "</span>" : "");
+      }
+      applySgr(st, m[1]);
+      last = m.index + m[0].length;
+    }
+    var tail = text.slice(last);
+    if (tail) {
+      var wrap2 = openSpan(st);
+      out += wrap2 + escHtml(stripOtherEsc(tail)) + (wrap2 ? "</span>" : "");
+    }
     return out;
-  }
-
-  function overlapLen(hist, live) {
-    if (!hist.length || !live.length) return 0;
-    var max = Math.min(hist.length, live.length, 80);
-    var i;
-    var j;
-    for (i = max; i > 0; i--) {
-      var ok = true;
-      for (j = 0; j < i; j++) {
-        if (normLine(hist[hist.length - i + j]) !== normLine(live[j])) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) return i;
-    }
-    return 0;
-  }
-
-  function trimHistoryAgainstLive() {
-    var live = readTermLines(false);
-    if (!live.length || !historyLines.length) return;
-    var n = overlapLen(historyLines, live);
-    if (n === 1 && live.length > 1) n = 0;
-    if (!n && live.length <= historyLines.length) {
-      var start = historyLines.length - live.length;
-      var ok = true;
-      var j;
-      for (j = 0; j < live.length; j++) {
-        if (normLine(historyLines[start + j]) !== normLine(live[j])) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) n = live.length;
-    }
-    if (n) historyLines = historyLines.slice(0, historyLines.length - n);
-  }
-
-  function capHistory() {
-    if (historyLines.length > 20000) historyLines = historyLines.slice(-20000);
-    window.__rcHistoryLines = historyLines;
   }
 
   function renderHistory() {
     var pre = document.getElementById("rc-term-history");
     if (!pre) return;
-    pre.textContent = historyLines.length ? historyLines.join("\n") + "\n" : "";
+    pre.innerHTML = historyHtml.length ? historyHtml.join("\n") + "\n" : "";
   }
 
-  function resetLastOff() {
-    var term = xterm();
-    var buf = term && term.buffer && term.buffer.active;
-    lastOff = buf ? buf.baseY || 0 : 0;
-  }
-
-  function paintHistory(lines) {
-    historyLines = (lines || []).slice();
+  function applyScrollback(payload) {
+    if (!payload || payload.mode === "none") return;
     mountHistory();
-    trimHistoryAgainstLive();
-    capHistory();
-    renderHistory();
-    resetLastOff();
-  }
-
-  function appendHistory(lines) {
-    if (!lines || !lines.length) return;
-    historyLines = historyLines.concat(lines);
-    trimHistoryAgainstLive();
-    capHistory();
-    renderHistory();
-  }
-
-  function syncHistoryFromTerm() {
-    var term = xterm();
-    var buf = term && term.buffer && term.buffer.active;
-    if (!buf || typeof buf.getLine !== "function") return;
-    var off = buf.baseY || 0;
-    if (off <= lastOff) return;
-    var add = [];
-    var i;
-    for (i = lastOff; i < off; i++) {
-      var line = buf.getLine(i);
-      add.push(
-        line && typeof line.translateToString === "function"
-          ? line.translateToString(true)
-          : ""
-      );
+    var lines = payload.lines || [];
+    if (payload.mode === "full") {
+      historyHtml = lines.map(ansiToHtml);
+    } else if (payload.mode === "append") {
+      var i;
+      for (i = 0; i < lines.length; i++) historyHtml.push(ansiToHtml(lines[i]));
+    } else {
+      return;
     }
-    lastOff = off;
-    if (!add.length) return;
-    historyLines = historyLines.concat(add);
-    capHistory();
+    if (historyHtml.length > 20000) historyHtml = historyHtml.slice(-20000);
+    sbSize = payload.size || 0;
+    sbW = payload.w || 0;
     renderHistory();
+    if (stickBottom) pinBottom();
+  }
+
+  function pullScrollback() {
+    var id = tabId();
+    if (!id) return;
+    if (pullingSb) {
+      scheduleScrollback();
+      return;
+    }
+    pullingSb = true;
+    var term = xterm();
+    var w = term && term.cols ? term.cols : sbW;
+    var url =
+      "/rc-scrollback?tab=" +
+      encodeURIComponent(id) +
+      "&since=" +
+      encodeURIComponent(String(sbSize)) +
+      "&w=" +
+      encodeURIComponent(String(w || ""));
+    fetch(url, { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        if (payload) applyScrollback(payload);
+      })
+      .catch(function () {})
+      .then(function () {
+        pullingSb = false;
+      });
+  }
+
+  function scheduleScrollback() {
+    if (histTimer) return;
+    histTimer = setTimeout(function () {
+      histTimer = 0;
+      pullScrollback();
+    }, 150);
+  }
+
+  function syncCellMetrics() {
+    var term = xterm();
+    var page = document.getElementById("rc-term-page");
+    if (!term || !page) return;
+    var h = 0;
+    try {
+      h = term._core._renderService.dimensions.css.cell.height;
+    } catch (_) {}
+    if (h) page.style.setProperty("--rc-cell-h", h + "px");
+    try {
+      if (term.options && term.options.fontSize) {
+        page.style.setProperty("--rc-font-size", term.options.fontSize + "px");
+      }
+      if (term.options && term.options.fontFamily) {
+        page.style.setProperty("--rc-font-family", term.options.fontFamily);
+      }
+    } catch (_) {}
+    var screen = document.querySelector("#terminal-container .xterm-screen");
+    if (screen) {
+      var pageRect = page.getBoundingClientRect();
+      var screenRect = screen.getBoundingClientRect();
+      var pad = Math.max(0, Math.round(screenRect.left - pageRect.left));
+      page.style.setProperty("--rc-hist-pad", pad + "px");
+    }
   }
 
   function mountHistory() {
@@ -432,66 +577,20 @@
     return page;
   }
 
-  function pullServerHistory() {
-    var id = tabId();
-    if (!id) return;
-    fetch("/rc-history?tab=" + encodeURIComponent(id) + "&fp=" + encodeURIComponent("[]"), {
-      cache: "no-store",
-    })
-      .then(function (resp) {
-        return resp.ok ? resp.json() : null;
-      })
-      .then(function (payload) {
-        var all =
-          payload && payload.all && payload.all.length
-            ? payload.all
-            : payload && payload.mode === "full" && payload.lines && payload.lines.length
-              ? payload.lines
-              : [];
-        if (all.length > historyLines.length) {
-          paintHistory(all);
-          if (stickBottom) pinBottom();
-        }
-      })
-      .catch(function () {});
-  }
-
-  function scheduleServerHist() {
-    if (histTimer) return;
-    histTimer = setTimeout(function () {
-      histTimer = 0;
-      pullServerHistory();
-    }, 400);
-  }
-
   function bootHistoryPage() {
     mountHistory();
-    window.__rcHistoryLines = historyLines;
-    window.__rcPaintHistory = paintHistory;
-    window.__rcAppendHistory = appendHistory;
     window.__rcPinBottom = pinBottom;
-    if (window.__rcBootHistory && window.__rcBootHistory.length) {
-      paintHistory(window.__rcBootHistory);
+    window.applyScrollback = applyScrollback;
+    if (window.__rcBootScrollback) {
+      applyScrollback(window.__rcBootScrollback);
     }
-    if (window.__rcBootHistory && window.__rcBootHistory.length) {
-      paintHistory(window.__rcBootHistory);
-    }
-    if (window.__rcPendingHistory && window.__rcPendingHistory.length) {
-      paintHistory(window.__rcPendingHistory);
-      window.__rcPendingHistory = null;
-    }
-    pullServerHistory();
-    setTimeout(pullServerHistory, 300);
-    setTimeout(pullServerHistory, 1000);
-    setTimeout(pullServerHistory, 2500);
+    pullScrollback();
     window.addEventListener("rc-ws-open", function () {
-      pullServerHistory();
-      setTimeout(pullServerHistory, 400);
+      pullScrollback();
     });
     setInterval(function () {
-      syncHistoryFromTerm();
-      pullServerHistory();
-    }, 800);
+      if (!document.hidden) pullScrollback();
+    }, 1000);
     var mo = new MutationObserver(function () {
       mountHistory();
     });
@@ -509,9 +608,9 @@
         return;
       }
       hooked = true;
+      syncCellMetrics();
       function onOut() {
-        syncHistoryFromTerm();
-        scheduleServerHist();
+        scheduleScrollback();
         if (stickBottom) pinBottom();
       }
       if (typeof term.onWriteParsed === "function") {
@@ -519,7 +618,12 @@
       } else if (typeof term.onRender === "function") {
         term.onRender(onOut);
       }
-      resetLastOff();
+      if (typeof term.onResize === "function") {
+        term.onResize(function () {
+          syncCellMetrics();
+          pullScrollback();
+        });
+      }
     }
     hook();
     document.addEventListener(
@@ -1788,6 +1892,14 @@
   }
 
   function termSelection() {
+    var sel = window.getSelection && window.getSelection();
+    if (sel && sel.rangeCount && sel.toString()) {
+      var node = sel.anchorNode;
+      var el = node && node.nodeType === 3 ? node.parentElement : node;
+      if (el && el.closest && el.closest("#rc-term-history")) {
+        return String(sel.toString()).replace(/[ \t]+$/gm, "");
+      }
+    }
     var own = readSelText();
     if (own) return own;
     var term = xterm();
