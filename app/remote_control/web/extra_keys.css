@@ -114,16 +114,18 @@ html.rc-touch #rc-extra-keys {
 
 #rc-ek-paste {
   position: absolute;
-  top: -13px;
-  right: 6px;
-  width: 26px;
-  height: 26px;
+  top: -22px;
+  right: 8px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border: 1px solid rgba(195, 232, 141, 0.4);
-  border-radius: 8px;
+  border-radius: 12px;
   background: #0b2942;
   color: #c3e88d;
   box-shadow: 0 2px 8px rgba(1, 22, 39, 0.45);
@@ -132,8 +134,8 @@ html.rc-touch #rc-extra-keys {
 
 #rc-ek-paste svg {
   display: block;
-  width: 14px;
-  height: 14px;
+  width: 24px;
+  height: 24px;
 }
 
 #rc-ek-paste:active,
