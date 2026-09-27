@@ -29,6 +29,8 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertIn("function bootSessions", html)
         self.assertIn("function wipeScrollback", html)
         self.assertIn("function watchNativeClear", html)
+        self.assertIn("function holdStartupSize", html)
+        self.assertIn("payload.size <= 1", html)
         self.assertIn("/rc-hist-size", html)
         self.assertIn("rc-sessions", html)
         self.assertIn("/rc-sessions", html)

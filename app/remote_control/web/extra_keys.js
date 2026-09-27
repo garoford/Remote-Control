@@ -116,6 +116,128 @@
     }
   }
 
+  function decodeSend(data) {
+    try {
+      if (typeof data === "string") return data;
+      if (data instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(data));
+      if (ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+    } catch (_) {}
+    return "";
+  }
+
+  function holdStartupSize(ws) {
+    var nativeSend = ws.send.bind(ws);
+    var outQueue = [];
+    var sizeReady = false;
+    var holdStarted = Date.now();
+    var timer = 0;
+    ws.send = function (data) {
+      if (sizeReady) return nativeSend(data);
+      outQueue.push(data);
+    };
+    function dump(cols, rows) {
+      sizeReady = true;
+      var auth = null;
+      var rest = [];
+      outQueue.forEach(function (data) {
+        var text = decodeSend(data);
+        if (text.charAt(0) === "{") {
+          try {
+            var obj = JSON.parse(text);
+            if (obj && Object.prototype.hasOwnProperty.call(obj, "AuthToken")) {
+              obj.columns = cols;
+              obj.rows = rows;
+              auth = new TextEncoder().encode(JSON.stringify(obj));
+              return;
+            }
+          } catch (_) {}
+        }
+        if (text.charAt(0) === "1" && text.charAt(1) === "{") return;
+        rest.push(data);
+      });
+      outQueue = [];
+      if (auth) nativeSend(auth);
+      rest.forEach(function (data) {
+        nativeSend(data);
+      });
+    }
+    function prepareFont(term) {
+      try {
+        term.options.fontFamily =
+          "FiraCode Nerd Font Mono, ui-monospace, Cascadia Mono, Courier New, monospace";
+        term.options.fontSize = 15;
+        term.options.fontWeight = 400;
+        term.options.fontWeightBold = 700;
+      } catch (_) {}
+      if (typeof term.fit === "function") {
+        try {
+          term.fit();
+        } catch (_) {}
+      }
+      try {
+        var dims = term._core._renderService.dimensions.css.cell;
+        var width = Math.round(dims.width);
+        var height = Math.round(dims.height);
+        if (width > 0 && Math.abs(dims.width - width) > 0.05) {
+          dims.width = width;
+          if (height > 0) dims.height = height;
+          term.fit();
+        }
+      } catch (_) {}
+    }
+    function finish() {
+      if (sizeReady) return;
+      var now = xterm();
+      var waited = Date.now() - holdStarted;
+      if (!now || !now.rows) {
+        if (waited > 1200) {
+          sizeReady = true;
+          var pending = outQueue;
+          outQueue = [];
+          pending.forEach(function (data) {
+            nativeSend(data);
+          });
+          return;
+        }
+        setTimeout(pump, 30);
+        return;
+      }
+      prepareFont(now);
+      dump(now.cols, now.rows);
+    }
+    function armTimer() {
+      clearTimeout(timer);
+      timer = setTimeout(finish, Date.now() - holdStarted > 1100 ? 0 : 250);
+    }
+    function pump() {
+      if (sizeReady) return;
+      var now = xterm();
+      if (now && typeof now.onResize === "function" && !now.__rcHoldResize) {
+        now.__rcHoldResize = true;
+        now.onResize(function () {
+          if (!sizeReady) armTimer();
+        });
+      }
+      try {
+        window.dispatchEvent(new Event("resize"));
+      } catch (_) {}
+      armTimer();
+    }
+    var fonts = document.fonts;
+    var loaded =
+      fonts && typeof fonts.load === "function"
+        ? fonts.load('15px "FiraCode Nerd Font Mono"')
+        : Promise.resolve();
+    Promise.resolve(loaded).then(
+      function () {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(pump);
+        });
+      },
+      pump
+    );
+  }
+
   function wrapWebSocket() {
     if (!NativeWS || NativeWS.__rcWrapped) return;
     function RCWebSocket(url, protocols) {
@@ -188,6 +310,7 @@
       origAdd("close", function () {
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
       });
+      holdStartupSize(ws);
       return ws;
     }
     RCWebSocket.prototype = NativeWS.prototype;
@@ -366,7 +489,9 @@
         })
         .then(function (payload) {
           if (!payload || typeof payload.size !== "number") return;
-          if (lastHist !== null && lastHist > 0 && payload.size === 0) wipeScrollback();
+          if (lastHist !== null && lastHist > payload.size && payload.size <= 1) {
+            wipeScrollback();
+          }
           lastHist = payload.size;
         })
         .catch(function () {});
