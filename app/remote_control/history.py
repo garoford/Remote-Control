@@ -296,3 +296,59 @@ def scrollback_payload(
         "mode": "append",
         "lines": lines,
     }
+
+
+def replay_text(tab: str, socket: str = TMUX_SOCKET) -> str:
+    """ANSI lines above the live viewport, for xterm's own scrollback."""
+    if not TAB_RE.match(tab) or not has_session(tab, socket):
+        return ""
+    lines = capture_scrollback(tab, None, socket)
+    if not lines:
+        return ""
+    if len(lines) > MAX_RETURN_LINES:
+        lines = lines[-MAX_RETURN_LINES:]
+    text = "\n".join(lines)
+    if not text.strip():
+        return ""
+    return text
+
+
+def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
+    """Terminal sessions on this tunnel's tmux socket, newest activity first."""
+    result = _tmux(
+        socket,
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{session_activity}\t#{pane_current_path}\t"
+        "#{pane_current_command}\t#{session_attached}",
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    sessions: list[dict] = []
+    for raw in result.stdout.splitlines():
+        parts = raw.split("\t")
+        if len(parts) < 5:
+            continue
+        name = parts[0].strip()
+        if not TAB_RE.match(name):
+            continue
+        try:
+            activity = int(parts[1])
+        except ValueError:
+            activity = 0
+        try:
+            attached = int(parts[4])
+        except ValueError:
+            attached = 0
+        sessions.append(
+            {
+                "id": name,
+                "activity": activity,
+                "path": parts[2],
+                "command": parts[3],
+                "attached": attached,
+            }
+        )
+    sessions.sort(key=lambda item: item["activity"], reverse=True)
+    return sessions

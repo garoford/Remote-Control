@@ -19,6 +19,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from remote_control.history import (
     cancel_copy_mode,
     history_payload,
+    list_sessions,
+    replay_text,
     scroll_history,
     scrollback_payload,
 )
@@ -309,6 +311,9 @@ class Sidecar:
                     headers,
                 )
                 return
+            if method == "GET" and path.rstrip("/").endswith("/rc-sessions"):
+                self._serve_sessions(conn)
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-scrollback"):
                 self._serve_scrollback(conn, parse_qs(parsed_url.query))
                 return
@@ -415,6 +420,20 @@ class Sidecar:
                 b"",
                 "text/plain",
                 _API_EXTRA + [("Access-Control-Max-Age", "86400")],
+            )
+        )
+
+    def _serve_sessions(self, conn: socket.socket) -> None:
+        body = json.dumps(
+            {"sessions": list_sessions(socket=self.tmux_socket)},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                _API_EXTRA,
             )
         )
 
@@ -624,21 +643,11 @@ class Sidecar:
 
     def _inject_boot_history(self, html: str, query: dict[str, list[str]]) -> str:
         tab = (query.get("arg") or [""])[0]
-        payload = {
-            "size": 0,
-            "w": 0,
-            "h": 0,
-            "alt": 0,
-            "mode": "none",
-            "lines": [],
-        }
-        if tab:
-            payload = scrollback_payload(tab, None, None, socket=self.tmux_socket)
+        text = replay_text(tab, socket=self.tmux_socket) if tab else ""
         script = (
-            '<script id="rc-boot-scrollback">window.__rcBootScrollback='
-            + json.dumps(payload, ensure_ascii=False)
-            + ";if(typeof window.applyScrollback===\"function\")"
-            + "window.applyScrollback(window.__rcBootScrollback);</script>"
+            '<script id="rc-boot-scrollback">window.__rcReplay='
+            + json.dumps(text, ensure_ascii=False)
+            + ";</script>"
         )
         if "</head>" in html:
             return html.replace("</head>", script + "</head>", 1)

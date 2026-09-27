@@ -9,7 +9,9 @@ from remote_control.history import (
     capture_visible,
     find_suffix,
     history_payload,
+    list_sessions,
     normalize_line,
+    replay_text,
     scroll_history,
     scrollback_payload,
     scrollback_state,
@@ -321,6 +323,74 @@ class HistorySuffixTests(unittest.TestCase):
             self.assertEqual(wrong_w["mode"], "full")
             stale = scrollback_payload(tab, after["size"] + 50, after["w"], socket=socket)
             self.assertEqual(stale["mode"], "full")
+        finally:
+            subprocess.run(
+                ["tmux", "-L", socket, "kill-server"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
+class ReplayAndSessionsTests(unittest.TestCase):
+    def test_replay_unknown_tab_is_empty(self) -> None:
+        self.assertEqual(replay_text("rcnotasession1", socket="rc-noreplay"), "")
+        self.assertEqual(list_sessions(socket="rc-noreplay"), [])
+
+    def test_replay_is_history_above_the_viewport(self) -> None:
+        if not shutil.which("tmux"):
+            self.skipTest("tmux missing")
+        socket = "rc-testreplay"
+        tab = "rcabc1234567bb"
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started = subprocess.run(
+            [
+                "tmux",
+                "-L",
+                socket,
+                "new-session",
+                "-d",
+                "-s",
+                tab,
+                "-x",
+                "80",
+                "-y",
+                "8",
+                "--",
+                "bash",
+                "--norc",
+                "--noprofile",
+            ],
+            check=False,
+        )
+        if started.returncode != 0:
+            self.skipTest("could not start tmux")
+        try:
+            for i in range(20):
+                subprocess.run(
+                    [
+                        "tmux",
+                        "-L",
+                        socket,
+                        "send-keys",
+                        "-t",
+                        tab,
+                        f"echo rc-replay-{i}",
+                        "Enter",
+                    ],
+                    check=True,
+                )
+            time.sleep(0.6)
+            text = replay_text(tab, socket)
+            self.assertIn("rc-replay-0", text)
+            sessions = list_sessions(socket)
+            self.assertEqual([item["id"] for item in sessions], [tab])
+            self.assertEqual(sessions[0]["command"], "bash")
         finally:
             subprocess.run(
                 ["tmux", "-L", socket, "kill-server"],

@@ -333,7 +333,7 @@ class TunnelService:
             "-t",
             "cursorBlink=true",
             "-t",
-            "scrollback=0",
+            "scrollback=20000",
             "-t",
             f"theme={NIGHT_OWL_THEME}",
         ]

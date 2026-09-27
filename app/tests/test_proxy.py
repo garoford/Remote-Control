@@ -154,7 +154,8 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertIn(b"ttyd-index", body)
         self.assertIn(b"rc-font-preload-reg", body)
         self.assertIn(b"rc-boot-scrollback", body)
-        self.assertIn(b"__rcBootScrollback", body)
+        self.assertIn(b"__rcReplay", body)
+        self.assertNotIn(b"__rcBootScrollback", body)
         self.assertIn("charset=utf-8", (resp.getheader("Content-Type") or "").lower())
         self.assertEqual(resp.status, 200)
 
@@ -302,6 +303,12 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertEqual(body.get("mode"), "none")
         self.assertEqual(body.get("lines"), [])
         self.assertEqual(body.get("all") or [], [])
+
+    def test_sessions_is_a_list(self) -> None:
+        resp = self._get("/rc-sessions")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertIsInstance(body.get("sessions"), list)
 
     def test_scrollback_unknown_tab_is_empty(self) -> None:
         resp = self._get("/rc-scrollback?tab=rcnotasession1")

@@ -81,6 +81,24 @@
     }
   }
 
+  window.__rcOpenSession = function (id) {
+    if (!TAB_RE.test(id)) return;
+    try {
+      sessionStorage.setItem(SS_KEY, id);
+    } catch (_) {}
+    try {
+      var params = new URLSearchParams(location.search);
+      params.delete("arg");
+      params.append("arg", id);
+      var q = params.toString();
+      location.assign(location.pathname + (q ? "?" + q : "") + location.hash);
+    } catch (_) {}
+  };
+
+  window.__rcNewSession = function () {
+    window.__rcOpenSession(makeTabId());
+  };
+
   function ensureTabArg() {
     var id = getTabId();
     document.documentElement.dataset.rcTab = id;
