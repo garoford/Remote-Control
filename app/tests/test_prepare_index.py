@@ -68,6 +68,7 @@ class PrepareIndexTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("set -g mouse off", conf_text)
         self.assertNotIn("set -g mouse on", conf_text)
+        self.assertIn("smcup@", conf_text)
         self.assertNotIn("function fireMouse", html)
         self.assertIn("function saveBlob", html)
         self.assertIn("Guardando", html)
