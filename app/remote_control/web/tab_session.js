@@ -92,18 +92,43 @@
     }
   }
 
-  window.__rcOpenSession = function (id) {
-    if (!TAB_RE.test(id)) return;
+  function rememberTab(id) {
     try {
       sessionStorage.setItem(SS_KEY, id);
     } catch (_) {}
+    document.documentElement.dataset.rcTab = id;
+    var all = prune(readSessions());
+    var prev = all[id] || {};
+    all[id] = {
+      created: prev.created || Date.now(),
+      lastSeen: Date.now(),
+    };
+    writeSessions(all);
+  }
+
+  function urlForTab(id) {
+    var params = new URLSearchParams(location.search);
+    params.delete("arg");
+    params.append("arg", id);
+    var q = params.toString();
+    return location.pathname + (q ? "?" + q : "") + location.hash;
+  }
+
+  window.__rcOpenSession = function (id) {
+    if (!TAB_RE.test(id)) return;
+    rememberTab(id);
+    var next = urlForTab(id);
     try {
-      var params = new URLSearchParams(location.search);
-      params.delete("arg");
-      params.append("arg", id);
-      var q = params.toString();
-      location.assign(location.pathname + (q ? "?" + q : "") + location.hash);
+      history.replaceState(null, "", next);
     } catch (_) {}
+    try {
+      window.dispatchEvent(new CustomEvent("rc-tab-changed"));
+    } catch (_) {}
+    if (typeof window.__rcSyncTabs === "function") window.__rcSyncTabs();
+    if (typeof window.__rcAttachSession === "function" && window.__rcAttachSession()) {
+      return;
+    }
+    location.assign(next);
   };
 
   window.__rcNewSession = function () {

@@ -176,6 +176,10 @@ body {
   margin: 0 auto;
 }
 
+html.rc-quiet-switch .xterm > div:not([class]) {
+  display: none !important;
+}
+
 #terminal-container {
   position: fixed !important;
   top: var(--rc-bar-h) !important;

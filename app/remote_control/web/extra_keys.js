@@ -262,6 +262,8 @@
   }
 
   function holdStartupSize(ws) {
+    var existing = xterm();
+    if (existing && existing.__rcSized) return;
     var nativeSend = ws.send.bind(ws);
     var outQueue = [];
     var sizeReady = false;
@@ -296,6 +298,8 @@
       rest.forEach(function (data) {
         nativeSend(data);
       });
+      var sized = xterm();
+      if (sized) sized.__rcSized = true;
     }
     function prepareFont(term) {
       try {
@@ -374,20 +378,51 @@
     );
   }
 
+  function currentWsUrl() {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var path = location.pathname.replace(/[/]+$/, "");
+    return proto + "//" + location.host + path + "/ws" + location.search;
+  }
+
+  var quietTimer = 0;
+  function hushOverlay() {
+    document.documentElement.classList.add("rc-quiet-switch");
+    clearTimeout(quietTimer);
+    quietTimer = setTimeout(function () {
+      document.documentElement.classList.remove("rc-quiet-switch");
+    }, 700);
+  }
+
+  window.__rcAttachSession = function () {
+    var ws = window.__rcTermSocket;
+    if (!ws || !xterm() || ws.readyState === NativeWS.CLOSED) return false;
+    window.__rcWantWs = currentWsUrl();
+    hushOverlay();
+    try {
+      if (ws.readyState === NativeWS.OPEN) ws.close(4001);
+      else if (ws.readyState === NativeWS.CONNECTING) ws.close();
+    } catch (_) {
+      return false;
+    }
+    return true;
+  };
+
   function wrapWebSocket() {
     if (!NativeWS || NativeWS.__rcWrapped) return;
     function RCWebSocket(url, protocols) {
-      var ws =
-        protocols === undefined
-          ? new NativeWS(url)
-          : new NativeWS(url, protocols);
       var list = Array.isArray(protocols)
         ? protocols
         : protocols
           ? [protocols]
           : [];
       var tty = list.indexOf("tty") !== -1 || /\/ws/.test(String(url));
+      if (tty && window.__rcWantWs) url = window.__rcWantWs;
+      var ws =
+        protocols === undefined
+          ? new NativeWS(url)
+          : new NativeWS(url, protocols);
       if (!tty) return ws;
+      window.__rcLastWsUrl = String(url);
       window.__rcTermSocket = ws;
       var msgListeners = [];
       var queue = [];
@@ -2087,17 +2122,16 @@
     var next = "";
     if (ids.length > 1 && index >= 0) next = ids[index + 1] || ids[index - 1] || "";
     var current = id === tabId();
+    if (current) {
+      if (next) openSession(next);
+      else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+    }
     fetch("/rc-session-close?tab=" + encodeURIComponent(id), {
       method: "POST",
       cache: "no-store",
       keepalive: true,
     }).catch(function () {});
-    if (!current) {
-      pullSessions();
-      return;
-    }
-    if (next) openSession(next);
-    else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+    if (!current) pullSessions();
   }
 
   function fillTab(el, item, counts, current) {
@@ -2144,7 +2178,10 @@
     return el;
   }
 
+  var sessionCache = [];
+
   function paintSessions(list) {
+    if (Array.isArray(list)) sessionCache = list;
     var host = document.getElementById("rc-session-tabs");
     if (!host) return;
     var current = tabId();
@@ -2223,7 +2260,14 @@
       if (!document.hidden) pullSessions();
     }, 3000);
     window.addEventListener("rc-ws-open", pullSessions);
+    window.addEventListener("rc-tab-changed", function () {
+      paintSessions(sessionCache);
+    });
   }
+
+  window.__rcSyncTabs = function () {
+    paintSessions(sessionCache);
+  };
 
   function boot() {
     var device = detectDevice();
