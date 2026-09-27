@@ -152,7 +152,6 @@
           return;
         }
         armScrollback(term);
-        writeReplay(term);
         live = true;
         var pending = queue;
         queue = [];
@@ -349,14 +348,32 @@
     } catch (_) {}
   }
 
-  function writeReplay(term) {
-    var text = window.__rcReplay;
-    if (!term || typeof text !== "string" || !text) return;
-    armScrollback(term);
-    var rows = term.rows || 24;
-    var body = text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
-    var pad = new Array(rows + 1).join("\r\n");
-    term.write(body + pad);
+  function wipeScrollback() {
+    var term = xterm();
+    if (!term || typeof term.write !== "function") return;
+    term.write(String.fromCharCode(27) + "[3J");
+  }
+
+  var lastHist = null;
+
+  function watchNativeClear() {
+    function tick() {
+      var id = tabId();
+      if (!id || document.hidden) return;
+      fetch("/rc-hist-size?tab=" + encodeURIComponent(id), { cache: "no-store" })
+        .then(function (resp) {
+          return resp.ok ? resp.json() : null;
+        })
+        .then(function (payload) {
+          if (!payload || typeof payload.size !== "number") return;
+          if (lastHist !== null && lastHist > 0 && payload.size === 0) wipeScrollback();
+          lastHist = payload.size;
+        })
+        .catch(function () {});
+    }
+    tick();
+    setInterval(tick, 400);
+    window.addEventListener("rc-ws-open", tick);
   }
 
   function setSelectMode(on) {
@@ -1834,6 +1851,7 @@
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
     bootSessions();
+    watchNativeClear();
     bootPaste();
     bootPinScroll();
     if (device === "pc") {

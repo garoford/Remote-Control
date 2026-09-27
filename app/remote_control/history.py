@@ -299,21 +299,6 @@ def scrollback_payload(
     }
 
 
-def replay_text(tab: str, socket: str = TMUX_SOCKET) -> str:
-    """ANSI lines above the live viewport, for xterm's own scrollback."""
-    if not TAB_RE.match(tab) or not has_session(tab, socket):
-        return ""
-    lines = capture_scrollback(tab, None, socket)
-    if not lines:
-        return ""
-    if len(lines) > MAX_RETURN_LINES:
-        lines = lines[-MAX_RETURN_LINES:]
-    text = "\n".join(lines)
-    if not text.strip():
-        return ""
-    return text
-
-
 def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
     """Terminal sessions on this tunnel's tmux socket, newest activity first."""
     result = _tmux(

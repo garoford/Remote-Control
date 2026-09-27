@@ -1,6 +1,6 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
-Serves cacheable fonts + JS, /rc-scrollback, /rc-history, /rc-scroll,
+Serves cacheable fonts + JS, /rc-scrollback, /rc-history, /rc-hist-size, /rc-scroll,
 reserved clipboard uploads, and proxies everything else (including the
 tty WebSocket) to ttyd on the internal port.
 """
@@ -20,9 +20,9 @@ from remote_control.history import (
     cancel_copy_mode,
     history_payload,
     list_sessions,
-    replay_text,
     scroll_history,
     scrollback_payload,
+    scrollback_state,
 )
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control.mobile import (
@@ -314,6 +314,9 @@ class Sidecar:
             if method == "GET" and path.rstrip("/").endswith("/rc-sessions"):
                 self._serve_sessions(conn)
                 return
+            if method == "GET" and path.rstrip("/").endswith("/rc-hist-size"):
+                self._serve_hist_size(conn, parse_qs(parsed_url.query))
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-scrollback"):
                 self._serve_scrollback(conn, parse_qs(parsed_url.query))
                 return
@@ -428,6 +431,20 @@ class Sidecar:
             {"sessions": list_sessions(socket=self.tmux_socket)},
             ensure_ascii=False,
         ).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                _API_EXTRA,
+            )
+        )
+
+    def _serve_hist_size(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
+        tab = (query.get("tab") or [""])[0]
+        state = scrollback_state(tab, socket=self.tmux_socket)
+        size = None if state is None else state["history_size"]
+        body = json.dumps({"size": size}).encode("utf-8")
         conn.sendall(
             _http_response(
                 "200 OK",
@@ -622,7 +639,7 @@ class Sidecar:
             and method in {"GET", "HEAD"}
             and path in {"/", "/index.html"}
         ):
-            self._proxy_html(conn, header, body, headers, parse_qs(parsed_req.query))
+            self._proxy_html(conn, header, body, headers)
             return
         if not upgrade:
             header = _rewrite_connection_close(header)
@@ -641,25 +658,12 @@ class Sidecar:
     def _mobile_font_url(self) -> str:
         return pick_mobile_font_url(load_manifest(self.assets), self.assets)
 
-    def _inject_boot_history(self, html: str, query: dict[str, list[str]]) -> str:
-        tab = (query.get("arg") or [""])[0]
-        text = replay_text(tab, socket=self.tmux_socket) if tab else ""
-        script = (
-            '<script id="rc-boot-scrollback">window.__rcReplay='
-            + json.dumps(text, ensure_ascii=False)
-            + ";</script>"
-        )
-        if "</head>" in html:
-            return html.replace("</head>", script + "</head>", 1)
-        return script + html
-
     def _proxy_html(
         self,
         conn: socket.socket,
         header: bytes,
         body: bytes,
         req_headers: dict[str, str],
-        query: dict[str, list[str]] | None = None,
     ) -> None:
         header = _rewrite_connection_close(header)
         upstream = socket.create_connection(
@@ -677,7 +681,6 @@ class Sidecar:
                 text = resp_body.decode("utf-8", "replace")
                 if request_is_mobile(req_headers):
                     text = rewrite_index_for_mobile(text, self._mobile_font_url())
-                text = self._inject_boot_history(text, query or {})
                 resp_body = text.encode("utf-8")
             skip = {
                 "content-length",

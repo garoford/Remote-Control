@@ -11,7 +11,6 @@ from remote_control.history import (
     history_payload,
     list_sessions,
     normalize_line,
-    replay_text,
     scroll_history,
     scrollback_payload,
     scrollback_state,
@@ -332,12 +331,11 @@ class HistorySuffixTests(unittest.TestCase):
             )
 
 
-class ReplayAndSessionsTests(unittest.TestCase):
-    def test_replay_unknown_tab_is_empty(self) -> None:
-        self.assertEqual(replay_text("rcnotasession1", socket="rc-noreplay"), "")
+class SessionsTests(unittest.TestCase):
+    def test_list_sessions_unknown_socket_is_empty(self) -> None:
         self.assertEqual(list_sessions(socket="rc-noreplay"), [])
 
-    def test_replay_is_history_above_the_viewport(self) -> None:
+    def test_list_sessions_reports_the_shell(self) -> None:
         if not shutil.which("tmux"):
             self.skipTest("tmux missing")
         socket = "rc-testreplay"
@@ -371,7 +369,7 @@ class ReplayAndSessionsTests(unittest.TestCase):
         if started.returncode != 0:
             self.skipTest("could not start tmux")
         try:
-            for i in range(20):
+            for i in range(12):
                 subprocess.run(
                     [
                         "tmux",
@@ -380,17 +378,26 @@ class ReplayAndSessionsTests(unittest.TestCase):
                         "send-keys",
                         "-t",
                         tab,
-                        f"echo rc-replay-{i}",
+                        f"echo rc-session-{i}",
                         "Enter",
                     ],
                     check=True,
                 )
-            time.sleep(0.6)
-            text = replay_text(tab, socket)
-            self.assertIn("rc-replay-0", text)
+            time.sleep(0.5)
             sessions = list_sessions(socket)
             self.assertEqual([item["id"] for item in sessions], [tab])
             self.assertEqual(sessions[0]["command"], "bash")
+            before = scrollback_state(tab, socket)
+            self.assertIsNotNone(before)
+            self.assertGreater(before["history_size"], 0)
+            subprocess.run(
+                ["tmux", "-L", socket, "send-keys", "-t", tab, "clear", "Enter"],
+                check=True,
+            )
+            time.sleep(0.4)
+            after = scrollback_state(tab, socket)
+            self.assertIsNotNone(after)
+            self.assertEqual(after["history_size"], 0)
         finally:
             subprocess.run(
                 ["tmux", "-L", socket, "kill-server"],

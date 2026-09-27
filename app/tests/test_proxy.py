@@ -153,8 +153,8 @@ class ProxyAssetTests(unittest.TestCase):
         body = resp.read()
         self.assertIn(b"ttyd-index", body)
         self.assertIn(b"rc-font-preload-reg", body)
-        self.assertIn(b"rc-boot-scrollback", body)
-        self.assertIn(b"__rcReplay", body)
+        self.assertNotIn(b"rc-boot-scrollback", body)
+        self.assertNotIn(b"__rcReplay", body)
         self.assertNotIn(b"__rcBootScrollback", body)
         self.assertIn("charset=utf-8", (resp.getheader("Content-Type") or "").lower())
         self.assertEqual(resp.status, 200)
@@ -309,6 +309,12 @@ class ProxyAssetTests(unittest.TestCase):
         body = json.loads(resp.read())
         self.assertEqual(resp.status, 200)
         self.assertIsInstance(body.get("sessions"), list)
+
+    def test_hist_size_unknown_tab_is_null(self) -> None:
+        resp = self._get("/rc-hist-size?tab=rcnotasession1")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertIsNone(body.get("size"))
 
     def test_scrollback_unknown_tab_is_empty(self) -> None:
         resp = self._get("/rc-scrollback?tab=rcnotasession1")
