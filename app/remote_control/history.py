@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 
 TAB_RE = re.compile(r"^rc[a-z0-9]{10,32}$")
 MAX_RETURN_LINES = 20000
@@ -341,11 +342,17 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
             attached = int(parts[4])
         except ValueError:
             attached = 0
+        path = parts[2]
+        home = str(Path.home())
+        if path == home:
+            path = "~"
+        elif path.startswith(home + "/"):
+            path = "~" + path[len(home) :]
         sessions.append(
             {
                 "id": name,
                 "activity": activity,
-                "path": parts[2],
+                "path": path,
                 "command": parts[3],
                 "attached": attached,
             }
