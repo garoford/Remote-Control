@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.4.0";
+  var VERSION = "1.4.1";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
@@ -42,18 +42,18 @@
       setBadge("offline");
       return;
     }
-    setBadge("reconnecting");
     waitFonts()
       .then(function () {
         refreshTermFont();
       })
       .catch(function () {})
       .then(function () {
-        setBadge(navigator.onLine ? "" : "offline");
+        setBadge("");
       });
   }
 
-  function onWsClose() {
+  function onWsClose(ev) {
+    if (ev && ev.detail && ev.detail.intentional) return;
     setBadge(navigator.onLine ? "reconnecting" : "offline");
   }
 

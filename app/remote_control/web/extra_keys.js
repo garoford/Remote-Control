@@ -128,8 +128,10 @@
     return out;
   }
 
+  var boundTerm = null;
+
   function rewriteScrollUp(payload) {
-    var term = xterm();
+    var term = boundTerm || xterm();
     var rows = term && term.rows > 0 ? term.rows : 999;
     var parts = [];
     var start = 0;
@@ -384,27 +386,440 @@
     return proto + "//" + location.host + path + "/ws" + location.search;
   }
 
-  var quietTimer = 0;
-  function hushOverlay() {
-    document.documentElement.classList.add("rc-quiet-switch");
-    clearTimeout(quietTimer);
-    quietTimer = setTimeout(function () {
-      document.documentElement.classList.remove("rc-quiet-switch");
-    }, 700);
+  var bootTabId = tabId();
+  var panes = {};
+  var primaryPane = null;
+  var activePaneId = bootTabId;
+  var tokenCache = null;
+  var bindTouchHost = function () {};
+  var FLOW_LIMIT = 100000;
+
+  function wsUrlFor(id) {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var path = location.pathname.replace(/[/]+$/, "");
+    var params = new URLSearchParams(location.search);
+    params.delete("arg");
+    params.append("arg", id);
+    return proto + "//" + location.host + path + "/ws?" + params.toString();
+  }
+
+  function tokenUrl() {
+    var path = location.pathname.replace(/[/]+$/, "");
+    return location.protocol + "//" + location.host + path + "/token";
+  }
+
+  function fetchToken() {
+    if (tokenCache) return tokenCache;
+    var pending = fetch(tokenUrl(), { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : {};
+      })
+      .then(function (body) {
+        return (body && body.token) || "";
+      })
+      .catch(function () {
+        tokenCache = null;
+        return "";
+      });
+    tokenCache = pending;
+    return pending;
+  }
+
+  function cellOf(term) {
+    try {
+      var dims = term._core._renderService.dimensions.css.cell;
+      if (dims && dims.width > 2 && dims.height > 2) {
+        return { width: dims.width, height: dims.height };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function hookPrimaryFit(term) {
+    if (!term || term.__rcFitHook || typeof term.fit !== "function") return;
+    var native = term.fit.bind(term);
+    term.fit = function () {
+      var host = primaryPane && primaryPane.host;
+      if (host && host.hidden) return;
+      return native();
+    };
+    term.__rcFitHook = true;
+  }
+
+  function ensurePrimary() {
+    if (primaryPane && panes[primaryPane.id] === primaryPane) {
+      hookPrimaryFit(primaryPane.term);
+      return primaryPane;
+    }
+    var term = window.term;
+    var host = document.getElementById("terminal-container");
+    if (!bootTabId || !term || typeof term.focus !== "function" || !host) return null;
+    hookPrimaryFit(term);
+    var pane = panes[bootTabId];
+    if (!pane || pane.primary === false) {
+      pane = {
+        id: bootTabId,
+        host: host,
+        term: term,
+        ws: window.__rcPrimarySocket || window.__rcTermSocket || null,
+        primary: true,
+        intentional: false,
+        authed: true,
+        written: 0,
+        pending: 0,
+      };
+      panes[bootTabId] = pane;
+    } else {
+      pane.term = term;
+      pane.host = host;
+      pane.primary = true;
+      if (!pane.ws) pane.ws = window.__rcPrimarySocket || window.__rcTermSocket || null;
+    }
+    primaryPane = pane;
+    host.classList.add("rc-pane");
+    host.dataset.rcPane = bootTabId;
+    return pane;
+  }
+
+  function termOptions(src) {
+    var opts = { scrollback: 20000, allowProposedApi: true };
+    var keys = [
+      "fontFamily",
+      "fontSize",
+      "fontWeight",
+      "fontWeightBold",
+      "lineHeight",
+      "letterSpacing",
+      "theme",
+      "cursorBlink",
+      "cursorStyle",
+      "cursorWidth",
+      "drawBoldTextInBrightColors",
+      "minimumContrastRatio",
+      "windowsPty",
+      "macOptionIsMeta",
+    ];
+    keys.forEach(function (key) {
+      if (src && src[key] != null) opts[key] = src[key];
+    });
+    if (!opts.fontFamily) {
+      opts.fontFamily =
+        "FiraCode Nerd Font Mono, ui-monospace, Cascadia Mono, Courier New, monospace";
+    }
+    if (!opts.fontSize) opts.fontSize = 15;
+    return opts;
+  }
+
+  function sendCtrl(pane, ch) {
+    var ws = pane && pane.ws;
+    if (!ws || ws.readyState !== 1) return;
+    try {
+      ws.send(encoder.encode(ch));
+    } catch (_) {}
+  }
+
+  function writeOutput(pane, bytes) {
+    var term = pane.term;
+    if (!term || !bytes || !bytes.length) return;
+    pane.written = (pane.written || 0) + bytes.length;
+    if (pane.written > FLOW_LIMIT) {
+      term.write(bytes, function () {
+        pane.pending = Math.max((pane.pending || 1) - 1, 0);
+        if (pane.pending < 4) sendCtrl(pane, "3");
+      });
+      pane.pending = (pane.pending || 0) + 1;
+      pane.written = 0;
+      if (pane.pending > 10) sendCtrl(pane, "2");
+      return;
+    }
+    term.write(bytes);
+  }
+
+  function writePane(pane, data) {
+    var bytes = null;
+    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    if (!bytes || !bytes.length) return;
+    var cmd = bytes[0];
+    if (cmd === 48) {
+      writeOutput(pane, bytes.subarray(1));
+      return;
+    }
+    if (cmd === 49 && pane.id === tabId()) {
+      try {
+        document.title = new TextDecoder().decode(bytes.subarray(1));
+      } catch (_) {}
+      return;
+    }
+    if (cmd !== 50 || !pane.term || !pane.term.options) return;
+    try {
+      var prefs = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+      if (!prefs || typeof prefs !== "object") return;
+      if (prefs.fontSize) pane.term.options.fontSize = prefs.fontSize;
+      if (prefs.fontFamily) pane.term.options.fontFamily = prefs.fontFamily;
+      if (prefs.theme) pane.term.options.theme = prefs.theme;
+      pane.term.options.scrollback = 20000;
+    } catch (_) {}
+  }
+
+  function sendPaneInput(pane, text) {
+    var ws = pane && pane.ws;
+    if (!ws || ws.readyState !== 1 || !text) return;
+    var body = encoder.encode(text);
+    var payload = new Uint8Array(body.length + 1);
+    payload[0] = INPUT;
+    payload.set(body, 1);
+    try {
+      ws.send(payload);
+    } catch (_) {}
+  }
+
+  function sendPaneBinary(pane, data) {
+    var ws = pane && pane.ws;
+    if (!ws || ws.readyState !== 1 || !data) return;
+    var payload = new Uint8Array(data.length + 1);
+    payload[0] = INPUT;
+    for (var i = 0; i < data.length; i++) payload[i + 1] = data.charCodeAt(i) & 255;
+    try {
+      ws.send(payload);
+    } catch (_) {}
+  }
+
+  function sendPaneResize(pane, cols, rows) {
+    if (!pane || !pane.authed || !cols || !rows) return;
+    var ws = pane.ws;
+    if (!ws || ws.readyState !== 1) return;
+    try {
+      ws.send(encoder.encode("1" + JSON.stringify({ columns: cols, rows: rows })));
+    } catch (_) {}
+  }
+
+  function fitPane(pane) {
+    if (!pane || !pane.term || !pane.host || pane.host.hidden) return;
+    if (pane.primary && typeof pane.term.fit === "function") {
+      try {
+        pane.term.fit();
+      } catch (_) {}
+      return;
+    }
+    var cell = cellOf(pane.term) || (primaryPane && cellOf(primaryPane.term)) || {
+      width: 9,
+      height: 17,
+    };
+    var rect = pane.host.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    var cols = Math.max(2, Math.floor(rect.width / cell.width));
+    var rows = Math.max(1, Math.floor(rect.height / cell.height));
+    if (pane.term.cols === cols && pane.term.rows === rows) return;
+    try {
+      pane.term.resize(cols, rows);
+    } catch (_) {}
+  }
+
+  function showPane(pane) {
+    if (!pane || !pane.host || !pane.term) return;
+    activePaneId = pane.id;
+    Object.keys(panes).forEach(function (key) {
+      var item = panes[key];
+      if (!item || !item.host) return;
+      var on = item === pane;
+      item.host.hidden = !on;
+      item.host.setAttribute("aria-hidden", on ? "false" : "true");
+    });
+    window.term = pane.term;
+    if (pane.ws && pane.ws.readyState !== NativeWS.CLOSED) window.__rcTermSocket = pane.ws;
+    armPaneScroll(pane.term);
+    fitPane(pane);
+    try {
+      if (typeof pane.term.refresh === "function") {
+        pane.term.refresh(0, Math.max(0, (pane.term.rows || 1) - 1));
+      }
+    } catch (_) {}
+    try {
+      pane.term.focus();
+    } catch (_) {}
+    requestAnimationFrame(function () {
+      if (panes[pane.id] !== pane || activePaneId !== pane.id) return;
+      fitPane(pane);
+      try {
+        pane.term.focus();
+      } catch (_) {}
+    });
+  }
+
+  function connectPane(pane) {
+    if (!pane || pane.intentional || pane.primary) return;
+    var existing = pane.ws;
+    if (existing && (existing.readyState === NativeWS.CONNECTING || existing.readyState === NativeWS.OPEN)) {
+      return;
+    }
+    window.__rcNextPane = pane;
+    var ws;
+    try {
+      ws = new WebSocket(wsUrlFor(pane.id), ["tty"]);
+    } catch (_) {
+      window.__rcNextPane = null;
+      return;
+    }
+    window.__rcNextPane = null;
+    ws.binaryType = "arraybuffer";
+    pane.ws = ws;
+    pane.authed = false;
+    if (pane.id === tabId()) window.__rcTermSocket = ws;
+    ws.addEventListener("open", function () {
+      if (pane.ws !== ws || pane.intentional) return;
+      fitPane(pane);
+      var cols = pane.term.cols || 80;
+      var rows = pane.term.rows || 24;
+      fetchToken().then(function (token) {
+        if (pane.ws !== ws || ws.readyState !== 1) return;
+        pane.authed = true;
+        try {
+          ws.send(
+            encoder.encode(
+              JSON.stringify({
+                AuthToken: token || "",
+                columns: cols,
+                rows: rows,
+              })
+            )
+          );
+        } catch (_) {}
+        if (pane.id === tabId()) {
+          window.__rcTermSocket = ws;
+          window.dispatchEvent(new CustomEvent("rc-ws-open"));
+        }
+        setTimeout(function () {
+          if (typeof pullSessions === "function") pullSessions();
+        }, 350);
+      });
+    });
+    ws.addEventListener("message", function (ev) {
+      if (pane.ws !== ws) return;
+      writePane(pane, ev && ev.data);
+    });
+    ws.addEventListener("close", function () {
+      if (pane.intentional || pane.ws !== ws) return;
+      pane.authed = false;
+      pane.ws = null;
+      if (pane.id === tabId()) {
+        window.__rcTermSocket = null;
+        window.dispatchEvent(new CustomEvent("rc-ws-close"));
+      }
+      setTimeout(function () {
+        if (!pane.intentional && panes[pane.id] === pane) connectPane(pane);
+      }, 200);
+    });
+  }
+
+  function buildPane(id) {
+    var proto = window.term;
+    var Term = proto && proto.constructor;
+    if (!Term) return null;
+    var host = document.createElement("div");
+    host.className = "rc-pane";
+    host.dataset.rcPane = id;
+    host.hidden = true;
+    (document.body || document.documentElement).appendChild(host);
+    bindTouchHost(host);
+    var term;
+    try {
+      term = new Term(termOptions(proto.options));
+      term.open(host);
+    } catch (_) {
+      host.remove();
+      return null;
+    }
+    term.__rcSized = true;
+    var pane = {
+      id: id,
+      host: host,
+      term: term,
+      ws: null,
+      primary: false,
+      intentional: false,
+      authed: false,
+      written: 0,
+      pending: 0,
+    };
+    panes[id] = pane;
+    if (typeof term.onData === "function") {
+      term.onData(function (data) {
+        sendPaneInput(pane, data);
+      });
+    }
+    if (typeof term.onBinary === "function") {
+      term.onBinary(function (data) {
+        sendPaneBinary(pane, data);
+      });
+    }
+    if (typeof term.onResize === "function") {
+      term.onResize(function (size) {
+        sendPaneResize(pane, size.cols, size.rows);
+      });
+    }
+    return pane;
+  }
+
+  function disposePane(id) {
+    var pane = panes[id];
+    if (!pane) return;
+    pane.intentional = true;
+    var ws = pane.ws;
+    if (ws) {
+      ws.__rcIntentional = true;
+      try {
+        if (typeof ws.__rcDropClose === "function") ws.__rcDropClose();
+      } catch (_) {}
+      try {
+        if (ws.readyState === NativeWS.CONNECTING || ws.readyState === NativeWS.OPEN) ws.close(1000);
+      } catch (_) {}
+    }
+    try {
+      if (pane.term && typeof pane.term.dispose === "function") pane.term.dispose();
+    } catch (_) {}
+    if (pane.host) {
+      if (pane.primary) pane.host.hidden = true;
+      else {
+        try {
+          pane.host.remove();
+        } catch (_) {}
+      }
+    }
+    if (primaryPane === pane) primaryPane = null;
+    if (activePaneId === id) activePaneId = "";
+    delete panes[id];
+    if (typeof histSeen !== "undefined") delete histSeen[id];
   }
 
   window.__rcAttachSession = function () {
-    var ws = window.__rcTermSocket;
-    if (!ws || !xterm() || ws.readyState === NativeWS.CLOSED) return false;
-    window.__rcWantWs = currentWsUrl();
-    hushOverlay();
-    try {
-      if (ws.readyState === NativeWS.OPEN) ws.close(4001);
-      else if (ws.readyState === NativeWS.CONNECTING) ws.close();
-    } catch (_) {
-      return false;
+    var id = tabId();
+    if (!id || !window.term || typeof window.term.focus !== "function") return false;
+    ensurePrimary();
+    var pane = panes[id];
+    if (!pane) {
+      if (id === bootTabId) return false;
+      pane = buildPane(id);
+      if (!pane) return false;
     }
+    showPane(pane);
+    if (!pane.primary) connectPane(pane);
     return true;
+  };
+
+  window.__rcPaneState = function () {
+    return {
+      active: activePaneId,
+      panes: Object.keys(panes).map(function (key) {
+        var pane = panes[key];
+        return {
+          id: pane.id,
+          primary: !!pane.primary,
+          hidden: !!(pane.host && pane.host.hidden),
+          state: pane.ws ? pane.ws.readyState : -1,
+        };
+      }),
+    };
   };
 
   function wrapWebSocket() {
@@ -416,22 +831,42 @@
           ? [protocols]
           : [];
       var tty = list.indexOf("tty") !== -1 || /\/ws/.test(String(url));
-      if (tty && window.__rcWantWs) url = window.__rcWantWs;
+      var pane = tty ? window.__rcNextPane : null;
+      if (tty) window.__rcNextPane = null;
       var ws =
         protocols === undefined
           ? new NativeWS(url)
           : new NativeWS(url, protocols);
       if (!tty) return ws;
       window.__rcLastWsUrl = String(url);
-      window.__rcTermSocket = ws;
+      if (pane) {
+        ws.__rcPaneId = pane.id;
+      } else {
+        window.__rcPrimarySocket = ws;
+        ensurePrimary();
+        if (primaryPane) primaryPane.ws = ws;
+        if (!activePaneId || (primaryPane && activePaneId === primaryPane.id)) {
+          window.__rcTermSocket = ws;
+        }
+      }
       var msgListeners = [];
+      var closeFns = [];
       var queue = [];
       var live = false;
       var origAdd = ws.addEventListener.bind(ws);
       var origRemove = ws.removeEventListener.bind(ws);
       var scrollHold = { bytes: null };
+      function ownerTerm() {
+        if (pane && pane.term) return pane.term;
+        if (primaryPane && primaryPane.ws === ws && primaryPane.term) return primaryPane.term;
+        return null;
+      }
       function dispatch(ev) {
+        var prev = boundTerm;
+        var owner = ownerTerm();
+        if (owner) boundTerm = owner;
         var next = preserveScrollUp(softenPrefs(ev), scrollHold);
+        boundTerm = prev;
         msgListeners.slice().forEach(function (fn) {
           try {
             fn.call(ws, next);
@@ -440,7 +875,7 @@
       }
       function flush() {
         if (live) return;
-        var term = xterm();
+        var term = ownerTerm() || xterm();
         if (!term) {
           setTimeout(flush, 20);
           return;
@@ -450,13 +885,13 @@
         var pending = queue;
         queue = [];
         pending.forEach(dispatch);
-        armScrollback(xterm());
       }
       ws.addEventListener = function (type, fn, opts) {
         if (type === "message" && typeof fn === "function") {
           msgListeners.push(fn);
           return;
         }
+        if (type === "close" && typeof fn === "function") closeFns.push(fn);
         return origAdd(type, fn, opts);
       };
       ws.removeEventListener = function (type, fn, opts) {
@@ -466,7 +901,21 @@
           });
           return;
         }
+        if (type === "close") {
+          closeFns = closeFns.filter(function (item) {
+            return item !== fn;
+          });
+        }
         return origRemove(type, fn, opts);
+      };
+      ws.__rcDropClose = function () {
+        closeFns.slice().forEach(function (fn) {
+          try {
+            origRemove("close", fn);
+          } catch (_) {}
+        });
+        closeFns = [];
+        ws.__rcIntentional = true;
       };
       origAdd("message", function (ev) {
         if (!live) {
@@ -477,12 +926,13 @@
       });
       origAdd("open", function () {
         setTimeout(flush, 0);
-        window.dispatchEvent(new CustomEvent("rc-ws-open"));
+        if (!pane) window.dispatchEvent(new CustomEvent("rc-ws-open"));
       });
       origAdd("close", function () {
+        if (ws.__rcIntentional || pane) return;
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
       });
-      holdStartupSize(ws);
+      if (!pane) holdStartupSize(ws);
       return ws;
     }
     RCWebSocket.prototype = NativeWS.prototype;
@@ -530,6 +980,12 @@
   }
 
   function termTextarea() {
+    var term = xterm();
+    var root = term && term.element;
+    if (root && root.querySelector) {
+      var own = root.querySelector(".xterm-helper-textarea");
+      if (own) return own;
+    }
     return document.querySelector(".xterm-helper-textarea");
   }
 
@@ -649,7 +1105,7 @@
     term.write(String.fromCharCode(27) + "[3J");
   }
 
-  var lastHist = null;
+  var histSeen = {};
 
   function watchNativeClear() {
     function tick() {
@@ -661,10 +1117,18 @@
         })
         .then(function (payload) {
           if (!payload || typeof payload.size !== "number") return;
-          if (lastHist !== null && lastHist > payload.size && payload.size <= 1) {
-            wipeScrollback();
+          if (tabId() !== id) return;
+          var prev = histSeen[id];
+          if (typeof prev === "number" && prev > payload.size && payload.size <= 1) {
+            var pane = panes[id];
+            var term = pane && pane.term;
+            if (term && typeof term.write === "function") {
+              term.write(String.fromCharCode(27) + "[3J");
+            } else {
+              wipeScrollback();
+            }
           }
-          lastHist = payload.size;
+          histSeen[id] = payload.size;
         })
         .catch(function () {});
     }
@@ -699,10 +1163,7 @@
     var term = xterm();
     if (!term || !term.cols || !term.rows) return null;
     var screen =
-      document.querySelector("#terminal-container .xterm-screen canvas") ||
-      document.querySelector("#terminal-container .xterm-screen") ||
-      document.querySelector(".xterm-screen canvas") ||
-      document.querySelector(".xterm-screen") ||
+      (term.element && term.element.querySelector(".xterm-screen canvas")) ||
       (term.element && term.element.querySelector(".xterm-screen")) ||
       term.element;
     if (!screen || !screen.getBoundingClientRect) return null;
@@ -1404,15 +1865,15 @@
       sessionH = sessions.offsetHeight || 40;
     }
     document.documentElement.style.setProperty("--rc-bar-h", sessionH + "px");
-    var host = document.getElementById("terminal-container");
-    if (host) {
+    var hosts = document.querySelectorAll("#terminal-container, .rc-pane");
+    hosts.forEach(function (host) {
       host.style.top = top + sessionH + "px";
       host.style.left = left + "px";
       host.style.right = "auto";
       host.style.bottom = "auto";
       host.style.width = viewW + "px";
       host.style.height = Math.max(48, viewH - sessionH - barH) + "px";
-    }
+    });
     var fit = viewW + "x" + viewH + "@" + top + "," + left + ":" + barH;
     if (fit !== lastFit) {
       lastFit = fit;
@@ -1785,14 +2246,17 @@
       el.addEventListener("touchcancel", onEnd, { passive: true });
     }
 
+    bindTouchHost = bind;
     bind(document.getElementById("terminal-container"));
     var mo = new MutationObserver(function () {
       bind(document.getElementById("terminal-container"));
+      document.querySelectorAll(".rc-pane").forEach(bind);
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
     setTimeout(function () {
       mo.disconnect();
       bind(document.getElementById("terminal-container"));
+      document.querySelectorAll(".rc-pane").forEach(bind);
     }, 4000);
   }
 
@@ -2035,20 +2499,27 @@
     );
   }
 
+  function armPaneScroll(term) {
+    if (!term || term.__rcScrollArmed || typeof term.onScroll !== "function") return;
+    term.__rcScrollArmed = true;
+    armScrollback(term);
+    term.onScroll(function () {
+      if (xterm() !== term) return;
+      stickBottom = atBottom();
+      if (imeGuarded()) return;
+      if (imeOpen && !stickBottom) lockIme();
+    });
+  }
+
   function bootPinScroll() {
     var tries = 0;
     function arm() {
-      var term = xterm();
+      var term = window.term;
       if (!term || typeof term.onScroll !== "function") {
         if (tries++ < 80) setTimeout(arm, 50);
         return;
       }
-      armScrollback(term);
-      term.onScroll(function () {
-        stickBottom = atBottom();
-        if (imeGuarded()) return;
-        if (imeOpen && !stickBottom) lockIme();
-      });
+      armPaneScroll(term);
     }
     arm();
   }
@@ -2126,12 +2597,16 @@
       if (next) openSession(next);
       else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
     }
+    disposePane(id);
+    sessionCache = sessionCache.filter(function (item) {
+      return item.id !== id;
+    });
+    paintSessions(sessionCache);
     fetch("/rc-session-close?tab=" + encodeURIComponent(id), {
       method: "POST",
       cache: "no-store",
       keepalive: true,
     }).catch(function () {});
-    if (!current) pullSessions();
   }
 
   function fillTab(el, item, counts, current) {
@@ -2277,6 +2752,17 @@
     watchNativeClear();
     bootPaste();
     bootPinScroll();
+    window.addEventListener("resize", function () {
+      var pane = panes[tabId()];
+      if (pane && !pane.primary) fitPane(pane);
+    });
+    var claimTries = 0;
+    (function claimSoon() {
+      var pane = ensurePrimary();
+      if (pane && pane.term && pane.term.__rcFitHook) return;
+      if (claimTries++ > 100) return;
+      setTimeout(claimSoon, 50);
+    })();
     if (device === "pc") {
       document.documentElement.classList.remove("rc-touch");
       return;

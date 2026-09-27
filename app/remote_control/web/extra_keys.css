@@ -180,7 +180,8 @@ html.rc-quiet-switch .xterm > div:not([class]) {
   display: none !important;
 }
 
-#terminal-container {
+#terminal-container,
+.rc-pane {
   position: fixed !important;
   top: var(--rc-bar-h) !important;
   right: 0 !important;
@@ -190,13 +191,21 @@ html.rc-quiet-switch .xterm > div:not([class]) {
   height: auto !important;
   margin: 0 !important;
   box-sizing: border-box;
+  background: #011627;
 }
 
-html.rc-touch #terminal-container {
+#terminal-container[hidden],
+.rc-pane[hidden] {
+  display: none !important;
+}
+
+html.rc-touch #terminal-container,
+html.rc-touch .rc-pane {
   bottom: var(--rc-ek-h, 96px) !important;
 }
 
-#terminal-container .xterm {
+#terminal-container .xterm,
+.rc-pane .xterm {
   height: 100%;
   width: 100%;
 }
@@ -217,7 +226,8 @@ html.rc-touch body {
   overflow: hidden;
 }
 
-html.rc-touch #terminal-container {
+html.rc-touch #terminal-container,
+html.rc-touch .rc-pane {
   touch-action: pan-y;
   -webkit-user-select: none;
   user-select: none;
