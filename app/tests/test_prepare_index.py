@@ -41,6 +41,8 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertIn("rc-session-tabs", html)
         self.assertIn("rc-tab-close", html)
         self.assertIn("function closeSession", html)
+        self.assertIn('type === "beforeunload"', html)
+        self.assertIn("disableLeaveAlert=true", (Path(__file__).resolve().parents[1] / "remote_control" / "tunnel.py").read_text(encoding="utf-8"))
         self.assertNotIn("function writeReplay", html)
         self.assertNotIn("__rcReplay", html)
         self.assertNotIn("rc-boot-scrollback", html)

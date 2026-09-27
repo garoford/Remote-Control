@@ -1,6 +1,17 @@
 (function () {
   "use strict";
 
+  // tmux keeps the shell. Switching tabs navigates, and ttyd's beforeunload
+  // would pop "Leave site?" even though nothing is lost.
+  var addListener = window.addEventListener.bind(window);
+  window.addEventListener = function (type, fn, opts) {
+    if (type === "beforeunload") return;
+    return addListener(type, fn, opts);
+  };
+  try {
+    window.onbeforeunload = null;
+  } catch (_) {}
+
   var LS_KEY = "rc-tab-sessions";
   var SS_KEY = "rc-tab-id";
   var TAB_RE = /^rc[a-z0-9]{10,32}$/;

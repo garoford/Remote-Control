@@ -394,6 +394,7 @@ TTYD_CMD=(
   -t "fontWeight=400"
   -t "fontWeightBold=700"
   -t "cursorBlink=true"
+  -t "disableLeaveAlert=true"
   -t "theme=${NIGHT_OWL_THEME}"
 )
 if [[ -s "$TTYD_INDEX" ]]; then
