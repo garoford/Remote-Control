@@ -116,6 +116,142 @@
     }
   }
 
+  function feedScrollLines(count, rows, restoreRow) {
+    var esc = String.fromCharCode(27);
+    var text = esc + "7" + esc + "[" + rows + ";1H";
+    for (var i = 0; i < count; i++) text += "\n";
+    // DECRC follows the scrolled line. A following CUU expects the cursor to stay put.
+    text += esc + "8";
+    if (restoreRow) text += esc + "[" + count + "B";
+    var out = new Uint8Array(text.length);
+    for (var n = 0; n < text.length; n++) out[n] = text.charCodeAt(n);
+    return out;
+  }
+
+  function rewriteScrollUp(payload) {
+    var term = xterm();
+    var rows = term && term.rows > 0 ? term.rows : 999;
+    var parts = [];
+    var start = 0;
+    var changed = false;
+    var i = 0;
+    while (i < payload.length) {
+      if (payload[i] !== 27 || i + 1 >= payload.length || payload[i + 1] !== 91) {
+        i++;
+        continue;
+      }
+      var j = i + 2;
+      var num = 0;
+      var digits = 0;
+      while (j < payload.length && payload[j] >= 48 && payload[j] <= 57 && digits < 6) {
+        num = num * 10 + (payload[j] - 48);
+        digits++;
+        j++;
+      }
+      if (j < payload.length && payload[j] === 83) {
+        var count = digits ? num : 1;
+        if (count > rows) count = rows;
+        var restoreRow = false;
+        var k = j + 1;
+        if (
+          k + 1 < payload.length &&
+          payload[k] === 27 &&
+          payload[k + 1] === 91
+        ) {
+          var p = k + 2;
+          while (p < payload.length && payload[p] >= 48 && payload[p] <= 57 && p - k < 8) p++;
+          if (p < payload.length && payload[p] === 65) restoreRow = true;
+        }
+        changed = true;
+        if (i > start) parts.push(payload.subarray(start, i));
+        if (count > 0) parts.push(feedScrollLines(count, rows, restoreRow));
+        i = j + 1;
+        start = i;
+        continue;
+      }
+      i++;
+    }
+    if (!changed) return null;
+    if (start < payload.length) parts.push(payload.subarray(start));
+    var total = 0;
+    for (var p = 0; p < parts.length; p++) total += parts[p].length;
+    var out = new Uint8Array(total);
+    var at = 0;
+    for (var q = 0; q < parts.length; q++) {
+      out.set(parts[q], at);
+      at += parts[q].length;
+    }
+    return out;
+  }
+
+  function incompleteSuTail(payload) {
+    var n = payload.length;
+    if (!n) return 0;
+    var i = n - 1;
+    var digits = 0;
+    while (i >= 0 && payload[i] >= 48 && payload[i] <= 57 && digits < 6) {
+      digits++;
+      i--;
+    }
+    if (digits > 0 && i >= 1 && payload[i] === 91 && payload[i - 1] === 27) {
+      var len = n - (i - 1);
+      return len <= 16 ? len : 0;
+    }
+    if (payload[n - 1] === 27) return 1;
+    if (n >= 2 && payload[n - 1] === 91 && payload[n - 2] === 27) return 2;
+    return 0;
+  }
+
+  function completeSuTail(payload) {
+    var n = payload.length;
+    if (n < 3 || payload[n - 1] !== 83) return 0;
+    var i = n - 2;
+    var digits = 0;
+    while (i >= 0 && payload[i] >= 48 && payload[i] <= 57 && digits < 6) {
+      digits++;
+      i--;
+    }
+    if (i >= 1 && payload[i] === 91 && payload[i - 1] === 27) {
+      var len = n - (i - 1);
+      return len <= 16 ? len : 0;
+    }
+    return 0;
+  }
+
+  function preserveScrollUp(ev, hold) {
+    try {
+      var data = ev && ev.data;
+      if (!data || typeof data === "string") return ev;
+      var bytes = new Uint8Array(data);
+      if (!bytes.length || bytes[0] !== 48) return ev;
+      var payload = bytes.subarray(1);
+      var merged = false;
+      if (hold && hold.bytes && hold.bytes.length) {
+        var both = new Uint8Array(hold.bytes.length + payload.length);
+        both.set(hold.bytes, 0);
+        both.set(payload, hold.bytes.length);
+        payload = both;
+        hold.bytes = null;
+        merged = true;
+      }
+      var cut = incompleteSuTail(payload) || completeSuTail(payload);
+      if (cut > 0 && hold) {
+        hold.bytes = new Uint8Array(payload.subarray(payload.length - cut));
+        payload = payload.subarray(0, payload.length - cut);
+        merged = true;
+      }
+      var body = rewriteScrollUp(payload);
+      if (!body && !merged) return ev;
+      if (!body) body = payload;
+      var framed = new Uint8Array(body.length + 1);
+      framed[0] = 48;
+      framed.set(body, 1);
+      return { data: framed.buffer };
+    } catch (_) {
+      return ev;
+    }
+  }
+
   function decodeSend(data) {
     try {
       if (typeof data === "string") return data;
@@ -258,8 +394,9 @@
       var live = false;
       var origAdd = ws.addEventListener.bind(ws);
       var origRemove = ws.removeEventListener.bind(ws);
+      var scrollHold = { bytes: null };
       function dispatch(ev) {
-        var next = softenPrefs(ev);
+        var next = preserveScrollUp(softenPrefs(ev), scrollHold);
         msgListeners.slice().forEach(function (fn) {
           try {
             fn.call(ws, next);
