@@ -1,6 +1,7 @@
 """HTTP/WebSocket sidecar in front of ttyd.
 
 Serves cacheable fonts + JS, /rc-scrollback, /rc-history, /rc-hist-size, /rc-scroll,
+/rc-session-close,
 reserved clipboard uploads, and proxies everything else (including the
 tty WebSocket) to ttyd on the internal port.
 """
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from remote_control.history import (
     cancel_copy_mode,
+    close_session,
     history_payload,
     list_sessions,
     scroll_history,
@@ -314,6 +316,9 @@ class Sidecar:
             if method == "GET" and path.rstrip("/").endswith("/rc-sessions"):
                 self._serve_sessions(conn)
                 return
+            if method == "POST" and path.rstrip("/").endswith("/rc-session-close"):
+                self._serve_session_close(conn, parse_qs(parsed_url.query))
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-hist-size"):
                 self._serve_hist_size(conn, parse_qs(parsed_url.query))
                 return
@@ -431,6 +436,19 @@ class Sidecar:
             {"sessions": list_sessions(socket=self.tmux_socket)},
             ensure_ascii=False,
         ).encode("utf-8")
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                body,
+                "application/json; charset=utf-8",
+                _API_EXTRA,
+            )
+        )
+
+    def _serve_session_close(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
+        tab = (query.get("tab") or [""])[0]
+        ok = close_session(tab, socket=self.tmux_socket)
+        body = json.dumps({"ok": ok}).encode("utf-8")
         conn.sendall(
             _http_response(
                 "200 OK",

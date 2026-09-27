@@ -9,6 +9,7 @@ from remote_control.history import (
     capture_visible,
     find_suffix,
     history_payload,
+    close_session,
     list_sessions,
     normalize_line,
     scroll_history,
@@ -332,6 +333,10 @@ class HistorySuffixTests(unittest.TestCase):
 
 
 class SessionsTests(unittest.TestCase):
+    def test_close_session_rejects_a_bad_name(self) -> None:
+        self.assertFalse(close_session("nope"))
+        self.assertFalse(close_session("rcshort"))
+
     def test_list_sessions_unknown_socket_is_empty(self) -> None:
         self.assertEqual(list_sessions(socket="rc-noreplay"), [])
 

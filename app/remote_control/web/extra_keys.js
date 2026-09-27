@@ -2037,32 +2037,151 @@
     return base + " · " + (item.command || "shell");
   }
 
-  function paintSessions(list) {
-    var pick = document.getElementById("rc-session-pick");
-    if (!pick) return;
-    var current = tabId();
+  var TAB_CLOSE_SVG =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+
+  function orderedSessions(list, current) {
+    var items = [];
     var seen = {};
-    list.forEach(function (item) {
-      if (item && item.id) seen[item.id] = true;
+    (list || []).forEach(function (item) {
+      if (!item || !item.id || seen[item.id]) return;
+      seen[item.id] = true;
+      items.push(item);
     });
     if (current && !seen[current]) {
-      list = [{ id: current, path: "", command: "nueva", activity: 0 }].concat(list);
+      items.push({
+        id: current,
+        path: "",
+        command: "nueva",
+        activity: 0,
+        created: Date.now() / 1000,
+      });
     }
+    items.sort(function (a, b) {
+      var delta = (a.created || 0) - (b.created || 0);
+      if (delta) return delta;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    return items;
+  }
+
+  function openSession(id) {
+    if (!id || id === tabId()) return;
+    if (typeof window.__rcOpenSession === "function") window.__rcOpenSession(id);
+  }
+
+  function closeSession(id, ev) {
+    if (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+    if (!id) return;
+    var host = document.getElementById("rc-session-tabs");
+    var ids = [];
+    if (host) {
+      host.querySelectorAll(".rc-tab").forEach(function (el) {
+        if (el.dataset.id) ids.push(el.dataset.id);
+      });
+    }
+    var index = ids.indexOf(id);
+    var next = "";
+    if (ids.length > 1 && index >= 0) next = ids[index + 1] || ids[index - 1] || "";
+    var current = id === tabId();
+    fetch("/rc-session-close?tab=" + encodeURIComponent(id), {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+    }).catch(function () {});
+    if (!current) {
+      pullSessions();
+      return;
+    }
+    if (next) openSession(next);
+    else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+  }
+
+  function fillTab(el, item, counts, current) {
+    var label = sessionLabel(item, counts);
+    el.dataset.id = item.id;
+    el.classList.toggle("is-active", item.id === current);
+    el.setAttribute("aria-selected", item.id === current ? "true" : "false");
+    el.title = item.path || label;
+    var text = el.querySelector(".rc-tab-label");
+    if (text && text.textContent !== label) text.textContent = label;
+    var close = el.querySelector(".rc-tab-close");
+    if (close) close.setAttribute("aria-label", "Cerrar " + label);
+  }
+
+  function makeTab() {
+    var el = document.createElement("div");
+    el.className = "rc-tab";
+    el.setAttribute("role", "tab");
+    el.tabIndex = 0;
+    var label = document.createElement("span");
+    label.className = "rc-tab-label";
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "rc-tab-close";
+    close.innerHTML = TAB_CLOSE_SVG;
+    el.appendChild(label);
+    el.appendChild(close);
+    close.addEventListener("click", function (ev) {
+      closeSession(el.dataset.id, ev);
+    });
+    el.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.closest && ev.target.closest(".rc-tab-close")) return;
+      openSession(el.dataset.id);
+    });
+    el.addEventListener("auxclick", function (ev) {
+      if (ev.button !== 1) return;
+      closeSession(el.dataset.id, ev);
+    });
+    el.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      openSession(el.dataset.id);
+    });
+    return el;
+  }
+
+  function paintSessions(list) {
+    var host = document.getElementById("rc-session-tabs");
+    if (!host) return;
+    var current = tabId();
+    var items = orderedSessions(list, current);
     var counts = {};
-    list.forEach(function (item) {
+    items.forEach(function (item) {
       var key = sessionKey(item);
       counts[key] = (counts[key] || 0) + 1;
     });
-    pick.innerHTML = "";
-    list.forEach(function (item) {
-      if (!item || !item.id) return;
-      var opt = document.createElement("option");
-      opt.value = item.id;
-      opt.textContent = sessionLabel(item, counts);
-      if (item.path) opt.title = item.path;
-      pick.appendChild(opt);
-    });
-    if (current) pick.value = current;
+    var sig = items
+      .map(function (item) {
+        return item.id;
+      })
+      .join("\n");
+    if (host.dataset.sig !== sig) {
+      host.dataset.sig = sig;
+      host.innerHTML = "";
+      items.forEach(function (item) {
+        var el = makeTab();
+        fillTab(el, item, counts, current);
+        host.appendChild(el);
+      });
+    } else {
+      var nodes = host.querySelectorAll(".rc-tab");
+      items.forEach(function (item, index) {
+        if (nodes[index]) fillTab(nodes[index], item, counts, current);
+      });
+    }
+    if (host.dataset.active !== current) {
+      host.dataset.active = current;
+      var active = host.querySelector(".is-active");
+      if (active && active.scrollIntoView) {
+        try {
+          active.scrollIntoView({ inline: "nearest", block: "nearest" });
+        } catch (_) {}
+      }
+    }
   }
 
   function pullSessions() {
@@ -2082,21 +2201,19 @@
     if (document.getElementById("rc-sessions")) return;
     var host = document.createElement("div");
     host.id = "rc-sessions";
-    var pick = document.createElement("select");
-    pick.id = "rc-session-pick";
-    pick.setAttribute("aria-label", "Sesiones de este túnel");
+    var tabs = document.createElement("div");
+    tabs.id = "rc-session-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Sesiones de este túnel");
     var fresh = document.createElement("button");
     fresh.id = "rc-session-new";
     fresh.type = "button";
-    fresh.textContent = "Nueva";
-    host.appendChild(pick);
+    fresh.setAttribute("aria-label", "Nueva pestaña");
+    fresh.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    host.appendChild(tabs);
     host.appendChild(fresh);
     (document.body || document.documentElement).appendChild(host);
-    pick.addEventListener("change", function () {
-      var id = pick.value;
-      if (!id || id === tabId()) return;
-      if (typeof window.__rcOpenSession === "function") window.__rcOpenSession(id);
-    });
     fresh.addEventListener("click", function (ev) {
       ev.preventDefault();
       if (typeof window.__rcNewSession === "function") window.__rcNewSession();

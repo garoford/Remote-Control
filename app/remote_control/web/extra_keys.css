@@ -7,7 +7,9 @@ body {
 }
 
 :root {
-  --rc-bar-h: 40px;
+  --rc-bar-h: 44px;
+  --rc-tab-active: #011627;
+  --rc-tab-strip: #0b2942;
 }
 
 #rc-sessions {
@@ -19,40 +21,159 @@ body {
   height: var(--rc-bar-h);
   box-sizing: border-box;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px;
-  background: #011627;
-  border-bottom: 1px solid rgba(33, 199, 168, 0.35);
+  align-items: flex-end;
+  gap: 2px;
+  padding: 0 6px 0 0;
+  background: var(--rc-tab-strip);
   color: #d6deeb;
-  font: 600 12px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  font: 500 13px/1 ui-sans-serif, system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-#rc-session-pick {
+#rc-session-tabs {
+  display: flex;
+  align-items: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: calc(100% - 40px);
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  padding-left: 8px;
+}
+
+#rc-session-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.rc-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 220px;
+  width: 220px;
+  min-width: 56px;
+  max-width: 220px;
+  height: 34px;
+  margin: 0;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-radius: 10px 10px 0 0;
+  background: transparent;
+  color: #9fb4c8;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset -1px 0 0 rgba(214, 222, 235, 0.16);
+}
+
+.rc-tab:last-child,
+.rc-tab.is-active,
+.rc-tab.is-active + .rc-tab,
+.rc-tab:has(+ .rc-tab.is-active) {
+  box-shadow: none;
+}
+
+.rc-tab:not(.is-active):hover {
+  background: rgba(1, 22, 39, 0.55);
+  color: #d6deeb;
+}
+
+.rc-tab.is-active {
+  z-index: 1;
+  background: var(--rc-tab-active);
+  color: #d6deeb;
+}
+
+.rc-tab.is-active::before,
+.rc-tab.is-active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+
+.rc-tab.is-active::before {
+  left: -10px;
+  border-bottom-right-radius: 10px;
+  box-shadow: 5px 0 0 0 var(--rc-tab-active);
+}
+
+.rc-tab.is-active::after {
+  right: -10px;
+  border-bottom-left-radius: 10px;
+  box-shadow: -5px 0 0 0 var(--rc-tab-active);
+}
+
+.rc-tab-label {
   flex: 1 1 auto;
   min-width: 0;
-  height: 28px;
-  border: 1px solid rgba(130, 170, 255, 0.28);
-  border-radius: 8px;
-  background: #0b2942;
-  color: #d6deeb;
-  font: 600 12px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
-  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-tab-close {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.rc-tab.is-active .rc-tab-close,
+.rc-tab:hover .rc-tab-close,
+.rc-tab:focus-within .rc-tab-close {
+  opacity: 1;
+}
+
+.rc-tab-close:hover {
+  background: rgba(214, 222, 235, 0.16);
+}
+
+.rc-tab-close svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 #rc-session-new {
+  align-self: center;
   flex: 0 0 auto;
+  width: 28px;
   height: 28px;
-  padding: 0 10px;
-  border: 1px solid rgba(33, 199, 168, 0.45);
-  border-radius: 8px;
-  background: #0b2942;
-  color: #7fdbca;
-  font: 700 12px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  margin: 0 0 0 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #d6deeb;
+  cursor: pointer;
 }
 
-#rc-session-new:active {
-  background: #1d3b53;
+#rc-session-new:hover {
+  background: rgba(1, 22, 39, 0.55);
+}
+
+#rc-session-new svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  margin: 0 auto;
 }
 
 #terminal-container {

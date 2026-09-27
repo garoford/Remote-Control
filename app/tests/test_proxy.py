@@ -304,6 +304,12 @@ class ProxyAssetTests(unittest.TestCase):
         self.assertEqual(body.get("lines"), [])
         self.assertEqual(body.get("all") or [], [])
 
+    def test_close_unknown_tab_is_refused(self) -> None:
+        resp = self._request("POST", "/rc-session-close?tab=nope", b"", "text/plain")
+        body = json.loads(resp.read())
+        self.assertEqual(resp.status, 200)
+        self.assertFalse(body.get("ok"))
+
     def test_sessions_is_a_list(self) -> None:
         resp = self._get("/rc-sessions")
         body = json.loads(resp.read())

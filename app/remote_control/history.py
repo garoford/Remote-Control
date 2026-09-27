@@ -30,6 +30,19 @@ def find_suffix(lines: list[str], fingerprint: list[str]) -> tuple[str, list[str
     return "full", lines[-MAX_RETURN_LINES:]
 
 
+def close_session(tab: str, socket: str = TMUX_SOCKET) -> bool:
+    """Kill one tunnel session. Refuses anything that is not a tab id."""
+    if not TAB_RE.match(tab):
+        return False
+    result = subprocess.run(
+        ["tmux", "-L", socket, "kill-session", "-t", f"={tab}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def has_session(tab: str, socket: str = TMUX_SOCKET) -> bool:
     if not TAB_RE.match(tab):
         return False
@@ -306,7 +319,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_activity}\t#{pane_current_path}\t"
-        "#{pane_current_command}\t#{session_attached}",
+        "#{pane_current_command}\t#{session_attached}\t#{session_created}",
         text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
@@ -327,6 +340,12 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
             attached = int(parts[4])
         except ValueError:
             attached = 0
+        created = 0
+        if len(parts) > 5:
+            try:
+                created = int(parts[5])
+            except ValueError:
+                created = 0
         path = parts[2]
         home = str(Path.home())
         if path == home:
@@ -340,6 +359,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
                 "path": path,
                 "command": parts[3],
                 "attached": attached,
+                "created": created,
             }
         )
     sessions.sort(key=lambda item: item["activity"], reverse=True)
