@@ -630,6 +630,8 @@
     window.term = pane.term;
     if (pane.ws && pane.ws.readyState !== NativeWS.CLOSED) window.__rcTermSocket = pane.ws;
     resetMirror();
+    tmuxScroll.offset = 0;
+    tmuxScroll.pending = 0;
     armPaneScroll(pane.term);
     fitPane(pane);
     try {
@@ -1230,10 +1232,12 @@
     document.documentElement.classList.toggle("rc-select", selectMode);
     if (selectMode) {
       lockIme();
-      showToast("Seleccioná");
+      showToast("Seleccionando");
+      kickHandles();
       return;
     }
     lastSel = null;
+    hideCopyChip();
     var term = xterm();
     if (term && typeof term.clearSelection === "function") {
       try {
@@ -1431,7 +1435,57 @@
     }
   }
 
+  // Apps that redraw the whole screen (Cursor Agent, Ink UIs) never scroll
+  // lines into xterm, but tmux keeps them (scroll-on-clear). When tmux holds
+  // more history than xterm, a swipe drives tmux copy-mode instead.
+  var tmuxScroll = { offset: 0, busy: false, pending: 0 };
+
+  function tmuxHasMoreHistory() {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    var tmuxLines = histSeen[tabId()];
+    if (!buf || typeof tmuxLines !== "number") return false;
+    return tmuxLines > buf.baseY + 3;
+  }
+
+  function pumpTmuxScroll() {
+    if (tmuxScroll.busy || !tmuxScroll.pending) return;
+    var tab = tabId();
+    if (!tab) {
+      tmuxScroll.pending = 0;
+      return;
+    }
+    var n = Math.max(-80, Math.min(80, tmuxScroll.pending));
+    tmuxScroll.pending -= n;
+    tmuxScroll.busy = true;
+    fetch("/rc-scroll?tab=" + encodeURIComponent(tab) + "&lines=" + n, {
+      method: "POST",
+      cache: "no-store",
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (state) {
+        if (state && state.ok !== false) {
+          tmuxScroll.offset = state.in_mode ? state.position || 0 : 0;
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        tmuxScroll.busy = false;
+        pumpTmuxScroll();
+      });
+  }
+
+  function scrollTmux(lines) {
+    if (!lines) return;
+    tmuxScroll.pending += lines;
+    pumpTmuxScroll();
+  }
+
   function cancelCopyMode() {
+    tmuxScroll.offset = 0;
+    tmuxScroll.pending = 0;
     var tab = tabId();
     if (!tab) return Promise.resolve();
     return fetch("/rc-copy-cancel?tab=" + encodeURIComponent(tab), {
@@ -1679,27 +1733,71 @@
     });
   }
 
+  function reserveFresh(ext) {
+    function attempt(left) {
+      var name = mintName(ext);
+      return reserveName(name).catch(function (err) {
+        if (left > 1) return attempt(left - 1);
+        throw err;
+      });
+    }
+    return attempt(3);
+  }
+
+  function uploadReserved(name, blob, type) {
+    function attempt(left) {
+      return putPasteFile(name, blob, type).catch(function (err) {
+        if (left > 1) return attempt(left - 1);
+        throw err;
+      });
+    }
+    return attempt(3);
+  }
+
+  // Reserve the name and paste its path right away; compression and upload
+  // finish behind it. Enter is not held back, so a very fast Enter can reach
+  // the file before its bytes do.
   function ingestBlob(blob, asImage) {
     if (!blob || pasteBusy) return Promise.resolve(false);
     pasteBusy = true;
     pasteGuard = Date.now() + 800;
-    showToast("Guardando…");
     var ext = extFromName(blob.name) || extFromType(blob.type) || "bin";
     if (ext === "bin") ext = extFromType(blob.type) || "bin";
     var squeeze = asImage && CANVAS_MIME[ext];
-    var work = squeeze ? compressImage(blob, ext) : Promise.resolve(blob);
-    return work
-      .then(function (out) {
-        var type = out.type || blob.type || "application/octet-stream";
-        return saveBlob(ext, out, type);
-      })
+    function prepare() {
+      var work = squeeze ? compressImage(blob, ext) : Promise.resolve(blob);
+      return work.then(function (out) {
+        return { blob: out, type: out.type || blob.type || "application/octet-stream" };
+      });
+    }
+    return reserveFresh(ext)
+      .then(
+        function (info) {
+          sendPaste(shellQuote(info.path));
+          showToast("Subiendo…");
+          return prepare().then(function (file) {
+            return uploadReserved(info.name || info.path.split("/").pop(), file.blob, file.type);
+          });
+        },
+        function () {
+          // No reservation: fall back to writing first, then pasting the path.
+          showToast("Guardando…");
+          return prepare()
+            .then(function (file) {
+              return saveBlob(ext, file.blob, file.type);
+            })
+            .then(function (info) {
+              sendPaste(shellQuote(info.path));
+              return info;
+            });
+        }
+      )
       .then(function (info) {
-        sendPaste(shellQuote(info.path));
         showToast(info.name);
         return true;
       })
       .catch(function () {
-        showToast("No pude guardar el archivo");
+        showToast("No pude subir el archivo");
         return false;
       })
       .then(function (ok) {
@@ -2251,6 +2349,13 @@
     var holdTimer = 0;
     var selFrom = null;
     var wheel = false;
+    var viaTmux = false;
+    var edgeTimer = 0;
+    var edgeDir = 0;
+    var startedSelect = false;
+    var dragging = false;
+    var handleRaf = 0;
+    var HANDLE_LIFT = 24;
     var wheelY = 0;
     var HOLD_MS = 450;
 
@@ -2288,6 +2393,126 @@
       );
     }
 
+    // Dragging a selection into the top or bottom edge scrolls xterm so the
+    // selection can grow past what fits on screen.
+    function edgeSpeed(y) {
+      var term = xterm();
+      var el = term && term.element && term.element.querySelector(".xterm-screen");
+      if (!el || !el.getBoundingClientRect || !term.rows) return 0;
+      var rect = el.getBoundingClientRect();
+      var cell = rect.height / term.rows;
+      if (y < rect.top) return -3;
+      if (y < rect.top + cell * 1.5) return -1;
+      if (y > rect.bottom) return 3;
+      if (y > rect.bottom - cell * 1.5) return 1;
+      return 0;
+    }
+
+    function stopEdgeScroll() {
+      if (edgeTimer) clearInterval(edgeTimer);
+      edgeTimer = 0;
+      edgeDir = 0;
+    }
+
+    function edgeTick() {
+      var term = xterm();
+      if (!term || !selFrom || typeof term.scrollLines !== "function") {
+        stopEdgeScroll();
+        return;
+      }
+      term.scrollLines(edgeDir);
+      var to = toBufferCell(cellAt(lastX, lastY));
+      if (to) applyCellSelect(selFrom, to);
+    }
+
+    function trackEdge(y) {
+      var dir = edgeSpeed(y);
+      if (dir === edgeDir) return;
+      stopEdgeScroll();
+      if (!dir) return;
+      edgeDir = dir;
+      edgeTimer = setInterval(edgeTick, 70);
+    }
+
+    function handleEl(which) {
+      var id = "rc-sel-" + which;
+      var el = document.getElementById(id);
+      if (el) return el;
+      el = document.createElement("div");
+      el.id = id;
+      el.className = "rc-sel-handle";
+      el.hidden = true;
+      el.addEventListener(
+        "touchstart",
+        function (ev) {
+          if (!lastSel || !ev.touches || ev.touches.length !== 1) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          hideCopyChip();
+          var anchor = which === "a" ? lastSel.to : lastSel.from;
+          selFrom = { col: anchor.col, row: anchor.row };
+          dragging = true;
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "touchmove",
+        function (ev) {
+          if (!dragging || !ev.touches || !ev.touches.length) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          var t = ev.touches[0];
+          // The handle hangs under its line; aim at the text above the finger.
+          lastX = t.clientX;
+          lastY = t.clientY - HANDLE_LIFT;
+          var to = toBufferCell(cellAt(lastX, lastY));
+          if (selFrom && to) applyCellSelect(selFrom, to);
+          trackEdge(lastY);
+        },
+        { passive: false }
+      );
+      function release(ev) {
+        if (!dragging) return;
+        if (ev) ev.stopPropagation();
+        dragging = false;
+        stopEdgeScroll();
+        selFrom = null;
+        showChipForSelection();
+      }
+      el.addEventListener("touchend", release);
+      el.addEventListener("touchcancel", release);
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function placeHandle(el, at) {
+      if (!at) {
+        el.hidden = true;
+        return;
+      }
+      el.hidden = false;
+      el.style.left = at.x + "px";
+      el.style.top = at.bottom + "px";
+    }
+
+    function syncHandles() {
+      handleRaf = 0;
+      var a = handleEl("a");
+      var b = handleEl("b");
+      if (!selectMode || !lastSel) {
+        a.hidden = true;
+        b.hidden = true;
+        return;
+      }
+      placeHandle(a, cellToClient(lastSel.from.col, lastSel.from.row, false));
+      placeHandle(b, cellToClient(lastSel.to.col, lastSel.to.row, true));
+      handleRaf = requestAnimationFrame(syncHandles);
+    }
+
+    kickHandles = function () {
+      if (!handleRaf) handleRaf = requestAnimationFrame(syncHandles);
+    };
+
     function clearHold() {
       if (holdTimer) {
         clearTimeout(holdTimer);
@@ -2310,7 +2535,11 @@
       scrolling = false;
       selecting = false;
       selFrom = null;
+      startedSelect = selectMode;
+      hideCopyChip();
       wheel = appWantsWheel();
+      viaTmux = !wheel && (tmuxScroll.offset > 0 || tmuxHasMoreHistory());
+      if (viaTmux) pinBottom();
       wheelY = t.clientY;
       active = true;
       if (selectMode) {
@@ -2346,30 +2575,40 @@
         ev.preventDefault();
         var to = toBufferCell(cellAt(x, y));
         if (selFrom && to) applyCellSelect(selFrom, to);
+        if (selFrom) trackEdge(y);
         return;
       }
-      if (wheel) ev.preventDefault();
+      if (wheel || viaTmux) ev.preventDefault();
       if (!scrolling && Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) return;
       clearHold();
       scrolling = true;
       writing = false;
       if (imeOpen && !imeGuarded()) lockIme();
-      if (!wheel) return;
+      if (!wheel && !viaTmux) return;
       var step = cellHeight();
       var steps = Math.trunc((y - wheelY) / step);
       if (!steps) return;
       wheelY += steps * step;
-      sendWheel(steps > 0, Math.min(Math.abs(steps), 20), x, y);
+      // Finger down means older lines: wheel up, or a negative copy-mode move.
+      if (viaTmux) scrollTmux(-steps);
+      else sendWheel(steps > 0, Math.min(Math.abs(steps), 20), x, y);
     }
 
     function onEnd() {
       clearHold();
-      if (selecting) {
+      stopEdgeScroll();
+      var tapped = Math.abs(lastX - startX) < 8 && Math.abs(lastY - startY) < 8;
+      if (selecting && startedSelect && tapped) {
+        // A plain tap while selecting leaves select mode.
+        endSelect();
+      } else if (selecting) {
         var end = toBufferCell(cellAt(lastX, lastY));
         if (selFrom && end) applyCellSelect(selFrom, end);
         requestAnimationFrame(restoreSel);
         setTimeout(restoreSel, 0);
         setTimeout(restoreSel, 50);
+        setTimeout(showChipForSelection, 60);
+        kickHandles();
       } else if (!scrolling) {
         lockIme();
       }
@@ -2378,6 +2617,7 @@
       selecting = false;
       selFrom = null;
       wheel = false;
+      viaTmux = false;
     }
 
     function bind(el) {
@@ -2668,6 +2908,118 @@
     var sel = window.getSelection && window.getSelection();
     var text = sel && sel.toString ? sel.toString() : "";
     return text ? String(text).replace(/[ \t]+$/gm, "") : "";
+  }
+
+  var kickHandles = function () {};
+
+  function screenBox() {
+    var term = xterm();
+    var el = term && term.element && term.element.querySelector(".xterm-screen");
+    if (!el || !el.getBoundingClientRect || !term.cols || !term.rows) return null;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return null;
+    return { rect: rect, cellW: rect.width / term.cols, cellH: rect.height / term.rows, rows: term.rows };
+  }
+
+  // Buffer cell -> viewport pixels; null when that row is scrolled away.
+  function cellToClient(col, bufRow, after) {
+    var box = screenBox();
+    if (!box) return null;
+    var vis = bufRow - bufferTop();
+    if (vis < 0 || vis >= box.rows) return null;
+    return {
+      x: box.rect.left + (col + (after ? 1 : 0)) * box.cellW,
+      top: box.rect.top + vis * box.cellH,
+      bottom: box.rect.top + (vis + 1) * box.cellH,
+    };
+  }
+
+  function copyChip() {
+    var chip = document.getElementById("rc-copy-chip");
+    if (chip) return chip;
+    chip = document.createElement("button");
+    chip.type = "button";
+    chip.id = "rc-copy-chip";
+    chip.textContent = "Copiar";
+    chip.hidden = true;
+    function swallow(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+    chip.addEventListener("pointerdown", swallow);
+    chip.addEventListener("mousedown", swallow);
+    chip.addEventListener("touchstart", swallow, { passive: false });
+    chip.addEventListener("touchend", function (ev) {
+      swallow(ev);
+      copyFromChip();
+    });
+    chip.addEventListener("click", function (ev) {
+      swallow(ev);
+      copyFromChip();
+    });
+    document.body.appendChild(chip);
+    return chip;
+  }
+
+  function copyFromChip() {
+    hideCopyChip();
+    copySelection();
+  }
+
+  function hideCopyChip() {
+    var chip = document.getElementById("rc-copy-chip");
+    if (chip) chip.hidden = true;
+  }
+
+  function showCopyChip(x, y) {
+    var chip = copyChip();
+    chip.hidden = false;
+    var w = chip.offsetWidth || 80;
+    var h = chip.offsetHeight || 36;
+    var vw = window.innerWidth || document.documentElement.clientWidth;
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var left = Math.max(8, Math.min(vw - w - 8, x - w / 2));
+    var top = y - h - 12;
+    if (top < 8) top = y + 16;
+    top = Math.max(8, Math.min(vh - h - 8, top));
+    chip.style.left = left + "px";
+    chip.style.top = top + "px";
+  }
+
+  function showChipForSelection() {
+    if (!lastSel) return;
+    var start = cellToClient(lastSel.from.col, lastSel.from.row, false);
+    var end = cellToClient(lastSel.to.col, lastSel.to.row, true);
+    if (start) showCopyChip(end && end.top === start.top ? (start.x + end.x) / 2 : start.x, start.top);
+    else if (end) showCopyChip(end.x, end.bottom + 40);
+  }
+
+  function bootCopyChip() {
+    document.addEventListener(
+      "pointerdown",
+      function (ev) {
+        var t = ev.target;
+        if (t && t.closest && t.closest("#rc-copy-chip, .rc-sel-handle")) return;
+        hideCopyChip();
+      },
+      true
+    );
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape") hideCopyChip();
+    });
+    document.addEventListener("mouseup", function (ev) {
+      if (document.documentElement.classList.contains("rc-touch")) return;
+      var t = ev.target;
+      if (!t || !t.closest || !t.closest(".xterm")) return;
+      var x = ev.clientX;
+      var y = ev.clientY;
+      setTimeout(function () {
+        var term = xterm();
+        if (!term || typeof term.hasSelection !== "function" || !term.hasSelection()) return;
+        if (!String(term.getSelection() || "").trim()) return;
+        showCopyChip(x, y);
+      }, 0);
+    });
   }
 
   function copySelection() {
@@ -3031,6 +3383,7 @@
     bootSessions();
     watchNativeClear();
     bootPaste();
+    bootCopyChip();
     bootPinScroll();
     window.addEventListener("resize", function () {
       var pane = panes[tabId()];
@@ -3058,6 +3411,18 @@
   }
 
   if (window.__rcRedirecting) return;
+  // ttyd runs execCommand("copy") on every selection change, so any drag
+  // replaced the clipboard. Copying now waits for the Copiar chip.
+  (function blockCopyOnSelect() {
+    var nativeExec = document.execCommand;
+    if (!nativeExec || nativeExec.__rcWrapped) return;
+    var wrapped = function (cmd) {
+      if (String(cmd || "").toLowerCase() === "copy") throw new Error("copy on select disabled");
+      return nativeExec.apply(document, arguments);
+    };
+    wrapped.__rcWrapped = true;
+    document.execCommand = wrapped;
+  })();
   wrapWebSocket();
   bootPrimaryRetry();
   if (document.readyState === "loading") {

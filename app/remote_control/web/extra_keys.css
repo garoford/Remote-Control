@@ -463,6 +463,25 @@ html.rc-touch #rc-extra-keys {
   }
 }
 
+/* They float over the last terminal lines; keep that text readable. */
+#rc-ek-paste,
+#rc-ek-ime,
+#rc-ek-mic {
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+#rc-ek-paste:active,
+#rc-ek-paste.is-down,
+#rc-ek-ime:active,
+#rc-ek-ime.is-down,
+#rc-ek-ime.is-on,
+#rc-ek-mic:active,
+#rc-ek-mic.is-down,
+#rc-ek-mic.is-on {
+  opacity: 1;
+}
+
 #rc-file-pick {
   display: none;
 }
@@ -519,4 +538,60 @@ html.rc-touch #rc-extra-keys {
 
 #rc-extra-keys.is-offline .rc-ek-link {
   display: block;
+}
+
+#rc-copy-chip {
+  position: fixed;
+  z-index: 2147483004;
+  padding: 8px 16px;
+  border: 1px solid rgba(130, 170, 255, 0.5);
+  border-radius: 10px;
+  background: #0b2942;
+  color: #82aaff;
+  font: 600 14px/1 system-ui, sans-serif;
+  box-shadow: 0 4px 14px rgba(1, 22, 39, 0.6);
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+
+#rc-copy-chip:active {
+  background: #1d3b53;
+}
+
+#rc-copy-chip[hidden],
+.rc-sel-handle[hidden] {
+  display: none;
+}
+
+/* Drag handles at both ends of a phone selection. */
+.rc-sel-handle {
+  position: fixed;
+  z-index: 2147483004;
+  width: 40px;
+  height: 40px;
+  margin-left: -20px;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.rc-sel-handle::before {
+  content: "";
+  position: absolute;
+  left: 19px;
+  top: 0;
+  width: 2px;
+  height: 12px;
+  background: #82aaff;
+}
+
+.rc-sel-handle::after {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 10px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #82aaff;
+  box-shadow: 0 2px 6px rgba(1, 22, 39, 0.6);
 }
