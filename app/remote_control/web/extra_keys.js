@@ -633,6 +633,7 @@
     });
     window.term = pane.term;
     if (pane.ws && pane.ws.readyState !== NativeWS.CLOSED) window.__rcTermSocket = pane.ws;
+    resetMirror();
     armPaneScroll(pane.term);
     fitPane(pane);
     try {
@@ -1493,6 +1494,7 @@
   function sendPaste(text) {
     var out = normalizePaste(text);
     if (!out) return false;
+    resetMirror();
     holdImeForPaste();
     var i = 0;
     function step() {
@@ -1917,6 +1919,7 @@
       return;
     }
     endSelect();
+    resetMirror();
     sendInput(specialWithMods(def));
     clearSticky();
   }
@@ -2435,8 +2438,6 @@
     writeQ = "";
     beginWriting().then(function () {
       if (pending) sendInput(normalizePaste(pending));
-      var ta = termTextarea();
-      if (ta) ta.value = "";
       writeBusy = false;
       if (writeQ) pumpWrite();
     });
@@ -2448,35 +2449,49 @@
     pumpWrite();
   }
 
+  // The hidden textarea mirrors what was typed on the current line. Gboard
+  // autocorrect, swipe and voice typing rewrite that text in place, so each
+  // input is turned into "erase what changed, type the new tail" instead of
+  // only forwarding the inserted word.
+  var mirrorSent = "";
+
+  function resetMirror() {
+    mirrorSent = "";
+    var ta = termTextarea();
+    if (ta && ta.value) ta.value = "";
+  }
+
+  function syncMirror(ta) {
+    var now = ta.value;
+    if (now === mirrorSent) return;
+    var p = 0;
+    var max = Math.min(now.length, mirrorSent.length);
+    while (p < max && now.charCodeAt(p) === mirrorSent.charCodeAt(p)) p++;
+    var lead = p > 0 ? now.charCodeAt(p - 1) : 0;
+    if (lead >= 0xd800 && lead <= 0xdbff) p--;
+    var erase = Array.from(mirrorSent.slice(p)).length;
+    var out = "";
+    for (var i = 0; i < erase; i++) out += "\u007f";
+    out += now.slice(p);
+    mirrorSent = now;
+    flushTyped(out);
+  }
+
+  function isTermTextarea(el) {
+    return !!(el && el.classList && el.classList.contains("xterm-helper-textarea"));
+  }
+
   function bootTypeToTty() {
-    document.addEventListener(
-      "beforeinput",
-      function (ev) {
-        if (!ev.data || ev.isComposing) return;
-        if (ev.inputType === "insertFromPaste" || ev.inputType === "insertFromYank") {
-          return;
-        }
-        if (!isTypeTarget(ev.target)) return;
-        ev.preventDefault();
-        ev.stopImmediatePropagation();
-        flushTyped(ev.data);
-      },
-      true
-    );
-    document.addEventListener(
-      "compositionend",
-      function (ev) {
-        if (!ev.data || !isTypeTarget(ev.target)) return;
-        flushTyped(ev.data);
-      },
-      true
-    );
     document.addEventListener(
       "keydown",
       function (ev) {
         if (ev.defaultPrevented || ev.isComposing) return;
         if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
         if (!isTypeTarget(ev.target)) return;
+        var ta = termTextarea();
+        // With text in the mirror, let the browser delete it; the input diff
+        // sends the DEL so both sides stay in step.
+        if (ev.key === "Backspace" && ta && ev.target === ta && ta.value) return;
         var seq = "";
         if (ev.key === "Enter") seq = "\r";
         else if (ev.key === "Backspace") seq = "\u007f";
@@ -2487,6 +2502,7 @@
         if (!seq) return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
+        if (seq !== "\u007f") resetMirror();
         flushTyped(seq);
       },
       true
@@ -2496,10 +2512,37 @@
       function (ev) {
         var ta = termTextarea();
         if (!ta || ev.target !== ta) return;
-        if (!ta.value) return;
-        flushTyped(ta.value);
+        ev.stopImmediatePropagation();
+        if (/[\r\n]/.test(ta.value)) {
+          var line = ta.value.replace(/\r\n?/g, "\n");
+          var cut = line.lastIndexOf("\n");
+          ta.value = line.slice(0, cut);
+          syncMirror(ta);
+          flushTyped("\r");
+          ta.value = line.slice(cut + 1);
+          mirrorSent = "";
+          syncMirror(ta);
+          return;
+        }
+        syncMirror(ta);
+        if (ta.value.length > 400 && !ev.isComposing) resetMirror();
       },
       true
+    );
+    // xterm reads the same textarea on its own (keydown 229, composition,
+    // keypress, input) and would send a second copy of every word.
+    ["compositionstart", "compositionupdate", "compositionend", "keypress", "keydown", "keyup"].forEach(
+      function (type) {
+        document.addEventListener(
+          type,
+          function (ev) {
+            if (!isTermTextarea(ev.target)) return;
+            if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+            ev.stopImmediatePropagation();
+          },
+          true
+        );
+      }
     );
   }
 
@@ -2537,63 +2580,84 @@
     var rec = dictation;
     if (!rec) return;
     dictation = null;
+    rec.__rcStopping = true;
     syncMicBtn();
     try {
       rec.stop();
     } catch (_) {}
   }
 
-  function startDictation() {
+  // Chrome on Android repeats every phrase as a growing "final" result when
+  // continuous is on ("Me", "Me gustaría", "Me gustaría saber"…). Listen one
+  // utterance at a time instead and reopen the mic while the button is on.
+  function listenOnce() {
     var Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      showToast("Este navegador no soporta dictado");
-      return;
-    }
     var rec = new Recognition();
     rec.lang = "es-ES";
-    rec.continuous = true;
+    rec.continuous = false;
     rec.interimResults = true;
-    dictationSent = false;
+    rec.maxAlternatives = 1;
+    var said = "";
+    var silent = false;
     rec.onresult = function (ev) {
       if (dictation !== rec) return;
-      var interim = "";
-      for (var i = ev.resultIndex; i < ev.results.length; i++) {
+      var text = "";
+      var final = false;
+      for (var i = 0; i < ev.results.length; i++) {
         var res = ev.results[i];
-        var said = String(res[0] && res[0].transcript ? res[0].transcript : "").trim();
-        if (!said) continue;
-        if (res.isFinal) {
-          sendPaste((dictationSent ? " " : "") + said);
-          dictationSent = true;
-        } else {
-          interim += (interim ? " " : "") + said;
-        }
+        text = String(res[0] && res[0].transcript ? res[0].transcript : "").trim() || text;
+        if (res.isFinal) final = true;
       }
-      showToast(interim || "Escuchando…");
+      if (final) said = text;
+      showToast(text || "Escuchando…");
     };
     rec.onerror = function (ev) {
       if (dictation !== rec) return;
       var code = ev && ev.error;
+      if (code === "no-speech" || code === "aborted") {
+        silent = true;
+        return;
+      }
+      stopDictation();
       if (code === "not-allowed" || code === "service-not-allowed") {
         showToast("Permiso de micrófono denegado");
-      } else if (code !== "no-speech" && code !== "aborted") {
+      } else {
         showToast("Error de dictado: " + code);
       }
     };
     rec.onend = function () {
-      if (dictation !== rec) return;
-      dictation = null;
-      syncMicBtn();
+      if (dictation !== rec && !rec.__rcStopping) return;
+      if (said) {
+        sendPaste((dictationSent ? " " : "") + said);
+        dictationSent = true;
+      }
+      if (rec.__rcStopping) return;
+      if (silent && !said) {
+        stopDictation();
+        showToast("Dictado detenido");
+        return;
+      }
+      listenOnce();
     };
     dictation = rec;
     syncMicBtn();
     try {
       rec.start();
-      showToast("Escuchando…");
     } catch (_) {
       dictation = null;
       syncMicBtn();
       showToast("No pude iniciar el dictado");
     }
+  }
+
+  function startDictation() {
+    if (!(window.SpeechRecognition || window.webkitSpeechRecognition)) {
+      showToast("Este navegador no soporta dictado");
+      return;
+    }
+    dictationSent = false;
+    listenOnce();
+    if (dictation) showToast("Escuchando…");
   }
 
   function toggleDictation() {
