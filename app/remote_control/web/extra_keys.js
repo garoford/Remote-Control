@@ -1585,24 +1585,9 @@
     return safeExt(base.slice(dot + 1));
   }
 
-  function preferredImageExt() {
-    if (preferredImageExt._ext) return Promise.resolve(preferredImageExt._ext);
-    return new Promise(function (resolve) {
-      var canvas = document.createElement("canvas");
-      canvas.width = 1;
-      canvas.height = 1;
-      try {
-        canvas.toBlob(function (blob) {
-          preferredImageExt._ext =
-            blob && blob.type === "image/webp" ? "webp" : "jpg";
-          resolve(preferredImageExt._ext);
-        }, "image/webp", PASTE_QUALITY);
-      } catch (_) {
-        preferredImageExt._ext = "jpg";
-        resolve("jpg");
-      }
-    });
-  }
+  // Formats a canvas can re-encode; anything else (gif, svg…) is kept as-is so
+  // it does not lose animation or vectors.
+  var CANVAS_MIME = { jpg: "image/jpeg", png: "image/png", webp: "image/webp" };
 
   function readJson(resp) {
     return resp.json().catch(function () {
@@ -1678,10 +1663,11 @@
           return;
         }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        var mime = ext === "jpg" ? "image/jpeg" : "image/webp";
+        var mime = CANVAS_MIME[ext];
         canvas.toBlob(
           function (out) {
-            resolve(out && out.size ? out : blob);
+            var ok = out && out.size && out.type === mime && out.size < blob.size;
+            resolve(ok ? out : blob);
           },
           mime,
           PASTE_QUALITY
@@ -1700,20 +1686,14 @@
     pasteBusy = true;
     pasteGuard = Date.now() + 800;
     showToast("Guardando…");
-    var extP = asImage
-      ? preferredImageExt()
-      : Promise.resolve(extFromName(blob.name) || extFromType(blob.type) || "bin");
-    return extP
-      .then(function (ext) {
-        var work = asImage ? compressImage(blob, ext) : Promise.resolve(blob);
-        var type = asImage
-          ? ext === "jpg"
-            ? "image/jpeg"
-            : "image/webp"
-          : blob.type || "application/octet-stream";
-        return work.then(function (out) {
-          return saveBlob(ext, out, type);
-        });
+    var ext = extFromName(blob.name) || extFromType(blob.type) || "bin";
+    if (ext === "bin") ext = extFromType(blob.type) || "bin";
+    var squeeze = asImage && CANVAS_MIME[ext];
+    var work = squeeze ? compressImage(blob, ext) : Promise.resolve(blob);
+    return work
+      .then(function (out) {
+        var type = out.type || blob.type || "application/octet-stream";
+        return saveBlob(ext, out, type);
       })
       .then(function (info) {
         sendPaste(shellQuote(info.path));
@@ -2570,7 +2550,7 @@
       return;
     }
     var rec = new Recognition();
-    rec.lang = navigator.language || "es-ES";
+    rec.lang = "es-ES";
     rec.continuous = true;
     rec.interimResults = true;
     dictationSent = false;
