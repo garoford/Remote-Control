@@ -4,9 +4,9 @@
   var NativeWS = window.WebSocket;
   var INPUT = 48;
   var encoder = new TextEncoder();
-  var mods = { ctrl: false, alt: false };
-  var locks = { ctrl: false, alt: false };
-  var lastTap = { ctrl: 0, alt: 0 };
+  var mods = { shift: false, ctrl: false, alt: false };
+  var locks = { shift: false, ctrl: false, alt: false };
+  var lastTap = { shift: 0, ctrl: 0, alt: 0 };
   var keepFocusUntil = 0;
   var writing = false;
   var writeBusy = false;
@@ -27,7 +27,7 @@
     [
       { id: "esc", label: "ESC", seq: "\u001b" },
       { id: "slash", label: "/", text: "/" },
-      { id: "dash", label: "-", text: "-" },
+      { id: "shift", label: "SHIFT", mod: "shift" },
       { id: "home", label: "HOME", seq: "\u001b[H", key: "Home" },
       { id: "up", label: "↑", seq: "\u001b[A", key: "ArrowUp" },
       { id: "end", label: "END", seq: "\u001b[F", key: "End" },
@@ -46,11 +46,7 @@
 
   var PASTE_ICON =
     '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-    '<path fill="currentColor" d="M15 3h-1.2A2.8 2.8 0 0 0 11 1H9a2.8 2.8 0 0 0-2.8 2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm-6 0h2a.8.8 0 0 1 0 1.6H9A.8.8 0 0 1 9 3Zm6 16H5V5h1.2A2.8 2.8 0 0 0 9 7h2a2.8 2.8 0 0 0 2.8-2H15v14Z"/>' +
-    "</svg>";
-  var COPY_ICON =
-    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-    '<path fill="currentColor" d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1Zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H10V7h9v14Z"/>' +
+    '<path fill="currentColor" d="M16.5 6.5v10a4.5 4.5 0 0 1-9 0V5a3 3 0 0 1 6 0v10.5a1.5 1.5 0 0 1-3 0V6.5H9v9a3 3 0 0 0 6 0V5a4.5 4.5 0 0 0-9 0v11.5a6 6 0 0 0 12 0v-10h-1.5Z"/>' +
     "</svg>";
   var IME_ICON =
     '<svg viewBox="0 0 24 24" aria-hidden="true">' +
@@ -1066,7 +1062,7 @@
       el &&
       el.closest &&
       el.closest(
-        ".is-paste, .is-copy, .is-ime, .is-mic, #rc-ek-paste, #rc-ek-copy, #rc-ek-ime, #rc-ek-mic, #rc-file-pick"
+        ".is-paste, .is-ime, .is-mic, #rc-ek-paste, #rc-ek-ime, #rc-ek-mic, #rc-file-pick"
       )
     );
   }
@@ -1831,7 +1827,7 @@
 
   function clearSticky() {
     var changed = false;
-    ["ctrl", "alt"].forEach(function (name) {
+    ["shift", "ctrl", "alt"].forEach(function (name) {
       if (mods[name] && !locks[name]) {
         mods[name] = false;
         changed = true;
@@ -1853,8 +1849,19 @@
     return out;
   }
 
+  function anyMod() {
+    return mods.shift || mods.ctrl || mods.alt;
+  }
+
   function applyMods(text) {
     var out = text;
+    if (mods.shift) {
+      // Shift+Tab is back-tab; Shift+Enter is the "new line, don't send" that
+      // AI CLIs read as ESC CR.
+      if (out === "\t") return (mods.alt ? "\u001b" : "") + "\u001b[Z";
+      if (out === "\r") return "\u001b\r";
+      out = out.toUpperCase();
+    }
     if (mods.ctrl) out = ctrlify(out);
     if (mods.alt) out = "\u001b" + out;
     return out;
@@ -1862,13 +1869,14 @@
 
   function modifierParam() {
     var n = 1;
+    if (mods.shift) n += 1;
     if (mods.alt) n += 2;
     if (mods.ctrl) n += 4;
     return n;
   }
 
   function specialWithMods(def) {
-    if (!mods.ctrl && !mods.alt) return def.seq || def.text || "";
+    if (!anyMod()) return def.seq || def.text || "";
     if (def.text) return applyMods(def.text);
     var letter = ARROW_LETTER[def.key];
     var n = modifierParam();
@@ -1876,6 +1884,7 @@
     if (def.id === "pgup") return "\u001b[5;" + n + "~";
     if (def.id === "pgdn") return "\u001b[6;" + n + "~";
     if (def.id === "tab" && mods.ctrl) return "";
+    if (def.id === "esc") return mods.alt ? "\u001b\u001b" : "\u001b";
     return applyMods(def.seq || "");
   }
 
@@ -1896,7 +1905,7 @@
 
   function renderMods() {
     if (!bar) return;
-    ["ctrl", "alt"].forEach(function (name) {
+    ["shift", "ctrl", "alt"].forEach(function (name) {
       var el = bar.querySelector('[data-rc-id="' + name + '"]');
       if (!el) return;
       el.classList.toggle("is-on", mods[name] && !locks[name]);
@@ -1913,7 +1922,7 @@
       toggleMod(def.mod);
       return;
     }
-    if ((def.id === "pgup" || def.id === "pgdn") && !mods.ctrl && !mods.alt) {
+    if ((def.id === "pgup" || def.id === "pgdn") && !anyMod()) {
       endSelect();
       scrollXtermPage(def.id === "pgup" ? -1 : 1);
       return;
@@ -2043,7 +2052,7 @@
     pasteBtn.type = "button";
     pasteBtn.id = "rc-ek-paste";
     pasteBtn.className = "is-paste";
-    pasteBtn.setAttribute("aria-label", "Pegar archivo");
+    pasteBtn.setAttribute("aria-label", "Adjuntar archivo");
     pasteBtn.innerHTML = PASTE_ICON;
     pasteBtn.addEventListener(
       "pointerdown",
@@ -2064,31 +2073,6 @@
       pasteBtn.classList.remove("is-down");
     });
     bar.appendChild(pasteBtn);
-    var copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.id = "rc-ek-copy";
-    copyBtn.className = "is-copy";
-    copyBtn.setAttribute("aria-label", "Copiar selección");
-    copyBtn.innerHTML = COPY_ICON;
-    copyBtn.addEventListener(
-      "pointerdown",
-      function (ev) {
-        ev.stopPropagation();
-        copyBtn.classList.add("is-down");
-        copySelection();
-      },
-      { passive: true }
-    );
-    copyBtn.addEventListener("pointerup", function () {
-      copyBtn.classList.remove("is-down");
-    });
-    copyBtn.addEventListener("pointercancel", function () {
-      copyBtn.classList.remove("is-down");
-    });
-    copyBtn.addEventListener("pointerleave", function () {
-      copyBtn.classList.remove("is-down");
-    });
-    bar.appendChild(copyBtn);
     var imeBtn = document.createElement("button");
     imeBtn.type = "button";
     imeBtn.id = "rc-ek-ime";
@@ -2201,7 +2185,7 @@
   }
 
   function interceptTyped(text) {
-    if ((!mods.ctrl && !mods.alt) || !text) return false;
+    if (!anyMod() || !text) return false;
     if (recentlySent()) return true;
     sendInput(applyMods(text));
     clearSticky();
@@ -2212,7 +2196,7 @@
     document.addEventListener(
       "keydown",
       function (ev) {
-        if (!mods.ctrl && !mods.alt) return;
+        if (!anyMod()) return;
         if (ev.isComposing) return;
         if (ev.key === "Control" || ev.key === "Alt" || ev.key === "Meta") return;
         if (ev.ctrlKey || ev.altKey) return;
@@ -2246,7 +2230,7 @@
     document.addEventListener(
       "beforeinput",
       function (ev) {
-        if (!mods.ctrl && !mods.alt) return;
+        if (!anyMod()) return;
         if (!ev.data) return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
