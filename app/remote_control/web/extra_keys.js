@@ -1375,7 +1375,7 @@
   function isTypeTarget(el) {
     if (!el) return true;
     if (el.id === "rc-file-pick") return false;
-    if (el.closest && el.closest("#rc-sessions, #rc-file-pick")) return false;
+    if (el.closest && el.closest("#rc-sessions, #rc-file-pick, #rc-ws-drawer")) return false;
     return true;
   }
 
@@ -3292,7 +3292,7 @@
     var host = document.getElementById("rc-session-tabs");
     if (!host) return;
     var current = tabId();
-    var items = orderedSessions(list, current);
+    var items = orderedSessions(inWorkspace(sessionCache), current);
     var counts = {};
     items.forEach(function (item) {
       var key = sessionKey(item);
@@ -3329,16 +3329,336 @@
   }
 
   function pullSessions() {
-    fetch("/rc-sessions", { cache: "no-store" })
+    fetch("/rc-workspaces", { cache: "no-store" })
       .then(function (resp) {
         return resp.ok ? resp.json() : null;
       })
-      .then(function (payload) {
-        var list = payload && payload.sessions;
-        if (!Array.isArray(list)) return;
-        paintSessions(list);
-      })
+      .then(takeWorkspaces)
       .catch(function () {});
+  }
+
+  // --- workspaces -----------------------------------------------------------
+  // The server keeps them (the tunnel URL changes on every start). A browser
+  // shows the workspace that holds its current tab.
+
+  var wsState = null;
+  var wsPinned = "";
+
+  function takeWorkspaces(payload) {
+    if (!payload || !Array.isArray(payload.workspaces)) return payload;
+    wsState = payload;
+    if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
+    renderDrawer();
+    return payload;
+  }
+
+  function findWs(id) {
+    if (!wsState || !id) return null;
+    for (var i = 0; i < wsState.workspaces.length; i++) {
+      if (wsState.workspaces[i].id === id) return wsState.workspaces[i];
+    }
+    return null;
+  }
+
+  function wsOfTab(tab) {
+    if (!wsState || !tab) return null;
+    for (var i = 0; i < wsState.workspaces.length; i++) {
+      if (wsState.workspaces[i].tabs.indexOf(tab) !== -1) return wsState.workspaces[i];
+    }
+    return null;
+  }
+
+  function currentWs() {
+    if (!wsState) return null;
+    return wsOfTab(tabId()) || findWs(wsPinned) || findWs(wsState.active) || wsState.workspaces[0] || null;
+  }
+
+  function inWorkspace(list) {
+    var ws = currentWs();
+    if (!ws) return list;
+    var mine = {};
+    ws.tabs.forEach(function (id) {
+      mine[id] = true;
+    });
+    return (list || []).filter(function (item) {
+      return mine[item.id] || item.id === tabId();
+    });
+  }
+
+  function wsPost(op) {
+    return fetch("/rc-workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(op),
+      cache: "no-store",
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(takeWorkspaces)
+      .catch(function () {
+        return null;
+      });
+  }
+
+  // Every tab opened from here lands in the workspace it was opened from.
+  function hookTabOpen() {
+    var open = window.__rcOpenSession;
+    if (typeof open !== "function" || open.__rcWs) return;
+    var wrapped = function (id) {
+      var home = wsOfTab(id) || findWs(wsPinned) || currentWs();
+      if (home) wsPinned = home.id;
+      open(id);
+      wsPost({ op: "open", tab: id, id: home ? home.id : "" });
+    };
+    wrapped.__rcWs = true;
+    window.__rcOpenSession = wrapped;
+  }
+
+  function enterWorkspace(ws) {
+    if (!ws) return;
+    wsPinned = ws.id;
+    closeDrawer();
+    var live = {};
+    sessionCache.forEach(function (item) {
+      live[item.id] = true;
+    });
+    var target = live[ws.lastTab] ? ws.lastTab : "";
+    if (!target) {
+      for (var i = ws.tabs.length - 1; i >= 0 && !target; i--) {
+        if (live[ws.tabs[i]]) target = ws.tabs[i];
+      }
+    }
+    wsPost({ op: "activate", id: ws.id });
+    if (target && target === tabId()) {
+      paintSessions(sessionCache);
+      return;
+    }
+    if (target) openSession(target);
+    else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+  }
+
+  function deleteWorkspace(ws) {
+    if (!ws || !wsState) return;
+    var leaving = currentWs() === ws;
+    if (leaving) {
+      var other = null;
+      wsState.workspaces.forEach(function (item) {
+        if (!other && item !== ws) other = item;
+      });
+      if (other) enterWorkspace(other);
+      else {
+        // Last workspace: start a clean one first so there is somewhere to go.
+        wsPost({ op: "create", name: "General" }).then(function (payload) {
+          if (payload && payload.id) enterWorkspace(findWs(payload.id));
+          dropWorkspace(ws);
+        });
+        return;
+      }
+    }
+    dropWorkspace(ws);
+  }
+
+  function dropWorkspace(ws) {
+    // Close the panes first so their reconnect does not revive the sessions.
+    ws.tabs.forEach(function (id) {
+      if (id !== tabId()) disposePane(id);
+    });
+    wsPost({ op: "delete", id: ws.id });
+  }
+
+  var drawerEdit = "";
+  var drawerConfirm = "";
+
+  function openDrawer() {
+    if (document.documentElement.classList.contains("rc-touch")) lockIme();
+    hideCopyChip();
+    document.documentElement.classList.add("rc-ws-open");
+    drawerEdit = "";
+    drawerConfirm = "";
+    renderDrawer();
+    pullSessions();
+  }
+
+  function closeDrawer() {
+    document.documentElement.classList.remove("rc-ws-open");
+    drawerEdit = "";
+    drawerConfirm = "";
+  }
+
+  function liveCount(ws) {
+    var live = {};
+    sessionCache.forEach(function (item) {
+      live[item.id] = true;
+    });
+    return ws.tabs.filter(function (id) {
+      return live[id];
+    }).length;
+  }
+
+  function wsButton(label, cls, title, fn) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = label;
+    if (title) b.setAttribute("aria-label", title);
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      fn();
+    });
+    return b;
+  }
+
+  function renderDrawer() {
+    var list = document.getElementById("rc-ws-list");
+    if (!list || !wsState) return;
+    var focusName = document.activeElement && document.activeElement.id === "rc-ws-rename";
+    if (focusName) return;
+    var cur = currentWs();
+    list.innerHTML = "";
+    wsState.workspaces.forEach(function (ws) {
+      var row = document.createElement("div");
+      row.className = "rc-ws-item" + (ws === cur ? " is-current" : "");
+      if (drawerEdit === ws.id) {
+        var input = document.createElement("input");
+        input.id = "rc-ws-rename";
+        input.type = "text";
+        input.maxLength = 40;
+        input.value = ws.name;
+        input.addEventListener("keydown", function (ev) {
+          ev.stopPropagation();
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            var name = input.value.trim();
+            drawerEdit = "";
+            input.blur();
+            if (name && name !== ws.name) wsPost({ op: "rename", id: ws.id, name: name });
+            else renderDrawer();
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            drawerEdit = "";
+            input.blur();
+            renderDrawer();
+          }
+        });
+        input.addEventListener("blur", function () {
+          if (drawerEdit !== ws.id) return;
+          var name = input.value.trim();
+          drawerEdit = "";
+          if (name && name !== ws.name) wsPost({ op: "rename", id: ws.id, name: name });
+          else setTimeout(renderDrawer, 0);
+        });
+        row.appendChild(input);
+        list.appendChild(row);
+        setTimeout(function () {
+          try {
+            input.focus();
+            input.select();
+          } catch (_) {}
+        }, 0);
+        return;
+      }
+      if (drawerConfirm === ws.id) {
+        var n = liveCount(ws);
+        var ask = document.createElement("span");
+        ask.className = "rc-ws-ask";
+        ask.textContent =
+          "¿Estás seguro? " +
+          (n ? "Se cerrará" + (n === 1 ? " 1 pestaña." : "n " + n + " pestañas.") : "Se borrará el workspace.");
+        row.appendChild(ask);
+        row.appendChild(
+          wsButton("Sí", "rc-ws-yes", "Confirmar", function () {
+            drawerConfirm = "";
+            deleteWorkspace(ws);
+          })
+        );
+        row.appendChild(
+          wsButton("No", "rc-ws-no", "Cancelar", function () {
+            drawerConfirm = "";
+            renderDrawer();
+          })
+        );
+        list.appendChild(row);
+        return;
+      }
+      var main = document.createElement("button");
+      main.type = "button";
+      main.className = "rc-ws-main";
+      var name = document.createElement("span");
+      name.className = "rc-ws-name";
+      name.textContent = ws.name;
+      var count = document.createElement("span");
+      count.className = "rc-ws-count";
+      count.textContent = String(liveCount(ws));
+      main.appendChild(name);
+      main.appendChild(count);
+      main.addEventListener("click", function () {
+        enterWorkspace(ws);
+      });
+      row.appendChild(main);
+      row.appendChild(
+        wsButton("✎", "rc-ws-act", "Renombrar " + ws.name, function () {
+          drawerEdit = ws.id;
+          drawerConfirm = "";
+          renderDrawer();
+        })
+      );
+      row.appendChild(
+        wsButton("🗑", "rc-ws-act", "Borrar " + ws.name, function () {
+          drawerConfirm = ws.id;
+          drawerEdit = "";
+          renderDrawer();
+        })
+      );
+      list.appendChild(row);
+    });
+  }
+
+  function bootWorkspaces(bar) {
+    var menu = document.createElement("button");
+    menu.id = "rc-ws-menu";
+    menu.type = "button";
+    menu.setAttribute("aria-label", "Workspaces");
+    menu.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    menu.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      if (document.documentElement.classList.contains("rc-ws-open")) closeDrawer();
+      else openDrawer();
+    });
+    bar.insertBefore(menu, bar.firstChild);
+
+    var backdrop = document.createElement("div");
+    backdrop.id = "rc-ws-backdrop";
+    backdrop.addEventListener("click", closeDrawer);
+    var drawer = document.createElement("aside");
+    drawer.id = "rc-ws-drawer";
+    drawer.setAttribute("aria-label", "Workspaces");
+    var title = document.createElement("div");
+    title.className = "rc-ws-title";
+    title.textContent = "Workspaces";
+    var list = document.createElement("div");
+    list.id = "rc-ws-list";
+    var add = wsButton("+ Nuevo workspace", "rc-ws-add", "", function () {
+      var n = wsState ? wsState.workspaces.length + 1 : 1;
+      wsPost({ op: "create", name: "Workspace " + n }).then(function (payload) {
+        var ws = payload && findWs(payload.id);
+        if (!ws) return;
+        enterWorkspace(ws);
+      });
+    });
+    drawer.appendChild(title);
+    drawer.appendChild(list);
+    drawer.appendChild(add);
+    var root = document.body || document.documentElement;
+    root.appendChild(backdrop);
+    root.appendChild(drawer);
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && document.documentElement.classList.contains("rc-ws-open")) closeDrawer();
+    });
+    hookTabOpen();
+    wsPost({ op: "open", tab: tabId() });
   }
 
   function bootSessions() {
@@ -3358,6 +3678,7 @@
     host.appendChild(tabs);
     host.appendChild(fresh);
     (document.body || document.documentElement).appendChild(host);
+    bootWorkspaces(host);
     fresh.addEventListener("click", function (ev) {
       ev.preventDefault();
       if (typeof window.__rcNewSession === "function") window.__rcNewSession();
