@@ -57,6 +57,11 @@
     '<path fill="currentColor" d="M20 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 12H4V7h16v10ZM5 9h2v2H5V9Zm3 0h2v2H8V9Zm3 0h2v2h-2V9Zm3 0h2v2h-2V9Zm3 0h3v2h-3V9ZM5 12h2v2H5v-2Zm3 0h2v2H8v-2Zm3 0h2v2h-2v-2Zm3 0h6v2h-6v-2ZM7 15h10v2H7v-2Z"/>' +
     "</svg>";
 
+  var MIC_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm-1-9a1 1 0 0 1 2 0v6a1 1 0 0 1-2 0V5Zm6 6a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/>' +
+    "</svg>";
+
   var PASTE_CHUNK = 2048;
   var PASTE_EDGE = 1920;
   var PASTE_QUALITY = 0.82;
@@ -822,6 +827,73 @@
     };
   };
 
+  // ttyd gives up after a socket "error" and waits for an Enter that our key
+  // interceptors swallow, so only F5 brought the tab back. Retry on our own
+  // with backoff, and only fall back to "Press Enter" after a run of misses.
+  var RETRY_MS = [300, 1000, 2000, 3000, 5000, 5000, 8000, 8000, 10000, 10000];
+  var primaryRetry = { tries: 0, timer: 0, fire: null, parked: false };
+
+  function deliverPrimaryClose(code) {
+    var fire = primaryRetry.fire;
+    if (!fire) return;
+    if (primaryRetry.timer) clearTimeout(primaryRetry.timer);
+    primaryRetry.timer = 0;
+    primaryRetry.fire = null;
+    primaryRetry.parked = code === 1000;
+    fire(code);
+  }
+
+  function schedulePrimaryRetry(fire) {
+    primaryRetry.fire = fire;
+    if (primaryRetry.timer) clearTimeout(primaryRetry.timer);
+    var at = primaryRetry.tries++;
+    if (at >= RETRY_MS.length) {
+      // Out of tries: let ttyd show its prompt, but keep the handler so a tap,
+      // Enter, or the network coming back can still restart it.
+      var parked = fire;
+      deliverPrimaryClose(1000);
+      primaryRetry.fire = parked;
+      return;
+    }
+    primaryRetry.timer = setTimeout(function () {
+      deliverPrimaryClose(1006);
+    }, RETRY_MS[at]);
+  }
+
+  function resumePrimary() {
+    if (!primaryRetry.fire) return false;
+    primaryRetry.tries = 0;
+    deliverPrimaryClose(1006);
+    return true;
+  }
+
+  function bootPrimaryRetry() {
+    window.addEventListener("online", resumePrimary);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) resumePrimary();
+    });
+    window.addEventListener("pageshow", resumePrimary);
+    document.addEventListener(
+      "keydown",
+      function (ev) {
+        if (!primaryRetry.parked || ev.key !== "Enter") return;
+        if (!resumePrimary()) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+      },
+      true
+    );
+    document.addEventListener(
+      "pointerdown",
+      function (ev) {
+        if (!primaryRetry.parked) return;
+        if (ev.target && ev.target.closest && ev.target.closest("#rc-extra-keys, #rc-sessions")) return;
+        resumePrimary();
+      },
+      true
+    );
+  }
+
   function wrapWebSocket() {
     if (!NativeWS || NativeWS.__rcWrapped) return;
     function RCWebSocket(url, protocols) {
@@ -891,7 +963,12 @@
           msgListeners.push(fn);
           return;
         }
-        if (type === "close" && typeof fn === "function") closeFns.push(fn);
+        if (type === "close" && typeof fn === "function") {
+          closeFns.push(fn);
+          if (!pane) return;
+        }
+        // ttyd turns reconnect off on any error; the retry above owns that call.
+        if (type === "error" && !pane) return;
         return origAdd(type, fn, opts);
       };
       ws.removeEventListener = function (type, fn, opts) {
@@ -926,11 +1003,25 @@
       });
       origAdd("open", function () {
         setTimeout(flush, 0);
-        if (!pane) window.dispatchEvent(new CustomEvent("rc-ws-open"));
+        if (pane) return;
+        primaryRetry.tries = 0;
+        primaryRetry.parked = false;
+        window.dispatchEvent(new CustomEvent("rc-ws-open"));
       });
-      origAdd("close", function () {
+      origAdd("close", function (ev) {
         if (ws.__rcIntentional || pane) return;
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
+        var fns = closeFns.slice();
+        if (!fns.length) return;
+        schedulePrimaryRetry(function (code) {
+          if (ws.__rcIntentional) return;
+          var fake = { code: code, reason: (ev && ev.reason) || "", wasClean: code === 1000, type: "close" };
+          fns.forEach(function (fn) {
+            try {
+              fn.call(ws, fake);
+            } catch (_) {}
+          });
+        });
       });
       if (!pane) holdStartupSize(ws);
       return ws;
@@ -974,7 +1065,7 @@
       el &&
       el.closest &&
       el.closest(
-        ".is-paste, .is-copy, .is-ime, #rc-ek-paste, #rc-ek-copy, #rc-ek-ime, #rc-file-pick"
+        ".is-paste, .is-copy, .is-ime, .is-mic, #rc-ek-paste, #rc-ek-copy, #rc-ek-ime, #rc-ek-mic, #rc-file-pick"
       )
     );
   }
@@ -1402,19 +1493,33 @@
   function sendPaste(text) {
     var out = normalizePaste(text);
     if (!out) return false;
+    holdImeForPaste();
     var i = 0;
     function step() {
       if (i >= out.length) {
+        holdImeForPaste();
         focusTerm();
         return;
       }
       sendInput(out.slice(i, i + PASTE_CHUNK));
       i += PASTE_CHUNK;
       if (i < out.length) setTimeout(step, 16);
-      else focusTerm();
+      else {
+        holdImeForPaste();
+        focusTerm();
+      }
     }
-    step();
+    beginWriting().then(step);
     return true;
+  }
+
+  // The redraw after a paste can scroll the viewport for a moment, which would
+  // otherwise trip lockIme() and close the keyboard mid-sentence.
+  function holdImeForPaste() {
+    if (!imeOpen) return;
+    var until = Date.now() + 1500;
+    imeGuard = Math.max(imeGuard, until);
+    keepFocusUntil = Math.max(keepFocusUntil, until);
   }
 
   function showToast(text) {
@@ -2035,6 +2140,40 @@
       imeBtn.classList.remove("is-down");
     });
     bar.appendChild(imeBtn);
+    var micBtn = document.createElement("button");
+    micBtn.type = "button";
+    micBtn.id = "rc-ek-mic";
+    micBtn.className = "is-mic";
+    micBtn.setAttribute("aria-label", "Dictar");
+    micBtn.innerHTML = MIC_ICON;
+    micBtn.addEventListener(
+      "pointerdown",
+      function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        micBtn.classList.add("is-down");
+        toggleDictation();
+      },
+      { passive: false }
+    );
+    micBtn.addEventListener(
+      "click",
+      function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      },
+      { passive: false }
+    );
+    micBtn.addEventListener("pointerup", function () {
+      micBtn.classList.remove("is-down");
+    });
+    micBtn.addEventListener("pointercancel", function () {
+      micBtn.classList.remove("is-down");
+    });
+    micBtn.addEventListener("pointerleave", function () {
+      micBtn.classList.remove("is-down");
+    });
+    bar.appendChild(micBtn);
     syncImeBtn();
     bindKeepFocus(bar);
     document.body.appendChild(bar);
@@ -2144,7 +2283,34 @@
     var active = false;
     var holdTimer = 0;
     var selFrom = null;
+    var wheel = false;
+    var wheelY = 0;
     var HOLD_MS = 450;
+
+    // Fullscreen TUIs (Claude Code, Codex…) keep their history inside the app,
+    // so dragging xterm's viewport never reaches it. When the app asked for the
+    // mouse, turn the drag into wheel events like a desktop scroll would.
+    function appWantsWheel() {
+      var term = xterm();
+      var mode = term && term.modes && term.modes.mouseTrackingMode;
+      return !!mode && mode !== "none";
+    }
+
+    function cellHeight() {
+      var term = xterm();
+      var el = term && term.element && term.element.querySelector(".xterm-screen");
+      var h = el && el.getBoundingClientRect ? el.getBoundingClientRect().height : 0;
+      return term && term.rows && h > 0 ? h / term.rows : 18;
+    }
+
+    function sendWheel(up, steps, x, y) {
+      var cell = cellAt(x, y) || { col: 0, row: 0 };
+      var esc = String.fromCharCode(27);
+      var one = esc + "[<" + (up ? 64 : 65) + ";" + (cell.col + 1) + ";" + (cell.row + 1) + "M";
+      var out = "";
+      for (var i = 0; i < steps; i++) out += one;
+      sendInput(out);
+    }
 
     function fromKeys(ev) {
       var t = ev.target;
@@ -2177,6 +2343,8 @@
       scrolling = false;
       selecting = false;
       selFrom = null;
+      wheel = appWantsWheel();
+      wheelY = t.clientY;
       active = true;
       if (selectMode) {
         ev.preventDefault();
@@ -2213,11 +2381,18 @@
         if (selFrom && to) applyCellSelect(selFrom, to);
         return;
       }
-      if (Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) return;
+      if (wheel) ev.preventDefault();
+      if (!scrolling && Math.abs(y - startY) < 8 && Math.abs(x - startX) < 8) return;
       clearHold();
       scrolling = true;
       writing = false;
       if (imeOpen && !imeGuarded()) lockIme();
+      if (!wheel) return;
+      var step = cellHeight();
+      var steps = Math.trunc((y - wheelY) / step);
+      if (!steps) return;
+      wheelY += steps * step;
+      sendWheel(steps > 0, Math.min(Math.abs(steps), 20), x, y);
     }
 
     function onEnd() {
@@ -2235,6 +2410,7 @@
       scrolling = false;
       selecting = false;
       selFrom = null;
+      wheel = false;
     }
 
     function bind(el) {
@@ -2367,6 +2543,82 @@
     });
     document.body.appendChild(input);
     return input;
+  }
+
+  var dictation = null;
+  var dictationSent = false;
+
+  function syncMicBtn() {
+    var btn = document.getElementById("rc-ek-mic");
+    if (btn) btn.classList.toggle("is-on", !!dictation);
+  }
+
+  function stopDictation() {
+    var rec = dictation;
+    if (!rec) return;
+    dictation = null;
+    syncMicBtn();
+    try {
+      rec.stop();
+    } catch (_) {}
+  }
+
+  function startDictation() {
+    var Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      showToast("Este navegador no soporta dictado");
+      return;
+    }
+    var rec = new Recognition();
+    rec.lang = navigator.language || "es-ES";
+    rec.continuous = true;
+    rec.interimResults = true;
+    dictationSent = false;
+    rec.onresult = function (ev) {
+      if (dictation !== rec) return;
+      var interim = "";
+      for (var i = ev.resultIndex; i < ev.results.length; i++) {
+        var res = ev.results[i];
+        var said = String(res[0] && res[0].transcript ? res[0].transcript : "").trim();
+        if (!said) continue;
+        if (res.isFinal) {
+          sendPaste((dictationSent ? " " : "") + said);
+          dictationSent = true;
+        } else {
+          interim += (interim ? " " : "") + said;
+        }
+      }
+      showToast(interim || "Escuchando…");
+    };
+    rec.onerror = function (ev) {
+      if (dictation !== rec) return;
+      var code = ev && ev.error;
+      if (code === "not-allowed" || code === "service-not-allowed") {
+        showToast("Permiso de micrófono denegado");
+      } else if (code !== "no-speech" && code !== "aborted") {
+        showToast("Error de dictado: " + code);
+      }
+    };
+    rec.onend = function () {
+      if (dictation !== rec) return;
+      dictation = null;
+      syncMicBtn();
+    };
+    dictation = rec;
+    syncMicBtn();
+    try {
+      rec.start();
+      showToast("Escuchando…");
+    } catch (_) {
+      dictation = null;
+      syncMicBtn();
+      showToast("No pude iniciar el dictado");
+    }
+  }
+
+  function toggleDictation() {
+    if (dictation) stopDictation();
+    else startDictation();
   }
 
   function openFilePicker() {
@@ -2779,6 +3031,7 @@
 
   if (window.__rcRedirecting) return;
   wrapWebSocket();
+  bootPrimaryRetry();
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
   } else {

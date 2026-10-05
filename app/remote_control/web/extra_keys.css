@@ -450,6 +450,52 @@ html.rc-touch #rc-extra-keys {
   color: #011627;
 }
 
+#rc-ek-mic {
+  position: absolute;
+  top: auto;
+  bottom: 100%;
+  left: 58px;
+  margin-bottom: 6px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(247, 140, 108, 0.4);
+  border-radius: 12px;
+  background: #0b2942;
+  color: #f78c6c;
+  box-shadow: 0 2px 8px rgba(1, 22, 39, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+#rc-ek-mic svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+#rc-ek-mic:active,
+#rc-ek-mic.is-down {
+  background: #1d3b53;
+}
+
+#rc-ek-mic.is-on {
+  background: #f78c6c;
+  border-color: #f78c6c;
+  color: #011627;
+  animation: rc-mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rc-mic-pulse {
+  50% {
+    box-shadow: 0 0 0 6px rgba(247, 140, 108, 0.25);
+  }
+}
+
 #rc-file-pick {
   display: none;
 }
