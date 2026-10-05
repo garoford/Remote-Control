@@ -135,7 +135,63 @@
     window.__rcOpenSession(makeTabId());
   };
 
+  function knownTabId() {
+    var id = "";
+    try {
+      id = sessionStorage.getItem(SS_KEY) || "";
+    } catch (_) {}
+    if (TAB_RE.test(id)) return id;
+    var fromUrl = currentArg();
+    return TAB_RE.test(fromUrl) ? fromUrl : "";
+  }
+
+  function goToTab(id) {
+    try {
+      sessionStorage.setItem(SS_KEY, id);
+    } catch (_) {}
+    location.replace(urlForTab(id));
+  }
+
+  // A browser with no tab yet (new device, or a new tunnel URL) lands on the
+  // last tab of the active workspace instead of opening a fresh one.
+  function landOnWorkspace() {
+    window.__rcRedirecting = true;
+    // Hold ttyd's socket so it does not start a throwaway tmux session.
+    var Stub = function () {
+      this.readyState = 0;
+    };
+    Stub.prototype.send = Stub.prototype.close = function () {};
+    Stub.prototype.addEventListener = Stub.prototype.removeEventListener = function () {};
+    Stub.CONNECTING = 0;
+    Stub.OPEN = 1;
+    Stub.CLOSING = 2;
+    Stub.CLOSED = 3;
+    window.WebSocket = Stub;
+    fetch("/rc-workspaces", { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        var live = {};
+        ((payload && payload.sessions) || []).forEach(function (item) {
+          if (item && item.id) live[item.id] = true;
+        });
+        var target = "";
+        ((payload && payload.workspaces) || []).forEach(function (ws) {
+          if (ws.id === payload.active && live[ws.lastTab]) target = ws.lastTab;
+        });
+        goToTab(TAB_RE.test(target) ? target : makeTabId());
+      })
+      .catch(function () {
+        goToTab(makeTabId());
+      });
+  }
+
   function ensureTabArg() {
+    if (!knownTabId()) {
+      landOnWorkspace();
+      return false;
+    }
     var id = getTabId();
     document.documentElement.dataset.rcTab = id;
     if (currentArg() === id) {

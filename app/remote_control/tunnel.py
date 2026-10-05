@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from remote_control import __version__
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
+from remote_control.workspaces import restore as restore_workspaces
 
 URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 REGISTERED_RE = re.compile(r"Registered tunnel connection")
@@ -252,6 +253,15 @@ class TunnelService:
         self.ttyd_port = self._pick_internal_port()
         self.ttyd_port_file.write_text(str(self.ttyd_port), encoding="utf-8")
         self._prepare_tab_session()
+        try:
+            restore_workspaces(
+                "cf-remote",
+                self.run_dir / "tmux.tab.conf",
+                self._resolve_user_shell(),
+                env=self._session_env(),
+            )
+        except Exception:
+            pass
         self._prepare_rc_assets()
         self._prepare_ttyd_index()
         self._start_ttyd()
@@ -264,7 +274,7 @@ class TunnelService:
         self.url_file.chmod(0o600)
         return url
 
-    def stop(self, silent: bool = False) -> None:
+    def stop(self, silent: bool = False, close_sessions: bool = False) -> None:
         self._kill_pidfile(self.proxy_pid_file)
         self._kill_pidfile(self.ttyd_pid_file)
         self._kill_pidfile(self.cf_pid_file)
@@ -272,12 +282,15 @@ class TunnelService:
         self._pkill("ttyd --interface 127.0.0.1 --port")
         self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
         self.ttyd_port_file.unlink(missing_ok=True)
-        subprocess.run(
-            ["tmux", "-L", "cf-remote", "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        # Tabs keep running when only the web access goes down; workspaces.py
+        # brings them back after a PC restart.
+        if close_sessions:
+            subprocess.run(
+                ["tmux", "-L", "cf-remote", "kill-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
         for path in (
             self.ttyd_pid_file,
             self.cf_pid_file,
@@ -288,7 +301,8 @@ class TunnelService:
         if not silent:
             self.log_file.unlink(missing_ok=True)
 
-    def _start_ttyd(self) -> None:
+    def _session_env(self) -> dict[str, str]:
+        """Environment tab shells get, whether ttyd or a restore starts tmux."""
         user_shell = self._resolve_user_shell()
         lang = os.environ.get("LANG", "en_US.UTF-8")
         env = {
@@ -309,6 +323,10 @@ class TunnelService:
         ssh_sock = os.environ.get("SSH_AUTH_SOCK")
         if ssh_sock and Path(ssh_sock).is_socket():
             env["SSH_AUTH_SOCK"] = ssh_sock
+        return env
+
+    def _start_ttyd(self) -> None:
+        env = self._session_env()
 
         cmd = [
             "ttyd",

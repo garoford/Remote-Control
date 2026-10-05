@@ -27,6 +27,7 @@ from remote_control.history import (
     scrollback_state,
 )
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
+from remote_control.workspaces import change_workspaces, snapshot, workspaces_payload
 from remote_control.mobile import (
     load_manifest,
     manifest_for_client,
@@ -249,7 +250,17 @@ class Sidecar:
         except OSError:
             pass
 
+    def _snapshot_loop(self) -> None:
+        # Folder, screen and conversation id of every tab, so a PC restart can
+        # bring the workspaces back.
+        while not self._stop.wait(10):
+            try:
+                snapshot(socket=self.tmux_socket)
+            except Exception:
+                pass
+
     def serve_forever(self) -> None:
+        threading.Thread(target=self._snapshot_loop, daemon=True).start()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.listen_host, self.listen_port))
@@ -315,6 +326,9 @@ class Sidecar:
                 return
             if method == "GET" and path.rstrip("/").endswith("/rc-sessions"):
                 self._serve_sessions(conn)
+                return
+            if path.rstrip("/").endswith("/rc-workspaces") and method in ("GET", "POST"):
+                self._serve_workspaces(conn, method, body)
                 return
             if method == "POST" and path.rstrip("/").endswith("/rc-session-close"):
                 self._serve_session_close(conn, parse_qs(parsed_url.query))
@@ -445,9 +459,29 @@ class Sidecar:
             )
         )
 
+    def _serve_workspaces(self, conn: socket.socket, method: str, body: bytes) -> None:
+        if method == "GET":
+            payload = workspaces_payload(socket=self.tmux_socket)
+        else:
+            try:
+                op = json.loads(body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, ValueError):
+                op = {}
+            payload = change_workspaces(op if isinstance(op, dict) else {}, socket=self.tmux_socket)
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+                _API_EXTRA,
+            )
+        )
+
     def _serve_session_close(self, conn: socket.socket, query: dict[str, list[str]]) -> None:
         tab = (query.get("tab") or [""])[0]
         ok = close_session(tab, socket=self.tmux_socket)
+        if ok:
+            change_workspaces({"op": "forget", "tab": tab}, socket=self.tmux_socket)
         body = json.dumps({"ok": ok}).encode("utf-8")
         conn.sendall(
             _http_response(
