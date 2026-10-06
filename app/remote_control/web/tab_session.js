@@ -1,6 +1,15 @@
 (function () {
   "use strict";
 
+  // Paint the chosen theme before anything renders (extra_keys.js owns it).
+  try {
+    var pref = localStorage.getItem("rc-theme") || "system";
+    var light =
+      pref === "light" ||
+      (pref !== "dark" && window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
+    document.documentElement.dataset.rcTheme = light ? "light" : "dark";
+  } catch (_) {}
+
   // tmux keeps the shell. Switching tabs navigates, and ttyd's beforeunload
   // would pop "Leave site?" even though nothing is lost.
   var addListener = window.addEventListener.bind(window);

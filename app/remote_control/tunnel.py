@@ -750,7 +750,7 @@ class TunnelService:
             f"{preloads}"
             '<style id="cf-remote-theme">'
             f"{faces}"
-            "html,body{background:#011627;margin:0;height:100%;}"
+            "html,body{background:var(--rc-bg,#011627);margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
             f".xterm-helper-textarea{{font-family:{stack}!important;"
             "font-feature-settings:'liga' 1,'calt' 1;}</style>"

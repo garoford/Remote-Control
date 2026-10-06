@@ -2,7 +2,7 @@
 
 State lives on disk (the tunnel URL changes on every start, so the browser
 cannot keep it). A snapshot records each tab's folder, screen text and, for
-Claude Code / Cursor Agent, the conversation id so a restore reopens that
+Claude Code / Cursor Agent / Antigravity, the conversation id so a restore reopens that
 exact conversation in that tab.
 """
 
@@ -24,6 +24,7 @@ from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, list_sessions
 WS_RE = re.compile(r"^w[a-f0-9]{8}$")
 RESUME_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 NAME_MAX = 40
+THEMES = ("system", "light", "dark")
 SCREEN_LINES = 3000
 
 _lock = threading.RLock()
@@ -47,7 +48,7 @@ def _new_ws_id() -> str:
 
 
 def _empty_state() -> dict:
-    return {"version": 1, "active": "", "workspaces": [], "tabs": {}}
+    return {"version": 1, "active": "", "theme": "system", "workspaces": [], "tabs": {}}
 
 
 def load_state(base: Path | None = None) -> dict:
@@ -75,6 +76,8 @@ def load_state(base: Path | None = None) -> dict:
     tabs = data.get("tabs")
     if isinstance(tabs, dict):
         state["tabs"] = {k: v for k, v in tabs.items() if TAB_RE.match(k) and isinstance(v, dict)}
+    if data.get("theme") in THEMES:
+        state["theme"] = data["theme"]
     active = data.get("active")
     if any(ws["id"] == active for ws in state["workspaces"]):
         state["active"] = active
@@ -143,6 +146,11 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
     """One change from the sidebar. Returns {"ok": bool, ...}."""
     kind = str(op.get("op") or "")
     _ensure_one(state)
+    if kind == "theme":
+        if op.get("theme") not in THEMES:
+            return {"ok": False}
+        state["theme"] = op["theme"]
+        return {"ok": True}
     if kind == "create":
         name = _clean_name(op.get("name")) or f"Workspace {len(state['workspaces']) + 1}"
         ws = {"id": _new_ws_id(), "name": name, "tabs": [], "lastTab": "", "created": int(time.time())}
@@ -199,6 +207,7 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
 def public_view(state: dict, sessions: list[dict]) -> dict:
     return {
         "active": state["active"],
+        "theme": state.get("theme", "system"),
         "workspaces": [
             {"id": ws["id"], "name": ws["name"], "tabs": list(ws["tabs"]), "lastTab": ws["lastTab"]}
             for ws in state["workspaces"]
@@ -272,11 +281,37 @@ def _cursor_chat(pid: int, home: Path) -> str:
     return ""
 
 
+AGY_CONV_RE = re.compile(r"(?:Created|Streaming) conversation ([0-9a-f-]{36})")
+
+
+def _agy_conversation(pid: int, home: Path) -> str:
+    """Antigravity CLI logs the conversation it works on to its stdout file."""
+    root = home / ".gemini" / "antigravity-cli"
+    try:
+        log = os.readlink(f"/proc/{pid}/fd/1")
+    except OSError:
+        return ""
+    if not log.startswith(str(root / "log") + "/"):
+        return ""
+    try:
+        with open(log, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 512 * 1024))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    found = AGY_CONV_RE.findall(tail)
+    if found and (root / "conversations" / f"{found[-1]}.db").is_file():
+        return found[-1]
+    return ""
+
+
 def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
-    """("claude"|"agent", conversation id) for the CLI under a pane's shell."""
+    """("claude"|"agent"|"agy", conversation id or "") for the CLI under a pane's shell."""
     home = home or Path.home()
     queue = list(_children(pane_pid))
     seen = 0
+    fallback = ""
     while queue and seen < 32:
         pid = queue.pop(0)
         seen += 1
@@ -284,18 +319,21 @@ def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
         if sid:
             return "claude", sid
         argv = _cmdline(pid)
-        joined = " ".join(argv)
-        if "cursor-agent" in joined or (argv and os.path.basename(argv[0]) == "agent"):
+        name = os.path.basename(argv[0]) if argv else ""
+        if name == "agy":
+            return "agy", _agy_conversation(pid, home)
+        if "cursor-agent" in " ".join(argv) or name == "agent":
             chat = _cursor_chat(pid, home)
             if chat:
                 return "agent", chat
+            fallback = fallback or "agent"
         queue.extend(_children(pid))
-    return "", ""
+    return fallback, ""
 
 
-# Interactive programs that are safe to reopen on their own. Anything else is
-# typed back without Enter, so a one-shot command (rm, git push, a deploy)
-# never reruns by itself after a restart.
+# Interactive CLI tools reopened after a restart. A program not listed here
+# still counts when it took over the screen (alternate screen, like any TUI).
+# Plain commands (rm, git push, npm run dev) are never rerun.
 AUTO_RESUME = frozenset(
     {
         "vim", "nvim", "vi", "view", "nano", "micro", "hx", "helix", "emacs", "kak",
@@ -304,6 +342,7 @@ AUTO_RESUME = frozenset(
         "mc", "ranger", "lf", "yazi", "nnn", "vifm", "broot",
         "lazygit", "lazydocker", "tig", "gitui", "k9s",
         "ssh", "mosh", "tmux", "psql", "mysql", "sqlite3", "redis-cli",
+        "gemini", "codex", "aider", "opencode", "crush", "goose", "qwen", "amp", "copilot",
     }
 )
 SHELLS = frozenset({"bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu"})
@@ -330,27 +369,44 @@ def foreground_argv(pane_pid: int) -> list[str]:
     return argv
 
 
-def rerun_line(argv: list[str]) -> tuple[str, bool]:
-    """(command line, press Enter?) to bring a program back."""
+def is_cli_tool(argv: list[str], alternate: bool) -> bool:
+    return bool(argv) and (alternate or os.path.basename(argv[0]) in AUTO_RESUME)
+
+
+def rerun_line(argv: list[str]) -> str:
     if not argv:
-        return "", False
+        return ""
     name = os.path.basename(argv[0])
     # Prefer the bare name when PATH finds the same binary; it reads better.
     head = name if shutil.which(name) == argv[0] else argv[0]
-    return shlex.join([head, *argv[1:]]), name in AUTO_RESUME
+    return shlex.join([head, *argv[1:]])
 
 
 # --- snapshot / restore -------------------------------------------------------
 
 
-def _pane_info(tab: str, socket: str) -> tuple[int, str] | None:
-    result = _tmux(socket, "display-message", "-p", "-t", f"={tab}:", "#{pane_pid}\t#{pane_current_path}", text=True)
+def _pane_info(tab: str, socket: str) -> tuple[int, str, bool] | None:
+    result = _tmux(
+        socket,
+        "display-message",
+        "-p",
+        "-t",
+        f"={tab}:",
+        "#{pane_pid}\t#{pane_current_path}\t#{alternate_on}",
+        text=True,
+    )
     if result.returncode != 0:
         return None
-    parts = result.stdout.strip().split("\t")
-    if len(parts) < 2 or not parts[0].isdigit():
+    parts = result.stdout.rstrip("\n").split("\t")
+    if len(parts) < 3 or not parts[0].isdigit() or not parts[1]:
         return None
-    return int(parts[0]), parts[1]
+    return int(parts[0]), parts[1], parts[2] == "1"
+
+
+# A tab that had a CLI keeps it on record until it has sat at a prompt this
+# long: a shutdown killing the CLI first, or a restored CLI still starting,
+# must not wipe what to reopen.
+IDLE_FORGET_S = 30
 
 
 def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
@@ -364,9 +420,11 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
         info = _pane_info(tab, socket)
         if info is None:
             continue
-        pane_pid, cwd = info
+        pane_pid, cwd, alternate = info
         cli, resume = detect_cli(pane_pid)
         argv = [] if cli else foreground_argv(pane_pid)
+        if not is_cli_tool(argv, alternate):
+            argv = []
         meta[tab] = {
             "cwd": cwd,
             "cli": cli,
@@ -383,30 +441,45 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
             os.replace(tmp, path)
     with _lock:
         state = reconcile(load_state(base), [s["id"] for s in sessions])
+        now = int(time.time())
         for tab, info in meta.items():
+            prev = state["tabs"].get(tab) or {}
+            if not info["cli"] and not info["argv"] and (prev.get("cli") or prev.get("argv")):
+                idle = int(prev.get("idle") or now)
+                if now - idle < IDLE_FORGET_S:
+                    info.update(cli=prev.get("cli", ""), resume=prev.get("resume", ""), argv=prev.get("argv", []), idle=idle)
             state["tabs"][tab] = info
         save_state(state, base)
 
 
-def resume_command(cli: str, resume: str) -> str:
-    if not RESUME_RE.match(resume or ""):
+RESUME_FLAG = {"claude": "--resume", "agent": "--resume", "agy": "--conversation"}
+
+
+def _claude_transcript(sid: str, home: Path) -> bool:
+    # Claude only writes the conversation after the first message; resuming
+    # an empty one fails with "No conversation found".
+    return any((home / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
+
+
+def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
+    if cli not in RESUME_FLAG:
         return ""
-    if cli == "claude":
-        return f"claude --resume {resume}"
-    if cli == "agent":
-        return f"agent --resume {resume}"
-    return ""
+    home = home or Path.home()
+    if not RESUME_RE.match(resume or ""):
+        return cli
+    if cli == "claude" and not _claude_transcript(resume, home):
+        return cli
+    return f"{cli} {RESUME_FLAG[cli]} {resume}"
 
 
-def _rerun(info: dict) -> dict:
+def _rerun(info: dict) -> str:
     line = resume_command(str(info.get("cli") or ""), str(info.get("resume") or ""))
     if line:
-        return {"type": line, "enter": True}
+        return line
     argv = info.get("argv")
     if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-        line, enter = rerun_line(argv)
-        return {"type": line, "enter": enter}
-    return {"type": "", "enter": False}
+        return rerun_line(argv)
+    return ""
 
 
 def restore_plan(state: dict, base: Path, shell: str) -> list[dict]:
@@ -425,7 +498,7 @@ def restore_plan(state: dict, base: Path, shell: str) -> list[dict]:
                 {
                     "tab": tab,
                     "new": ["new-session", "-d", "-s", tab, "-c", cwd, "--", "sh", "-c", script, "rc-restore", str(screen), shell],
-                    **_rerun(info),
+                    "type": _rerun(info),
                 }
             )
     return plan
@@ -460,7 +533,6 @@ def restore(
         made += 1
         if step["type"]:
             _tmux(socket, "send-keys", "-t", f"={step['tab']}:", "-l", step["type"])
-            if step["enter"]:
-                _tmux(socket, "send-keys", "-t", f"={step['tab']}:", "Enter")
+            _tmux(socket, "send-keys", "-t", f"={step['tab']}:", "Enter")
     return made
 
