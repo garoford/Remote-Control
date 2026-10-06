@@ -895,3 +895,80 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   color: var(--rc-text);
   font-weight: 700;
 }
+
+/* PC dictation: floats over everything in the bottom-right corner. */
+#rc-pc-mic {
+  position: fixed;
+  z-index: 2147483647;
+  right: 16px;
+  bottom: 16px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(var(--rc-orange-rgb) / 0.4);
+  border-radius: 12px;
+  background: var(--rc-surface);
+  color: var(--rc-orange);
+  box-shadow: 0 2px 8px rgb(var(--rc-shade) / 0.45);
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+#rc-pc-mic.is-dragging {
+  cursor: grabbing;
+  opacity: 1;
+}
+
+#rc-pc-mic svg {
+  display: block;
+  width: 55%;
+  height: 55%;
+  pointer-events: none;
+}
+
+#rc-pc-mic.is-resizing {
+  opacity: 1;
+}
+
+/* Corner grip to resize; shows on hover. */
+.rc-mic-grip {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, transparent 50%, var(--rc-orange) 50%);
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+#rc-pc-mic:hover .rc-mic-grip,
+#rc-pc-mic.is-resizing .rc-mic-grip {
+  opacity: 1;
+}
+
+#rc-pc-mic:hover {
+  opacity: 1;
+  background: var(--rc-raised);
+}
+
+#rc-pc-mic.is-on {
+  opacity: 1;
+  background: var(--rc-orange);
+  border-color: var(--rc-orange);
+  color: var(--rc-on-accent);
+  animation: rc-mic-pulse 1.2s ease-in-out infinite;
+}
+
+html.rc-touch #rc-pc-mic {
+  display: none;
+}
