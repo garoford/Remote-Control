@@ -477,6 +477,7 @@
       if (!pane.ws) pane.ws = window.__rcPrimarySocket || window.__rcTermSocket || null;
     }
     primaryPane = pane;
+    lockTheme(term);
     host.classList.add("rc-pane");
     host.dataset.rcPane = bootTabId;
     return pane;
@@ -508,6 +509,7 @@
         "FiraCode Nerd Font Mono, ui-monospace, Cascadia Mono, Courier New, monospace";
     }
     if (!opts.fontSize) opts.fontSize = 15;
+    opts.theme = termPalette();
     return opts;
   }
 
@@ -558,7 +560,7 @@
       if (!prefs || typeof prefs !== "object") return;
       if (prefs.fontSize) pane.term.options.fontSize = prefs.fontSize;
       if (prefs.fontFamily) pane.term.options.fontFamily = prefs.fontFamily;
-      if (prefs.theme) pane.term.options.theme = prefs.theme;
+      if (prefs.theme) pane.term.options.theme = termPalette();
       pane.term.options.scrollback = 20000;
     } catch (_) {}
   }
@@ -730,6 +732,7 @@
     try {
       term = new Term(termOptions(proto.options));
       term.open(host);
+      lockTheme(term);
     } catch (_) {
       host.remove();
       return null;
@@ -3347,6 +3350,7 @@
   function takeWorkspaces(payload) {
     if (!payload || !Array.isArray(payload.workspaces)) return payload;
     wsState = payload;
+    if (payload.theme) setThemePref(payload.theme, true);
     if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
     renderDrawer();
     return payload;
@@ -3615,6 +3619,189 @@
     });
   }
 
+  // --- theme ----------------------------------------------------------------
+  // "system" follows the device; the choice is kept on the server so it
+  // survives a new tunnel URL, and cached locally for the first paint.
+
+  var THEME_KEY = "rc-theme";
+  var TERM_THEMES = {
+    dark: {
+      background: "#011627",
+      foreground: "#d6deeb",
+      cursor: "#80A4C2",
+      cursorAccent: "#011627",
+      selectionBackground: "#1d3b53",
+      selectionInactiveBackground: "#0b2942",
+      black: "#011627",
+      red: "#EF5350",
+      green: "#22DA6E",
+      yellow: "#ADDB67",
+      blue: "#82AAFF",
+      magenta: "#C792EA",
+      cyan: "#21C7A8",
+      white: "#FFFFFF",
+      brightBlack: "#575656",
+      brightRed: "#EF5350",
+      brightGreen: "#22DA6E",
+      brightYellow: "#FFEB95",
+      brightBlue: "#82AAFF",
+      brightMagenta: "#C792EA",
+      brightCyan: "#7FDBCA",
+      brightWhite: "#FFFFFF",
+    },
+    light: {
+      background: "#FBFBFB",
+      foreground: "#403F53",
+      cursor: "#90A7B2",
+      cursorAccent: "#FBFBFB",
+      selectionBackground: "#CCD8E6",
+      selectionInactiveBackground: "#E0E7EF",
+      black: "#403F53",
+      red: "#DE3D3B",
+      green: "#08916A",
+      yellow: "#C08A00",
+      blue: "#288ED7",
+      magenta: "#D6438A",
+      cyan: "#2AA298",
+      white: "#C8CDD5",
+      brightBlack: "#7A8181",
+      brightRed: "#DE3D3B",
+      brightGreen: "#08916A",
+      brightYellow: "#B08300",
+      brightBlue: "#288ED7",
+      brightMagenta: "#D6438A",
+      brightCyan: "#2AA298",
+      brightWhite: "#F0F0F0",
+    },
+  };
+  var THEME_LABELS = [
+    ["system", "Sistema"],
+    ["light", "Claro"],
+    ["dark", "Oscuro"],
+  ];
+  var themePref = readThemePref();
+  var lightQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+  function readThemePref() {
+    try {
+      var v = localStorage.getItem(THEME_KEY);
+      if (v === "light" || v === "dark" || v === "system") return v;
+    } catch (_) {}
+    return "system";
+  }
+
+  function themeMode() {
+    if (themePref === "light" || themePref === "dark") return themePref;
+    return lightQuery && lightQuery.matches ? "light" : "dark";
+  }
+
+  function termPalette() {
+    return TERM_THEMES[themeMode()];
+  }
+
+  // ttyd re-sends its own (dark) theme on every connect; keep ours.
+  function lockTheme(term) {
+    if (!term || !term.options || term.__rcTheme) return;
+    term.__rcTheme = true;
+    var opts = term.options;
+    var desc = Object.getOwnPropertyDescriptor(opts, "theme");
+    if (desc && desc.set && desc.configurable) {
+      try {
+        Object.defineProperty(opts, "theme", {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get: desc.get,
+          set: function () {
+            desc.set.call(opts, termPalette());
+          },
+        });
+      } catch (_) {}
+    }
+    try {
+      opts.theme = termPalette();
+    } catch (_) {}
+  }
+
+  function applyTheme() {
+    var mode = themeMode();
+    var root = document.documentElement;
+    root.dataset.rcTheme = mode;
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "theme-color";
+      (document.head || root).appendChild(meta);
+    }
+    meta.content = mode === "light" ? "#eef1f5" : "#0b2942";
+    var terms = [];
+    Object.keys(panes).forEach(function (key) {
+      if (panes[key] && panes[key].term) terms.push(panes[key].term);
+    });
+    if (window.term) terms.push(window.term);
+    terms.forEach(function (term) {
+      if (!term.__rcTheme) lockTheme(term);
+      else {
+        try {
+          term.options.theme = termPalette();
+        } catch (_) {}
+      }
+    });
+    paintThemeSwitch();
+  }
+
+  function setThemePref(value, fromServer) {
+    if (value !== "light" && value !== "dark" && value !== "system") return;
+    var changed = value !== themePref;
+    themePref = value;
+    try {
+      localStorage.setItem(THEME_KEY, value);
+    } catch (_) {}
+    if (changed) applyTheme();
+    if (!fromServer) wsPost({ op: "theme", theme: value });
+  }
+
+  function paintThemeSwitch() {
+    var box = document.getElementById("rc-ws-theme");
+    if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) {
+      var on = b.dataset.theme === themePref;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
+  function buildThemeSwitch() {
+    var wrap = document.createElement("div");
+    wrap.className = "rc-ws-theme-wrap";
+    var label = document.createElement("div");
+    label.className = "rc-ws-title";
+    label.textContent = "Tema";
+    var box = document.createElement("div");
+    box.id = "rc-ws-theme";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "Tema");
+    THEME_LABELS.forEach(function (item) {
+      var b = wsButton(item[1], "rc-ws-theme-opt", "Tema " + item[1].toLowerCase(), function () {
+        setThemePref(item[0]);
+      });
+      b.dataset.theme = item[0];
+      box.appendChild(b);
+    });
+    wrap.appendChild(label);
+    wrap.appendChild(box);
+    return wrap;
+  }
+
+  function bootTheme() {
+    applyTheme();
+    if (!lightQuery) return;
+    var onChange = function () {
+      if (themePref === "system") applyTheme();
+    };
+    if (typeof lightQuery.addEventListener === "function") lightQuery.addEventListener("change", onChange);
+    else if (typeof lightQuery.addListener === "function") lightQuery.addListener(onChange);
+  }
+
   function bootWorkspaces(bar) {
     var menu = document.createElement("button");
     menu.id = "rc-ws-menu";
@@ -3651,6 +3838,7 @@
     drawer.appendChild(title);
     drawer.appendChild(list);
     drawer.appendChild(add);
+    drawer.appendChild(buildThemeSwitch());
     var root = document.body || document.documentElement;
     root.appendChild(backdrop);
     root.appendChild(drawer);
@@ -3658,6 +3846,7 @@
       if (ev.key === "Escape" && document.documentElement.classList.contains("rc-ws-open")) closeDrawer();
     });
     hookTabOpen();
+    paintThemeSwitch();
     wsPost({ op: "open", tab: tabId() });
   }
 
@@ -3701,6 +3890,7 @@
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
+    bootTheme();
     bootSessions();
     watchNativeClear();
     bootPaste();
