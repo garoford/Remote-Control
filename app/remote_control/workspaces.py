@@ -25,6 +25,7 @@ WS_RE = re.compile(r"^w[a-f0-9]{8}$")
 RESUME_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 NAME_MAX = 40
 THEMES = ("system", "light", "dark")
+MIC_MIN, MIC_MAX = 28, 160
 SCREEN_LINES = 3000
 
 _lock = threading.RLock()
@@ -78,6 +79,9 @@ def load_state(base: Path | None = None) -> dict:
         state["tabs"] = {k: v for k, v in tabs.items() if TAB_RE.match(k) and isinstance(v, dict)}
     if data.get("theme") in THEMES:
         state["theme"] = data["theme"]
+    mic = _clean_pos(data.get("micPos"))
+    if mic:
+        state["micPos"] = mic
     active = data.get("active")
     if any(ws["id"] == active for ws in state["workspaces"]):
         state["active"] = active
@@ -91,6 +95,27 @@ def save_state(state: dict, base: Path | None = None) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _clean_pos(raw) -> dict | None:
+    """{x, y} as fractions of the free screen space, both in [0, 1], plus an
+    optional button size in px."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x, y = float(raw.get("x")), float(raw.get("y"))
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= x <= 1 and 0 <= y <= 1):
+        return None
+    pos = {"x": round(x, 4), "y": round(y, 4)}
+    try:
+        size = int(raw.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if MIC_MIN <= size <= MIC_MAX:
+        pos["size"] = size
+    return pos
 
 
 def _clean_name(raw) -> str:
@@ -146,6 +171,12 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
     """One change from the sidebar. Returns {"ok": bool, ...}."""
     kind = str(op.get("op") or "")
     _ensure_one(state)
+    if kind == "micPos":
+        pos = _clean_pos(op.get("pos"))
+        if not pos:
+            return {"ok": False}
+        state["micPos"] = pos
+        return {"ok": True}
     if kind == "theme":
         if op.get("theme") not in THEMES:
             return {"ok": False}
@@ -208,6 +239,7 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
     return {
         "active": state["active"],
         "theme": state.get("theme", "system"),
+        "micPos": state.get("micPos"),
         "workspaces": [
             {"id": ws["id"], "name": ws["name"], "tabs": list(ws["tabs"]), "lastTab": ws["lastTab"]}
             for ws in state["workspaces"]

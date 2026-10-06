@@ -478,6 +478,7 @@
     }
     primaryPane = pane;
     lockTheme(term);
+    hookOsc52(term);
     host.classList.add("rc-pane");
     host.dataset.rcPane = bootTabId;
     return pane;
@@ -733,6 +734,7 @@
       term = new Term(termOptions(proto.options));
       term.open(host);
       lockTheme(term);
+      hookOsc52(term);
     } catch (_) {
       host.remove();
       return null;
@@ -1315,6 +1317,106 @@
     return { col: col, end: col };
   }
 
+  // --- links ------------------------------------------------------------------
+  // Apps like herdr catch Ctrl+click and run xdg-open on the PC. The browser
+  // keeps the click and opens the link on this device instead.
+
+  var URL_RE = /(?:https?:\/\/|www\.)[^\s<>"'`]+/g;
+
+  function trimUrl(url) {
+    var pairs = { ")": "(", "]": "[", "}": "{" };
+    for (;;) {
+      var last = url.charAt(url.length - 1);
+      if (/[.,;:!?'"]/.test(last)) {
+        url = url.slice(0, -1);
+        continue;
+      }
+      var open = pairs[last];
+      if (open && url.split(open).length < url.split(last).length) {
+        url = url.slice(0, -1);
+        continue;
+      }
+      return url;
+    }
+  }
+
+  function urlAt(clientX, clientY) {
+    var term = xterm();
+    var buf = term && term.buffer && term.buffer.active;
+    var cell = cellAt(clientX, clientY);
+    if (!buf || !cell || typeof buf.getLine !== "function") return "";
+    var row = cell.row + bufferTop();
+    var first = row;
+    while (first > 0 && buf.getLine(first) && buf.getLine(first).isWrapped) first--;
+    var text = "";
+    var at = -1;
+    for (var r = first; ; r++) {
+      var line = buf.getLine(r);
+      if (!line || (r > first && !line.isWrapped)) break;
+      if (r === row) at = text.length + cell.col;
+      text += line.translateToString(false);
+    }
+    if (at < 0) return "";
+    URL_RE.lastIndex = 0;
+    var m;
+    while ((m = URL_RE.exec(text))) {
+      var url = trimUrl(m[0]);
+      if (at >= m.index && at < m.index + url.length) {
+        return /^www\./.test(url) ? "https://" + url : url;
+      }
+    }
+    return "";
+  }
+
+  function openOnClient(url) {
+    try {
+      window.open(url, "_blank", "noopener");
+    } catch (_) {}
+    showToast("Abriendo enlace");
+  }
+
+  function bootLinks() {
+    var swallow = false;
+    document.addEventListener(
+      "mousedown",
+      function (ev) {
+        if (ev.button !== 0 || !(ev.ctrlKey || ev.metaKey)) return;
+        var t = ev.target;
+        if (!t || !t.closest || !t.closest(".xterm")) return;
+        var url = urlAt(ev.clientX, ev.clientY);
+        if (!url) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        swallow = true;
+        openOnClient(url);
+      },
+      true
+    );
+    // No browser menu on right click (it offered Paste); the press still
+    // reaches apps that track the mouse, like herdr's pane menu.
+    document.addEventListener(
+      "contextmenu",
+      function (ev) {
+        var t = ev.target;
+        if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName) && !(t.closest && t.closest(".xterm"))) return;
+        ev.preventDefault();
+      },
+      true
+    );
+    ["mouseup", "click"].forEach(function (type) {
+      document.addEventListener(
+        type,
+        function (ev) {
+          if (!swallow) return;
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          if (type === "click") swallow = false;
+        },
+        true
+      );
+    });
+  }
+
   function applyCellSelect(from, to) {
     var term = xterm();
     if (!term || !from || !to || typeof term.select !== "function") return;
@@ -1383,6 +1485,19 @@
   }
 
   function focusTerm() {
+    if (!document.documentElement.classList.contains("rc-touch")) {
+      // PC: no on-screen keyboard to manage, the terminal just takes focus
+      // (unless the user moved on to a field, like renaming a workspace).
+      var ae = document.activeElement;
+      if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && !(ae.closest && ae.closest(".xterm"))) return;
+      var pc = xterm();
+      if (pc) {
+        try {
+          pc.focus();
+        } catch (_) {}
+      }
+      return;
+    }
     if (!imeOpen) {
       armTextarea(termTextarea());
       return;
@@ -1577,6 +1692,18 @@
     keepFocusUntil = Math.max(keepFocusUntil, until);
   }
 
+  // A paste (above all an image upload) can outlast holdImeForPaste; give
+  // the focus, and the phone keyboard if it was up, back when it ends.
+  function restoreFocusAfterPaste(keyboardWasUp) {
+    if (keyboardWasUp && !imeOpen) {
+      unlockIme();
+      return;
+    }
+    holdImeForPaste();
+    focusTerm();
+    if (imeOpen) keepImeFocus();
+  }
+
   function showToast(text) {
     var el = document.getElementById("rc-toast");
     if (!el) {
@@ -1764,6 +1891,10 @@
     if (!blob || pasteBusy) return Promise.resolve(false);
     pasteBusy = true;
     pasteGuard = Date.now() + 800;
+    var keyboardWasUp = imeOpen || pickerKeyboardUp;
+    pickerKeyboardUp = false;
+    holdImeForPaste();
+    var hold = setInterval(holdImeForPaste, 500);
     var ext = extFromName(blob.name) || extFromType(blob.type) || "bin";
     if (ext === "bin") ext = extFromType(blob.type) || "bin";
     var squeeze = asImage && CANVAS_MIME[ext];
@@ -1778,6 +1909,7 @@
         function (info) {
           sendPaste(shellQuote(info.path));
           showToast("Subiendo…");
+          restoreFocusAfterPaste(keyboardWasUp);
           return prepare().then(function (file) {
             return uploadReserved(info.name || info.path.split("/").pop(), file.blob, file.type);
           });
@@ -1805,6 +1937,8 @@
       })
       .then(function (ok) {
         pasteBusy = false;
+        clearInterval(hold);
+        restoreFocusAfterPaste(keyboardWasUp);
         return ok;
       });
   }
@@ -2613,6 +2747,11 @@
         setTimeout(showChipForSelection, 60);
         kickHandles();
       } else if (!scrolling) {
+        var link = tapped && mods.ctrl ? urlAt(lastX, lastY) : "";
+        if (link) {
+          clearSticky();
+          openOnClient(link);
+        }
         lockIme();
       }
       active = false;
@@ -2756,6 +2895,25 @@
       },
       true
     );
+    // When the keyboard session ends (blur, app switch) the browser or Gboard
+    // can empty the textarea. A stale mirror would then turn the next key
+    // into "erase everything typed before", so each session starts clean.
+    document.addEventListener(
+      "focusout",
+      function (ev) {
+        if (isTermTextarea(ev.target)) resetMirror();
+      },
+      true
+    );
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "hidden") return;
+      resetMirror();
+      // The keyboard is gone; show it as closed so one tap brings it back.
+      if (imeOpen) {
+        imeGuard = 0;
+        lockIme();
+      }
+    });
     // xterm reads the same textarea on its own (keydown 229, composition,
     // keypress, input) and would send a second copy of every word.
     ["compositionstart", "compositionupdate", "compositionend", "keypress", "keydown", "keyup"].forEach(
@@ -2784,7 +2942,8 @@
       var file = input.files && input.files[0];
       input.value = "";
       if (!file) {
-        focusTerm();
+        restoreFocusAfterPaste(pickerKeyboardUp);
+        pickerKeyboardUp = false;
         return;
       }
       var image = (file.type || "").indexOf("image/") === 0;
@@ -2799,8 +2958,251 @@
   var dictationSent = false;
 
   function syncMicBtn() {
-    var btn = document.getElementById("rc-ek-mic");
-    if (btn) btn.classList.toggle("is-on", !!dictation);
+    ["rc-ek-mic", "rc-pc-mic"].forEach(function (id) {
+      var btn = document.getElementById(id);
+      if (btn) btn.classList.toggle("is-on", !!dictation);
+    });
+    syncWakeLock();
+  }
+
+  // Dictation dies when the screen turns off, so keep it on while the mic
+  // is live. The browser drops the lock when the page is hidden; take it
+  // again on return.
+  var wakeLock = null;
+  var wakeLockAsking = false;
+
+  function syncWakeLock() {
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") return;
+    if (dictation) {
+      if (wakeLock || wakeLockAsking || document.visibilityState !== "visible") return;
+      wakeLockAsking = true;
+      navigator.wakeLock.request("screen").then(
+        function (lock) {
+          wakeLockAsking = false;
+          wakeLock = lock;
+          lock.addEventListener("release", function () {
+            if (wakeLock === lock) wakeLock = null;
+          });
+          if (!dictation) syncWakeLock();
+        },
+        function () {
+          wakeLockAsking = false;
+        }
+      );
+      return;
+    }
+    if (wakeLock) {
+      var held = wakeLock;
+      wakeLock = null;
+      try {
+        held.release();
+      } catch (_) {}
+    }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") syncWakeLock();
+  });
+
+  // PC has no extra-keys bar; the mic floats over everything and can be
+  // dragged anywhere. The spot is kept as fractions of the free space, on
+  // the server (the tunnel URL changes) and cached locally for first paint.
+  var MIC_POS_KEY = "rc-pc-mic-pos";
+  var MIC_MIN = 28;
+  var MIC_MAX = 160;
+  var micPos = readMicPos();
+
+  function readMicPos() {
+    try {
+      var pos = JSON.parse(localStorage.getItem(MIC_POS_KEY) || "null");
+      if (pos && pos.x >= 0 && pos.x <= 1 && pos.y >= 0 && pos.y <= 1) return pos;
+    } catch (_) {}
+    return null;
+  }
+
+  function micSizeOk(size) {
+    return typeof size === "number" && size >= MIC_MIN && size <= MIC_MAX;
+  }
+
+  function sizePcMic(btn, size) {
+    btn.style.width = size + "px";
+    btn.style.height = size + "px";
+    btn.style.borderRadius = Math.round(size * 0.27) + "px";
+  }
+
+  function placePcMic() {
+    var btn = document.getElementById("rc-pc-mic");
+    if (!btn || !micPos) return;
+    if (micSizeOk(micPos.size)) sizePcMic(btn, micPos.size);
+    var w = btn.offsetWidth || 44;
+    var h = btn.offsetHeight || 44;
+    var freeX = Math.max(0, window.innerWidth - w);
+    var freeY = Math.max(0, window.innerHeight - h);
+    btn.style.left = Math.round(micPos.x * freeX) + "px";
+    btn.style.top = Math.round(micPos.y * freeY) + "px";
+    btn.style.right = "auto";
+    btn.style.bottom = "auto";
+  }
+
+  function setMicPos(pos, fromServer) {
+    if (!pos || !(pos.x >= 0 && pos.x <= 1 && pos.y >= 0 && pos.y <= 1)) return;
+    var drag = document.getElementById("rc-pc-mic");
+    if (fromServer && drag && drag.classList.contains("is-dragging")) return;
+    micPos = { x: pos.x, y: pos.y };
+    if (micSizeOk(pos.size)) micPos.size = pos.size;
+    try {
+      localStorage.setItem(MIC_POS_KEY, JSON.stringify(micPos));
+    } catch (_) {}
+    placePcMic();
+    if (!fromServer) wsPost({ op: "micPos", pos: micPos });
+  }
+
+  // Save where the button is now and how big it is.
+  function commitMic(btn) {
+    var rect = btn.getBoundingClientRect();
+    var freeX = Math.max(1, window.innerWidth - rect.width);
+    var freeY = Math.max(1, window.innerHeight - rect.height);
+    setMicPos({
+      x: Math.round(Math.max(0, Math.min(1, rect.left / freeX)) * 10000) / 10000,
+      y: Math.round(Math.max(0, Math.min(1, rect.top / freeY)) * 10000) / 10000,
+      size: Math.round(rect.width),
+    });
+  }
+
+  // Resize from the corner grip (or the wheel), keeping the top-left corner
+  // where it is and the button inside the window.
+  function resizeMicTo(btn, left, top, size) {
+    size = Math.round(Math.max(MIC_MIN, Math.min(MIC_MAX, size)));
+    size = Math.min(size, window.innerWidth - left, window.innerHeight - top);
+    size = Math.max(MIC_MIN, size);
+    sizePcMic(btn, size);
+    btn.style.left = Math.max(0, Math.min(window.innerWidth - size, left)) + "px";
+    btn.style.top = Math.max(0, Math.min(window.innerHeight - size, top)) + "px";
+    btn.style.right = "auto";
+    btn.style.bottom = "auto";
+  }
+
+  function bootMicResize(btn, grip) {
+    var start = null;
+    grip.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var rect = btn.getBoundingClientRect();
+      start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top, size: rect.width };
+      btn.classList.add("is-resizing");
+      try {
+        grip.setPointerCapture(ev.pointerId);
+      } catch (_) {}
+    });
+    grip.addEventListener("pointermove", function (ev) {
+      if (!start) return;
+      ev.stopPropagation();
+      var grow = Math.max(ev.clientX - start.x, ev.clientY - start.y);
+      resizeMicTo(btn, start.left, start.top, start.size + grow);
+    });
+    function finish(ev) {
+      if (!start) return;
+      ev.stopPropagation();
+      start = null;
+      btn.classList.remove("is-resizing");
+      commitMic(btn);
+      focusTerm();
+    }
+    grip.addEventListener("pointerup", finish);
+    grip.addEventListener("pointercancel", finish);
+    var wheelSave = 0;
+    btn.addEventListener(
+      "wheel",
+      function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var rect = btn.getBoundingClientRect();
+        // Grow around the center so the wheel feels like zooming the button.
+        var size = rect.width + (ev.deltaY < 0 ? 4 : -4);
+        size = Math.max(MIC_MIN, Math.min(MIC_MAX, size));
+        var d = (size - rect.width) / 2;
+        resizeMicTo(btn, rect.left - d, rect.top - d, size);
+        clearTimeout(wheelSave);
+        wheelSave = setTimeout(function () {
+          commitMic(btn);
+        }, 400);
+      },
+      { passive: false }
+    );
+  }
+
+  function bootMicDrag(btn) {
+    var start = null;
+    var moved = false;
+    btn.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0) return;
+      if (ev.target && ev.target.closest && ev.target.closest(".rc-mic-grip")) return;
+      // Keep the terminal focused so the dictated text lands where you type.
+      ev.preventDefault();
+      var rect = btn.getBoundingClientRect();
+      start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top };
+      moved = false;
+      try {
+        btn.setPointerCapture(ev.pointerId);
+      } catch (_) {}
+    });
+    btn.addEventListener("pointermove", function (ev) {
+      if (!start) return;
+      var dx = ev.clientX - start.x;
+      var dy = ev.clientY - start.y;
+      if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      moved = true;
+      btn.classList.add("is-dragging");
+      var w = btn.offsetWidth;
+      var h = btn.offsetHeight;
+      var left = Math.max(0, Math.min(window.innerWidth - w, start.left + dx));
+      var top = Math.max(0, Math.min(window.innerHeight - h, start.top + dy));
+      btn.style.left = left + "px";
+      btn.style.top = top + "px";
+      btn.style.right = "auto";
+      btn.style.bottom = "auto";
+    });
+    function finish(ev) {
+      if (!start) return;
+      start = null;
+      btn.classList.remove("is-dragging");
+      if (!moved) {
+        if (ev.type === "pointerup") {
+          toggleDictation();
+          focusTerm();
+        }
+        return;
+      }
+      commitMic(btn);
+      focusTerm();
+    }
+    btn.addEventListener("pointerup", finish);
+    btn.addEventListener("pointercancel", finish);
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    });
+    window.addEventListener("resize", placePcMic);
+  }
+
+  function mountPcMic() {
+    if (document.getElementById("rc-pc-mic")) return;
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "rc-pc-mic";
+    btn.setAttribute("aria-label", "Dictar");
+    btn.title = "Dictar (arrastra para moverlo; la esquina o la rueda cambian el tamaño)";
+    btn.innerHTML = MIC_ICON;
+    var grip = document.createElement("span");
+    grip.className = "rc-mic-grip";
+    grip.setAttribute("aria-hidden", "true");
+    btn.appendChild(grip);
+    bootMicDrag(btn);
+    bootMicResize(btn, grip);
+    (document.body || document.documentElement).appendChild(btn);
+    placePcMic();
+    syncMicBtn();
   }
 
   function stopDictation() {
@@ -2892,7 +3294,11 @@
     else startDictation();
   }
 
+  var pickerKeyboardUp = false;
+
   function openFilePicker() {
+    // The picker closes the phone keyboard; reopen it once the file is in.
+    pickerKeyboardUp = imeOpen;
     filePicker().click();
   }
 
@@ -3025,6 +3431,66 @@
     });
   }
 
+  // Apps inside the terminal (herdr, nvim, tmux copy) copy with OSC 52; tmux
+  // forwards it here, so the text lands in this device's clipboard.
+  var osc52Pending = "";
+
+  function decodeOsc52(data) {
+    var at = String(data || "").indexOf(";");
+    if (at < 0) return null;
+    var b64 = data.slice(at + 1);
+    if (!b64 || b64 === "?") return null;
+    try {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeClipboard(text) {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) return Promise.reject(new Error("no clipboard"));
+    return navigator.clipboard.writeText(text);
+  }
+
+  function flushOsc52() {
+    if (!osc52Pending) return;
+    var text = osc52Pending;
+    writeClipboard(text).then(function () {
+      if (osc52Pending === text) osc52Pending = "";
+      showToast("Copiado");
+    }, function () {});
+  }
+
+  function hookOsc52(term) {
+    if (!term || term.__rcOsc52 || !term.parser || typeof term.parser.registerOscHandler !== "function") return;
+    term.__rcOsc52 = true;
+    term.parser.registerOscHandler(52, function (data) {
+      var text = decodeOsc52(data);
+      if (!text) return true;
+      osc52Pending = "";
+      writeClipboard(text).then(
+        function () {
+          showToast("Copiado");
+        },
+        function () {
+          // The browser wants a tap first (phone, or page not focused).
+          osc52Pending = text;
+          showToast("Toca la pantalla para copiar");
+        }
+      );
+      return true;
+    });
+  }
+
+  function bootOsc52() {
+    ["pointerdown", "keydown", "touchend"].forEach(function (type) {
+      document.addEventListener(type, flushOsc52, true);
+    });
+  }
+
   function copySelection() {
     var text = termSelection();
     if (!text) {
@@ -3113,8 +3579,15 @@
       function (ev) {
         if (ev.defaultPrevented || ev.isComposing) return;
         var chord = ev.ctrlKey || ev.metaKey;
-        if (!chord || !ev.shiftKey || ev.altKey) return;
         var key = ev.key;
+        // Plain Ctrl+V does nothing; pasting is Ctrl+Shift+V (or the menu).
+        if (chord && !ev.shiftKey && !ev.altKey && (key === "v" || key === "V")) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+          return;
+        }
+        if (!chord || !ev.shiftKey || ev.altKey) return;
         if (key === "V" || key === "v") {
           ev.preventDefault();
           ev.stopPropagation();
@@ -3351,6 +3824,7 @@
     if (!payload || !Array.isArray(payload.workspaces)) return payload;
     wsState = payload;
     if (payload.theme) setThemePref(payload.theme, true);
+    if (payload.micPos) setMicPos(payload.micPos, true);
     if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
     renderDrawer();
     return payload;
@@ -3895,6 +4369,8 @@
     watchNativeClear();
     bootPaste();
     bootCopyChip();
+    bootOsc52();
+    bootLinks();
     bootPinScroll();
     window.addEventListener("resize", function () {
       var pane = panes[tabId()];
@@ -3909,6 +4385,7 @@
     })();
     if (device === "pc") {
       document.documentElement.classList.remove("rc-touch");
+      mountPcMic();
       return;
     }
     document.documentElement.classList.add("rc-touch");
