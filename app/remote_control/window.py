@@ -23,14 +23,13 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Remote Control")
-        self.set_default_size(360, 560)
+        self.set_default_size(360, 420)
         self.set_resizable(False)
         self.add_css_class("rc-window")
 
         self.tunnel = TunnelService()
         self._busy = False
         self._current_url: str | None = None
-        self._syncing_switch = False
         self._last_update_check = 0.0
         self._update_debounce = 25.0
 
@@ -72,51 +71,37 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         canvas.set_margin_end(20)
         self.toasts.set_child(canvas)
 
-        canvas.append(self._build_hero())
+        canvas.append(self._build_status())
+        canvas.append(self._build_password())
+        canvas.append(self._build_start())
         canvas.append(self._build_url_card())
-        canvas.append(self._build_idle())
+        canvas.append(self._build_stop())
         canvas.append(self._build_error())
-
-        hint = Gtk.Label(
-            label="Cloudflare Quick Tunnel  ·  ttyd Night Owl",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        hint.add_css_class("rc-hint")
-        hint.set_margin_top(4)
-        canvas.append(hint)
 
         self.set_content(toolbar)
 
-    def _build_hero(self) -> Gtk.Widget:
-        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        hero.add_css_class("rc-hero")
-        hero.set_halign(Gtk.Align.FILL)
-        hero.set_hexpand(True)
+    def _build_status(self) -> Gtk.Widget:
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        status.add_css_class("rc-status")
+        status.set_halign(Gtk.Align.START)
 
-        kicker = Gtk.Label(label="ACCESO REMOTO")
-        kicker.add_css_class("rc-kicker")
-        kicker.set_halign(Gtk.Align.CENTER)
-        hero.append(kicker)
+        self.status_dot = Gtk.Box()
+        self.status_dot.add_css_class("rc-dot")
+        self.status_dot.set_valign(Gtk.Align.CENTER)
+        status.append(self.status_dot)
 
-        title = Gtk.Label(label="Túnel web")
-        title.add_css_class("rc-title")
-        title.set_halign(Gtk.Align.CENTER)
-        hero.append(title)
+        self.status_label = Gtk.Label(label="Apagado", xalign=0)
+        self.status_label.add_css_class("rc-status-label")
+        self.status_label.add_css_class("off")
+        status.append(self.status_label)
+        return status
 
-        subtitle = Gtk.Label(
-            label="Enciende el switch para publicar tu terminal\nen una URL temporal.",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        subtitle.add_css_class("rc-subtitle")
-        hero.append(subtitle)
-
-        pass_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        pass_box.add_css_class("rc-pass")
-        pass_label = Gtk.Label(label="CONTRASEÑA", xalign=0)
-        pass_label.add_css_class("rc-pass-label")
-        pass_box.append(pass_label)
+    def _build_password(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.add_css_class("rc-pass")
+        label = Gtk.Label(label="Contraseña", xalign=0)
+        label.add_css_class("rc-pass-label")
+        box.append(label)
         self.password_entry = Gtk.Entry()
         self.password_entry.set_visibility(False)
         self.password_entry.set_placeholder_text("Opcional")
@@ -129,33 +114,23 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.password_entry.set_text(read_password())
         self.password_entry.connect("icon-press", self._on_password_icon)
         self.password_entry.connect("changed", self._on_password_changed)
-        pass_box.append(self.password_entry)
-        hero.append(pass_box)
+        box.append(self.password_entry)
+        return box
 
-        self.switch = Gtk.Switch()
-        self.switch.set_halign(Gtk.Align.CENTER)
-        self.switch.set_valign(Gtk.Align.CENTER)
-        self.switch.connect("state-set", self._on_switch_state_set)
-        switch_wrap = Gtk.Box(halign=Gtk.Align.CENTER)
-        switch_wrap.add_css_class("rc-switch-wrap")
-        switch_wrap.append(self.switch)
-        hero.append(switch_wrap)
+    def _build_start(self) -> Gtk.Widget:
+        self.start_btn = Gtk.Button(label="Encender")
+        self.start_btn.add_css_class("rc-start-btn")
+        self.start_btn.set_hexpand(True)
+        self.start_btn.connect("clicked", self._on_start_clicked)
+        return self.start_btn
 
-        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        status.add_css_class("rc-status")
-        status.set_halign(Gtk.Align.CENTER)
-
-        self.status_dot = Gtk.Box()
-        self.status_dot.add_css_class("rc-dot")
-        self.status_dot.set_valign(Gtk.Align.CENTER)
-        status.append(self.status_dot)
-
-        self.status_label = Gtk.Label(label="Apagado")
-        self.status_label.add_css_class("rc-status-label")
-        self.status_label.add_css_class("off")
-        status.append(self.status_label)
-        hero.append(status)
-        return hero
+    def _build_stop(self) -> Gtk.Widget:
+        self.stop_btn = Gtk.Button(label="Apagar")
+        self.stop_btn.add_css_class("rc-btn-stop")
+        self.stop_btn.set_hexpand(True)
+        self.stop_btn.set_visible(False)
+        self.stop_btn.connect("clicked", self._on_stop_clicked)
+        return self.stop_btn
 
     def _build_url_card(self) -> Gtk.Widget:
         self.url_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -189,41 +164,27 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.url_card.append(actions)
         return self.url_card
 
-    def _build_idle(self) -> Gtk.Widget:
-        self.idle_label = Gtk.Label(
-            label="El túnel está apagado. Nadie puede entrar\nhasta que lo enciendas.",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        self.idle_label.add_css_class("rc-idle")
-        return self.idle_label
-
     def _build_error(self) -> Gtk.Widget:
         self.error_label = Gtk.Label(wrap=True, xalign=0)
         self.error_label.add_css_class("rc-error")
         self.error_label.set_visible(False)
         return self.error_label
 
-    def _on_switch_state_set(self, switch: Gtk.Switch, state: bool) -> bool:
-        if self._syncing_switch or self._busy:
-            return True
-        if state:
-            self._start_async()
-            return True
-        if self.tunnel.status().running or self._current_url:
-            self._show_stop_dialog()
-            return True
-        return False
+    def _on_start_clicked(self, *_args) -> None:
+        if self._busy:
+            return
+        self._start_async()
+
+    def _on_stop_clicked(self, *_args) -> None:
+        if self._busy:
+            return
+        self._show_stop_dialog()
 
     def _start_async(self) -> None:
         self._busy = True
         self._set_error(None)
         self._set_status("busy", "Encendiendo…")
-        self._set_switch(True)
-        self.switch.set_sensitive(False)
-        self.url_card.set_visible(True)
-        self.idle_label.set_visible(False)
-        self.url_entry.set_text("Creando túnel y esperando DNS…")
+        self._set_buttons_sensitive(False)
         password = self.password_entry.get_text()
         try:
             write_password(password)
@@ -242,16 +203,14 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_started(self, url: str) -> bool:
         self._busy = False
-        self.switch.set_sensitive(True)
+        self._set_buttons_sensitive(True)
         self._current_url = url
         self.url_entry.set_text(url)
         self.url_entry.select_region(0, -1)
         self.url_card.set_visible(True)
-        self.idle_label.set_visible(False)
-        self._set_switch(True)
+        self._set_running(True)
         if self._local_dns_ok(url):
             self._set_status("on", "En línea")
-            self._toast("Túnel listo")
         else:
             self._set_status("busy", "Túnel ok · DNS…")
             self._toast("URL lista; el DNS de esta PC aún no")
@@ -259,12 +218,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_start_failed(self, message: str) -> bool:
         self._busy = False
-        self.switch.set_sensitive(True)
+        self._set_buttons_sensitive(True)
         self._current_url = None
         self.url_card.set_visible(False)
-        self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
-        self._set_switch(False)
+        self._set_running(False)
         self._set_password_locked(False)
         self._set_error(message)
         return False
@@ -327,7 +285,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._busy = True
         self._set_error(None)
         self._set_status("busy", "Apagando…")
-        self.switch.set_sensitive(False)
+        self._set_buttons_sensitive(False)
 
         def work() -> None:
             try:
@@ -340,20 +298,18 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_stopped(self) -> bool:
         self._busy = False
-        self.switch.set_sensitive(True)
+        self._set_buttons_sensitive(True)
         self._current_url = None
         self.url_entry.set_text("")
         self.url_card.set_visible(False)
-        self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
-        self._set_switch(False)
+        self._set_running(False)
         self._set_password_locked(False)
-        self._toast("Túnel apagado")
         return False
 
     def _on_stop_failed(self, message: str) -> bool:
         self._busy = False
-        self.switch.set_sensitive(True)
+        self._set_buttons_sensitive(True)
         self._set_error(message)
         return False
 
@@ -396,23 +352,19 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._current_url = status.url
             self.url_entry.set_text(status.url)
             self.url_card.set_visible(True)
-            self.idle_label.set_visible(False)
             if self._local_dns_ok(status.url):
                 self._set_status("on", "En línea")
             else:
                 self._set_status("busy", "Túnel ok · DNS…")
-            self._set_switch(True)
+            self._set_running(True)
             if changed:
                 self.url_entry.select_region(0, -1)
             self._set_password_locked(True)
             return
-        if self._current_url and not status.running:
-            self._toast("El túnel se detuvo")
         self._current_url = None
         self.url_card.set_visible(False)
-        self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
-        self._set_switch(False)
+        self._set_running(False)
         self._set_password_locked(False)
 
     def _on_password_changed(self, *_args) -> None:
@@ -432,11 +384,13 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _set_password_locked(self, locked: bool) -> None:
         self.password_entry.set_sensitive(not locked)
 
-    def _set_switch(self, active: bool) -> None:
-        self._syncing_switch = True
-        self.switch.set_state(active)
-        self.switch.set_active(active)
-        self._syncing_switch = False
+    def _set_running(self, running: bool) -> None:
+        self.start_btn.set_visible(not running)
+        self.stop_btn.set_visible(running)
+
+    def _set_buttons_sensitive(self, sensitive: bool) -> None:
+        self.start_btn.set_sensitive(sensitive)
+        self.stop_btn.set_sensitive(sensitive)
 
     def _set_status(self, kind: str, text: str) -> None:
         self.status_label.set_label(text)
