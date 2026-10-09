@@ -14,6 +14,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from urllib.parse import urlparse
 
+from remote_control.gate import read_password, write_password
 from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
@@ -22,7 +23,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Remote Control")
-        self.set_default_size(360, 460)
+        self.set_default_size(360, 560)
         self.set_resizable(False)
         self.add_css_class("rc-window")
 
@@ -110,6 +111,26 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         )
         subtitle.add_css_class("rc-subtitle")
         hero.append(subtitle)
+
+        pass_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        pass_box.add_css_class("rc-pass")
+        pass_label = Gtk.Label(label="CONTRASEÑA", xalign=0)
+        pass_label.add_css_class("rc-pass-label")
+        pass_box.append(pass_label)
+        self.password_entry = Gtk.Entry()
+        self.password_entry.set_visibility(False)
+        self.password_entry.set_placeholder_text("Opcional")
+        self.password_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self.password_entry.set_hexpand(True)
+        self.password_entry.add_css_class("rc-pass-entry")
+        self.password_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
+        )
+        self.password_entry.set_text(read_password())
+        self.password_entry.connect("icon-press", self._on_password_icon)
+        self.password_entry.connect("changed", self._on_password_changed)
+        pass_box.append(self.password_entry)
+        hero.append(pass_box)
 
         self.switch = Gtk.Switch()
         self.switch.set_halign(Gtk.Align.CENTER)
@@ -203,10 +224,16 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.url_card.set_visible(True)
         self.idle_label.set_visible(False)
         self.url_entry.set_text("Creando túnel y esperando DNS…")
+        password = self.password_entry.get_text()
+        try:
+            write_password(password)
+        except OSError:
+            pass
+        self._set_password_locked(True)
 
         def work() -> None:
             try:
-                url = self.tunnel.start()
+                url = self.tunnel.start(password or None)
                 GLib.idle_add(self._on_started, url)
             except Exception as exc:
                 GLib.idle_add(self._on_start_failed, str(exc))
@@ -238,6 +265,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
         self._set_switch(False)
+        self._set_password_locked(False)
         self._set_error(message)
         return False
 
@@ -319,6 +347,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
         self._set_switch(False)
+        self._set_password_locked(False)
         self._toast("Túnel apagado")
         return False
 
@@ -375,6 +404,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._set_switch(True)
             if changed:
                 self.url_entry.select_region(0, -1)
+            self._set_password_locked(True)
             return
         if self._current_url and not status.running:
             self._toast("El túnel se detuvo")
@@ -383,6 +413,24 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.idle_label.set_visible(True)
         self._set_status("off", "Apagado")
         self._set_switch(False)
+        self._set_password_locked(False)
+
+    def _on_password_changed(self, *_args) -> None:
+        try:
+            write_password(self.password_entry.get_text())
+        except OSError:
+            pass
+
+    def _on_password_icon(self, entry: Gtk.Entry, _pos: Gtk.EntryIconPosition) -> None:
+        visible = not entry.get_visibility()
+        entry.set_visibility(visible)
+        entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY,
+            "view-conceal-symbolic" if visible else "view-reveal-symbolic",
+        )
+
+    def _set_password_locked(self, locked: bool) -> None:
+        self.password_entry.set_sensitive(not locked)
 
     def _set_switch(self, active: bool) -> None:
         self._syncing_switch = True

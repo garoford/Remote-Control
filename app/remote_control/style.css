@@ -109,6 +109,32 @@ window.rc-window,
   100% { opacity: 1; }
 }
 
+.rc-pass {
+  margin-top: 8px;
+}
+
+.rc-pass-label {
+  color: #7B88A1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+}
+
+.rc-pass-entry {
+  background: #0b2942;
+  color: #d6deeb;
+  border: 1px solid alpha(#82AAFF, 0.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  caret-color: #21C7A8;
+  font-size: 13px;
+}
+
+.rc-pass-entry selection {
+  background-color: #1d3b53;
+  color: #d6deeb;
+}
+
 .rc-switch-wrap {
   padding: 16px 0 8px;
 }

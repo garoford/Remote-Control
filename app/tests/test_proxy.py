@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from remote_control.gate import write_runtime_gate
 from remote_control.paste import paste_dir
 from remote_control.proxy import Sidecar
 
@@ -409,6 +410,128 @@ class ProxyAssetTests(unittest.TestCase):
             self.assertIn(b"ttyd-index", data)
         finally:
             raw.close()
+
+    def _start_gated(self, password: str = "s3cret") -> int:
+        port = _free_port()
+        gate = Path(self.tmp.name) / "gate.json"
+        write_runtime_gate(gate, password)
+        side = Sidecar(
+            "127.0.0.1",
+            port,
+            "127.0.0.1",
+            self.up_port,
+            self.assets,
+            paste_home=self.paste_home,
+            gate_path=gate,
+        )
+        threading.Thread(target=side.serve_forever, daemon=True).start()
+        self._wait_port(port)
+        self.addCleanup(side.stop)
+        return port
+
+    def _exchange(
+        self,
+        port: int,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            raw = conn.getresponse()
+            payload = raw.read()
+            hdrs = {key.lower(): value for key, value in raw.getheaders()}
+
+            class _Resp:
+                def __init__(self) -> None:
+                    self.status = raw.status
+                    self._body = payload
+                    self._headers = hdrs
+
+                def read(self) -> bytes:
+                    return self._body
+
+                def getheader(self, name: str) -> str | None:
+                    return self._headers.get(name.lower())
+
+            return _Resp()
+        finally:
+            conn.close()
+
+    def _login(self, port: int, password: str, host: str = "abc.trycloudflare.com"):
+        return self._exchange(
+            port,
+            "POST",
+            "/rc-login",
+            json.dumps({"password": password}).encode(),
+            {"Content-Type": "application/json", "Host": host},
+        )
+
+    def test_gate_blocks_until_password(self) -> None:
+        port = self._start_gated()
+        preflight = self._exchange(port, "OPTIONS", "/rc-login")
+        self.assertEqual(preflight.status, 204)
+        preflight.read()
+
+        page = self._exchange(port, "GET", "/", headers={"Host": "abc.trycloudflare.com"})
+        body = page.read()
+        self.assertEqual(page.status, 200)
+        self.assertIn(b"Entrar", body)
+        self.assertNotIn(b"ttyd-index", body)
+
+        denied = self._login(port, "nope")
+        self.assertEqual(denied.status, 401)
+        self.assertIsNone(denied.getheader("Set-Cookie"))
+        self.assertEqual(json.loads(denied.read()).get("error"), "contraseña incorrecta")
+
+        token = self._exchange(port, "GET", "/token")
+        self.assertEqual(token.status, 401)
+        token.read()
+        sessions = self._exchange(port, "GET", "/rc-sessions")
+        self.assertEqual(sessions.status, 401)
+        sessions.read()
+
+        raw = socket.create_connection(("127.0.0.1", port), timeout=3)
+        try:
+            raw.sendall(
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: abc.trycloudflare.com\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Upgrade: websocket\r\n"
+                b"\r\n"
+            )
+            upgrade = raw.recv(4096)
+        finally:
+            raw.close()
+        self.assertTrue(upgrade.startswith(b"HTTP/1.1 401"))
+
+        ok = self._login(port, "s3cret")
+        self.assertEqual(ok.status, 200)
+        cookie = ok.getheader("Set-Cookie") or ""
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("Secure", cookie)
+        self.assertIn("SameSite=Lax", cookie)
+        self.assertIn("Path=/", cookie)
+        self.assertIn("Max-Age=2592000", cookie)
+        self.assertNotIn("Domain=", cookie)
+        gate_token = cookie.split(";", 1)[0].split("=", 1)[1]
+        authed = {"Cookie": f"rc_gate={gate_token}", "Host": "abc.trycloudflare.com"}
+
+        index = self._exchange(port, "GET", "/", headers=authed)
+        self.assertEqual(index.status, 200)
+        self.assertIn(b"ttyd-index", index.read())
+        proxied = self._exchange(port, "GET", "/token", headers=authed)
+        self.assertEqual(json.loads(proxied.read()), {"token": "test"})
+
+        forged = self._exchange(
+            port,
+            "GET",
+            "/",
+            headers={"Cookie": "rc_gate=" + ("ab" * 32), "Host": "abc.trycloudflare.com"},
+        )
+        self.assertNotIn(b"ttyd-index", forged.read())
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from remote_control import __version__
+from remote_control.gate import write_runtime_gate
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
 from remote_control.workspaces import restore as restore_workspaces
 
@@ -190,6 +191,8 @@ class TunnelService:
         self.proxy_pid_file = self.pid_dir / "proxy.pid"
         self.ttyd_port_file = self.pid_dir / "ttyd.port"
         self.proxy_log = self.run_dir / "proxy.log"
+        self.gate_file = self.run_dir / "gate.json"
+        self._gate_path: Path | None = None
         self.assets_dir = self.run_dir / "rc-assets"
         self.ttyd_port = self.port + 1
         self.font_reg_url = ""
@@ -242,7 +245,7 @@ class TunnelService:
             proxy_pid=proxy_pid,
         )
 
-    def start(self) -> str:
+    def start(self, password: str | None = None) -> str:
         missing = self.missing_binaries()
         if missing:
             raise TunnelError(
@@ -265,6 +268,7 @@ class TunnelService:
         self._prepare_rc_assets()
         self._prepare_ttyd_index()
         self._start_ttyd()
+        self._prepare_gate(None if password == "" else password)
         self._start_proxy()
         self._start_cloudflared()
         url = self._wait_for_url(timeout=60)
@@ -296,8 +300,10 @@ class TunnelService:
             self.cf_pid_file,
             self.proxy_pid_file,
             self.url_file,
+            self.gate_file,
         ):
             path.unlink(missing_ok=True)
+        self._gate_path = None
         if not silent:
             self.log_file.unlink(missing_ok=True)
 
@@ -380,11 +386,15 @@ class TunnelService:
             time.sleep(0.1)
         raise TunnelError("ttyd no abrió el puerto.")
 
-    def _start_proxy(self) -> None:
-        pkg_root = Path(__file__).resolve().parent.parent
-        env = os.environ.copy()
-        prev = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(pkg_root) + (os.pathsep + prev if prev else "")
+    def _prepare_gate(self, password: str | None) -> None:
+        if password:
+            write_runtime_gate(self.gate_file, password)
+            self._gate_path = self.gate_file
+            return
+        self.gate_file.unlink(missing_ok=True)
+        self._gate_path = None
+
+    def _proxy_cmd(self) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -398,6 +408,16 @@ class TunnelService:
             "--tmux-socket",
             "cf-remote",
         ]
+        if self._gate_path is not None:
+            cmd.extend(["--gate", str(self._gate_path)])
+        return cmd
+
+    def _start_proxy(self) -> None:
+        pkg_root = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(pkg_root) + (os.pathsep + prev if prev else "")
+        cmd = self._proxy_cmd()
         with self.proxy_log.open("w", encoding="utf-8") as log:
             proc = subprocess.Popen(
                 cmd,

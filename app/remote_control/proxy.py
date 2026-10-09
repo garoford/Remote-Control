@@ -4,6 +4,9 @@ Serves cacheable fonts + JS, /rc-scrollback, /rc-history, /rc-hist-size, /rc-scr
 /rc-session-close,
 reserved clipboard uploads, and proxies everything else (including the
 tty WebSocket) to ttyd on the internal port.
+
+When started with --gate, every request needs the rc_gate cookie except the
+login page and POST /rc-login.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from remote_control.gate import LOGIN_PAGE, Gate, load_gate, set_cookie
 from remote_control.history import (
     cancel_copy_mode,
     close_session,
@@ -235,6 +239,7 @@ class Sidecar:
         assets: Path,
         tmux_socket: str = "cf-remote",
         paste_home: Path | None = None,
+        gate_path: Path | None = None,
     ) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -243,6 +248,7 @@ class Sidecar:
         self.assets = assets
         self.tmux_socket = tmux_socket
         self.paste_home = paste_home
+        self.gate: Gate | None = load_gate(gate_path) if gate_path is not None else None
         self._sock: socket.socket | None = None
         self._stop = threading.Event()
         try:
@@ -313,6 +319,9 @@ class Sidecar:
             if path != "/" and path.endswith("/"):
                 path = path.rstrip("/")
             headers = _header_map(header)
+            if self.gate is not None and not self.gate.cookie_ok(headers.get("cookie", "")):
+                self._serve_gated(conn, method, path, body, headers)
+                return
             if method == "OPTIONS" and path.startswith("/rc-"):
                 self._serve_options(conn)
                 return
@@ -375,6 +384,85 @@ class Sidecar:
                 conn.close()
             except OSError:
                 pass
+
+    def _serve_gated(
+        self,
+        conn: socket.socket,
+        method: str,
+        path: str,
+        body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        # application/json is not a simple request, so the browser preflights
+        # POST /rc-login before it can send the password.
+        if method == "OPTIONS" and path == "/rc-login":
+            self._serve_options(conn)
+            return
+        if method == "POST" and path == "/rc-login":
+            self._serve_gate_login(conn, body, headers)
+            return
+        if method in {"GET", "HEAD"} and path in {"/", "/index.html"}:
+            self._serve_gate_page(conn, method == "HEAD")
+            return
+        conn.sendall(
+            _http_response(
+                "401 Unauthorized",
+                b'{"error":"unauthorized"}',
+                "application/json; charset=utf-8",
+                [("Cache-Control", "no-store")],
+            )
+        )
+
+    def _serve_gate_page(self, conn: socket.socket, head_only: bool) -> None:
+        raw = _http_response(
+            "200 OK",
+            LOGIN_PAGE,
+            "text/html; charset=utf-8",
+            [("Cache-Control", "no-store")],
+        )
+        if head_only:
+            raw = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+        conn.sendall(raw)
+
+    def _serve_gate_login(
+        self,
+        conn: socket.socket,
+        body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        password = _login_password(body)
+        if password is None:
+            conn.sendall(
+                _http_response(
+                    "400 Bad Request",
+                    b'{"error":"bad request"}',
+                    "application/json; charset=utf-8",
+                    [("Cache-Control", "no-store")],
+                )
+            )
+            return
+        gate = self.gate
+        if gate is None or not gate.check(password):
+            conn.sendall(
+                _http_response(
+                    "401 Unauthorized",
+                    '{"error":"contraseña incorrecta"}'.encode(),
+                    "application/json; charset=utf-8",
+                    [("Cache-Control", "no-store")],
+                )
+            )
+            return
+        conn.sendall(
+            _http_response(
+                "200 OK",
+                b'{"ok":true}',
+                "application/json; charset=utf-8",
+                [
+                    ("Cache-Control", "no-store"),
+                    ("Set-Cookie", set_cookie(gate.token(), headers.get("host", ""))),
+                ],
+            )
+        )
 
     def _serve_asset(
         self,
@@ -766,12 +854,26 @@ class Sidecar:
                 pass
 
 
+def _login_password(body: bytes) -> str | None:
+    try:
+        payload = json.loads(body.decode("utf-8") or "null")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    password = payload.get("password")
+    if not isinstance(password, str):
+        return None
+    return password
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Remote Control ttyd sidecar")
     parser.add_argument("--listen", default="127.0.0.1:7681")
     parser.add_argument("--upstream", default="127.0.0.1:7682")
     parser.add_argument("--assets", required=True)
     parser.add_argument("--tmux-socket", default="cf-remote")
+    parser.add_argument("--gate", default=None, help="runtime gate.json from tunnel start")
     args = parser.parse_args(argv)
 
     def split_addr(value: str) -> tuple[str, int]:
@@ -780,6 +882,10 @@ def main(argv: list[str] | None = None) -> int:
 
     listen_host, listen_port = split_addr(args.listen)
     up_host, up_port = split_addr(args.upstream)
+    gate_path = Path(args.gate) if args.gate else None
+    if gate_path is not None and not gate_path.is_file():
+        print(f"error: no está el archivo de contraseña: {gate_path}", file=sys.stderr)
+        return 1
     sidecar = Sidecar(
         listen_host,
         listen_port,
@@ -787,6 +893,7 @@ def main(argv: list[str] | None = None) -> int:
         up_port,
         Path(args.assets),
         tmux_socket=args.tmux_socket,
+        gate_path=gate_path,
     )
     try:
         sidecar.serve_forever()

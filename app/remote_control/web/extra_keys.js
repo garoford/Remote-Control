@@ -3004,205 +3004,245 @@
     if (document.visibilityState === "visible") syncWakeLock();
   });
 
-  // PC has no extra-keys bar; the mic floats over everything and can be
-  // dragged anywhere. The spot is kept as fractions of the free space, on
-  // the server (the tunnel URL changes) and cached locally for first paint.
+  // PC has no extra-keys bar. The mic and the attach button each float on
+  // their own and can be dragged anywhere. The spot is kept as fractions of
+  // the free space, on the server (the tunnel URL changes) and cached locally.
   var MIC_POS_KEY = "rc-pc-mic-pos";
+  var FILE_POS_KEY = "rc-pc-file-pos";
   var MIC_MIN = 28;
   var MIC_MAX = 160;
-  var micPos = readMicPos();
 
-  function readMicPos() {
+  function readFloatPos(key) {
     try {
-      var pos = JSON.parse(localStorage.getItem(MIC_POS_KEY) || "null");
-      if (pos && pos.x >= 0 && pos.x <= 1 && pos.y >= 0 && pos.y <= 1) return pos;
+      var saved = JSON.parse(localStorage.getItem(key) || "null");
+      if (saved && saved.x >= 0 && saved.x <= 1 && saved.y >= 0 && saved.y <= 1) return saved;
     } catch (_) {}
     return null;
   }
 
-  function micSizeOk(size) {
+  function floatSizeOk(size) {
     return typeof size === "number" && size >= MIC_MIN && size <= MIC_MAX;
   }
 
-  function sizePcMic(btn, size) {
+  function sizeFloat(btn, size) {
     btn.style.width = size + "px";
     btn.style.height = size + "px";
     btn.style.borderRadius = Math.round(size * 0.27) + "px";
   }
 
-  function placePcMic() {
-    var btn = document.getElementById("rc-pc-mic");
-    if (!btn || !micPos) return;
-    if (micSizeOk(micPos.size)) sizePcMic(btn, micPos.size);
-    var w = btn.offsetWidth || 44;
-    var h = btn.offsetHeight || 44;
-    var freeX = Math.max(0, window.innerWidth - w);
-    var freeY = Math.max(0, window.innerHeight - h);
-    btn.style.left = Math.round(micPos.x * freeX) + "px";
-    btn.style.top = Math.round(micPos.y * freeY) + "px";
-    btn.style.right = "auto";
-    btn.style.bottom = "auto";
-  }
+  function makeFloat(opts) {
+    var pos = readFloatPos(opts.key);
 
-  function setMicPos(pos, fromServer) {
-    if (!pos || !(pos.x >= 0 && pos.x <= 1 && pos.y >= 0 && pos.y <= 1)) return;
-    var drag = document.getElementById("rc-pc-mic");
-    if (fromServer && drag && drag.classList.contains("is-dragging")) return;
-    micPos = { x: pos.x, y: pos.y };
-    if (micSizeOk(pos.size)) micPos.size = pos.size;
-    try {
-      localStorage.setItem(MIC_POS_KEY, JSON.stringify(micPos));
-    } catch (_) {}
-    placePcMic();
-    if (!fromServer) wsPost({ op: "micPos", pos: micPos });
-  }
-
-  // Save where the button is now and how big it is.
-  function commitMic(btn) {
-    var rect = btn.getBoundingClientRect();
-    var freeX = Math.max(1, window.innerWidth - rect.width);
-    var freeY = Math.max(1, window.innerHeight - rect.height);
-    setMicPos({
-      x: Math.round(Math.max(0, Math.min(1, rect.left / freeX)) * 10000) / 10000,
-      y: Math.round(Math.max(0, Math.min(1, rect.top / freeY)) * 10000) / 10000,
-      size: Math.round(rect.width),
-    });
-  }
-
-  // Resize from the corner grip (or the wheel), keeping the top-left corner
-  // where it is and the button inside the window.
-  function resizeMicTo(btn, left, top, size) {
-    size = Math.round(Math.max(MIC_MIN, Math.min(MIC_MAX, size)));
-    size = Math.min(size, window.innerWidth - left, window.innerHeight - top);
-    size = Math.max(MIC_MIN, size);
-    sizePcMic(btn, size);
-    btn.style.left = Math.max(0, Math.min(window.innerWidth - size, left)) + "px";
-    btn.style.top = Math.max(0, Math.min(window.innerHeight - size, top)) + "px";
-    btn.style.right = "auto";
-    btn.style.bottom = "auto";
-  }
-
-  function bootMicResize(btn, grip) {
-    var start = null;
-    grip.addEventListener("pointerdown", function (ev) {
-      if (ev.button !== 0) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      var rect = btn.getBoundingClientRect();
-      start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top, size: rect.width };
-      btn.classList.add("is-resizing");
-      try {
-        grip.setPointerCapture(ev.pointerId);
-      } catch (_) {}
-    });
-    grip.addEventListener("pointermove", function (ev) {
-      if (!start) return;
-      ev.stopPropagation();
-      var grow = Math.max(ev.clientX - start.x, ev.clientY - start.y);
-      resizeMicTo(btn, start.left, start.top, start.size + grow);
-    });
-    function finish(ev) {
-      if (!start) return;
-      ev.stopPropagation();
-      start = null;
-      btn.classList.remove("is-resizing");
-      commitMic(btn);
-      focusTerm();
+    function place() {
+      var btn = document.getElementById(opts.id);
+      if (!btn || !pos) return;
+      if (floatSizeOk(pos.size)) sizeFloat(btn, pos.size);
+      var w = btn.offsetWidth || 44;
+      var h = btn.offsetHeight || 44;
+      var freeX = Math.max(0, window.innerWidth - w);
+      var freeY = Math.max(0, window.innerHeight - h);
+      btn.style.left = Math.round(pos.x * freeX) + "px";
+      btn.style.top = Math.round(pos.y * freeY) + "px";
+      btn.style.right = "auto";
+      btn.style.bottom = "auto";
     }
-    grip.addEventListener("pointerup", finish);
-    grip.addEventListener("pointercancel", finish);
-    var wheelSave = 0;
-    btn.addEventListener(
-      "wheel",
-      function (ev) {
+
+    function setPos(next, fromServer) {
+      if (!next || !(next.x >= 0 && next.x <= 1 && next.y >= 0 && next.y <= 1)) return;
+      var drag = document.getElementById(opts.id);
+      if (fromServer && drag && (drag.classList.contains("is-dragging") || drag.classList.contains("is-resizing"))) return;
+      pos = { x: next.x, y: next.y };
+      if (floatSizeOk(next.size)) pos.size = next.size;
+      try {
+        localStorage.setItem(opts.key, JSON.stringify(pos));
+      } catch (_) {}
+      place();
+      if (!fromServer) wsPost({ op: opts.op, pos: pos });
+    }
+
+    function commit(btn) {
+      var rect = btn.getBoundingClientRect();
+      var freeX = Math.max(1, window.innerWidth - rect.width);
+      var freeY = Math.max(1, window.innerHeight - rect.height);
+      setPos({
+        x: Math.round(Math.max(0, Math.min(1, rect.left / freeX)) * 10000) / 10000,
+        y: Math.round(Math.max(0, Math.min(1, rect.top / freeY)) * 10000) / 10000,
+        size: Math.round(rect.width),
+      });
+    }
+
+    function resizeTo(btn, left, top, size) {
+      size = Math.round(Math.max(MIC_MIN, Math.min(MIC_MAX, size)));
+      size = Math.min(size, window.innerWidth - left, window.innerHeight - top);
+      size = Math.max(MIC_MIN, size);
+      sizeFloat(btn, size);
+      btn.style.left = Math.max(0, Math.min(window.innerWidth - size, left)) + "px";
+      btn.style.top = Math.max(0, Math.min(window.innerHeight - size, top)) + "px";
+      btn.style.right = "auto";
+      btn.style.bottom = "auto";
+    }
+
+    function bootResize(btn, grip) {
+      var start = null;
+      grip.addEventListener("pointerdown", function (ev) {
+        if (ev.button !== 0) return;
         ev.preventDefault();
         ev.stopPropagation();
         var rect = btn.getBoundingClientRect();
-        // Grow around the center so the wheel feels like zooming the button.
-        var size = rect.width + (ev.deltaY < 0 ? 4 : -4);
-        size = Math.max(MIC_MIN, Math.min(MIC_MAX, size));
-        var d = (size - rect.width) / 2;
-        resizeMicTo(btn, rect.left - d, rect.top - d, size);
-        clearTimeout(wheelSave);
-        wheelSave = setTimeout(function () {
-          commitMic(btn);
-        }, 400);
-      },
-      { passive: false }
-    );
+        start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top, size: rect.width };
+        btn.classList.add("is-resizing");
+        try {
+          grip.setPointerCapture(ev.pointerId);
+        } catch (_) {}
+      });
+      grip.addEventListener("pointermove", function (ev) {
+        if (!start) return;
+        ev.stopPropagation();
+        var grow = Math.max(ev.clientX - start.x, ev.clientY - start.y);
+        resizeTo(btn, start.left, start.top, start.size + grow);
+      });
+      function finish(ev) {
+        if (!start) return;
+        ev.stopPropagation();
+        start = null;
+        btn.classList.remove("is-resizing");
+        commit(btn);
+        focusTerm();
+      }
+      grip.addEventListener("pointerup", finish);
+      grip.addEventListener("pointercancel", finish);
+      var wheelSave = 0;
+      btn.addEventListener(
+        "wheel",
+        function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          var rect = btn.getBoundingClientRect();
+          var size = rect.width + (ev.deltaY < 0 ? 4 : -4);
+          size = Math.max(MIC_MIN, Math.min(MIC_MAX, size));
+          var d = (size - rect.width) / 2;
+          resizeTo(btn, rect.left - d, rect.top - d, size);
+          clearTimeout(wheelSave);
+          wheelSave = setTimeout(function () {
+            commit(btn);
+          }, 400);
+        },
+        { passive: false }
+      );
+    }
+
+    function bootDrag(btn) {
+      var start = null;
+      var moved = false;
+      btn.addEventListener("pointerdown", function (ev) {
+        if (ev.button !== 0) return;
+        if (ev.target && ev.target.closest && ev.target.closest(".rc-mic-grip")) return;
+        ev.preventDefault();
+        var rect = btn.getBoundingClientRect();
+        start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top };
+        moved = false;
+        try {
+          btn.setPointerCapture(ev.pointerId);
+        } catch (_) {}
+      });
+      btn.addEventListener("pointermove", function (ev) {
+        if (!start) return;
+        var dx = ev.clientX - start.x;
+        var dy = ev.clientY - start.y;
+        if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+        moved = true;
+        btn.classList.add("is-dragging");
+        var w = btn.offsetWidth;
+        var h = btn.offsetHeight;
+        var left = Math.max(0, Math.min(window.innerWidth - w, start.left + dx));
+        var top = Math.max(0, Math.min(window.innerHeight - h, start.top + dy));
+        btn.style.left = left + "px";
+        btn.style.top = top + "px";
+        btn.style.right = "auto";
+        btn.style.bottom = "auto";
+      });
+      function finish(ev) {
+        if (!start) return;
+        start = null;
+        btn.classList.remove("is-dragging");
+        if (!moved) {
+          if (ev.type === "pointerup") opts.onTap();
+          return;
+        }
+        commit(btn);
+        focusTerm();
+      }
+      btn.addEventListener("pointerup", finish);
+      btn.addEventListener("pointercancel", finish);
+      btn.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+      window.addEventListener("resize", place);
+    }
+
+    function mount() {
+      if (document.getElementById(opts.id)) return;
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = opts.id;
+      btn.setAttribute("aria-label", opts.aria);
+      btn.title = opts.title;
+      btn.innerHTML = opts.icon;
+      var grip = document.createElement("span");
+      grip.className = "rc-mic-grip";
+      grip.setAttribute("aria-hidden", "true");
+      btn.appendChild(grip);
+      bootDrag(btn);
+      bootResize(btn, grip);
+      (document.body || document.documentElement).appendChild(btn);
+      place();
+      if (opts.afterMount) opts.afterMount();
+    }
+
+    return { setPos: setPos, mount: mount };
   }
 
-  function bootMicDrag(btn) {
-    var start = null;
-    var moved = false;
-    btn.addEventListener("pointerdown", function (ev) {
-      if (ev.button !== 0) return;
-      if (ev.target && ev.target.closest && ev.target.closest(".rc-mic-grip")) return;
-      // Keep the terminal focused so the dictated text lands where you type.
-      ev.preventDefault();
-      var rect = btn.getBoundingClientRect();
-      start = { x: ev.clientX, y: ev.clientY, left: rect.left, top: rect.top };
-      moved = false;
-      try {
-        btn.setPointerCapture(ev.pointerId);
-      } catch (_) {}
-    });
-    btn.addEventListener("pointermove", function (ev) {
-      if (!start) return;
-      var dx = ev.clientX - start.x;
-      var dy = ev.clientY - start.y;
-      if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
-      moved = true;
-      btn.classList.add("is-dragging");
-      var w = btn.offsetWidth;
-      var h = btn.offsetHeight;
-      var left = Math.max(0, Math.min(window.innerWidth - w, start.left + dx));
-      var top = Math.max(0, Math.min(window.innerHeight - h, start.top + dy));
-      btn.style.left = left + "px";
-      btn.style.top = top + "px";
-      btn.style.right = "auto";
-      btn.style.bottom = "auto";
-    });
-    function finish(ev) {
-      if (!start) return;
-      start = null;
-      btn.classList.remove("is-dragging");
-      if (!moved) {
-        if (ev.type === "pointerup") {
-          toggleDictation();
-          focusTerm();
-        }
-        return;
-      }
-      commitMic(btn);
+  var pcMic = makeFloat({
+    id: "rc-pc-mic",
+    key: MIC_POS_KEY,
+    op: "micPos",
+    aria: "Dictar",
+    title: "Dictar (arrastra para moverlo; la esquina o la rueda cambian el tamaño)",
+    icon: MIC_ICON,
+    onTap: function () {
+      toggleDictation();
       focusTerm();
-    }
-    btn.addEventListener("pointerup", finish);
-    btn.addEventListener("pointercancel", finish);
-    btn.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      ev.stopPropagation();
-    });
-    window.addEventListener("resize", placePcMic);
+    },
+    afterMount: syncMicBtn,
+  });
+
+  var pcFile = makeFloat({
+    id: "rc-pc-file",
+    key: FILE_POS_KEY,
+    op: "filePos",
+    aria: "Adjuntar archivo",
+    title: "Adjuntar archivo (arrastra para moverlo; la esquina o la rueda cambian el tamaño)",
+    icon: PASTE_ICON,
+    onTap: function () {
+      openFilePicker();
+    },
+  });
+
+  function setMicPos(pos, fromServer) {
+    pcMic.setPos(pos, fromServer);
+  }
+
+  function setFilePos(pos, fromServer) {
+    pcFile.setPos(pos, fromServer);
   }
 
   function mountPcMic() {
-    if (document.getElementById("rc-pc-mic")) return;
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.id = "rc-pc-mic";
-    btn.setAttribute("aria-label", "Dictar");
-    btn.title = "Dictar (arrastra para moverlo; la esquina o la rueda cambian el tamaño)";
-    btn.innerHTML = MIC_ICON;
-    var grip = document.createElement("span");
-    grip.className = "rc-mic-grip";
-    grip.setAttribute("aria-hidden", "true");
-    btn.appendChild(grip);
-    bootMicDrag(btn);
-    bootMicResize(btn, grip);
-    (document.body || document.documentElement).appendChild(btn);
-    placePcMic();
-    syncMicBtn();
+    pcMic.mount();
+  }
+
+  function mountPcFile() {
+    pcFile.mount();
   }
 
   function stopDictation() {
@@ -3825,6 +3865,7 @@
     wsState = payload;
     if (payload.theme) setThemePref(payload.theme, true);
     if (payload.micPos) setMicPos(payload.micPos, true);
+    if (payload.filePos) setFilePos(payload.filePos, true);
     if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
     renderDrawer();
     return payload;
@@ -4386,6 +4427,7 @@
     if (device === "pc") {
       document.documentElement.classList.remove("rc-touch");
       mountPcMic();
+      mountPcFile();
       return;
     }
     document.documentElement.classList.add("rc-touch");
