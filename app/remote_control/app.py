@@ -10,6 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio
 
 from remote_control import APP_ID
+from remote_control.gate import GateUsage, consume_gate_args, write_password
 from remote_control.window import RemoteControlWindow
 
 
@@ -31,5 +32,15 @@ class RemoteControlApp(Adw.Application):
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv if argv is None else argv)
+    try:
+        gtk_argv, password, clear = consume_gate_args(raw)
+    except GateUsage as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if clear:
+        write_password("")
+    elif password is not None:
+        write_password(password)
     app = RemoteControlApp()
-    return app.run(argv if argv is not None else sys.argv)
+    return app.run(gtk_argv)

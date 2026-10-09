@@ -82,6 +82,9 @@ def load_state(base: Path | None = None) -> dict:
     mic = _clean_pos(data.get("micPos"))
     if mic:
         state["micPos"] = mic
+    file_pos = _clean_pos(data.get("filePos"))
+    if file_pos:
+        state["filePos"] = file_pos
     active = data.get("active")
     if any(ws["id"] == active for ws in state["workspaces"]):
         state["active"] = active
@@ -177,6 +180,12 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
             return {"ok": False}
         state["micPos"] = pos
         return {"ok": True}
+    if kind == "filePos":
+        pos = _clean_pos(op.get("pos"))
+        if not pos:
+            return {"ok": False}
+        state["filePos"] = pos
+        return {"ok": True}
     if kind == "theme":
         if op.get("theme") not in THEMES:
             return {"ok": False}
@@ -240,6 +249,7 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
         "active": state["active"],
         "theme": state.get("theme", "system"),
         "micPos": state.get("micPos"),
+        "filePos": state.get("filePos"),
         "workspaces": [
             {"id": ws["id"], "name": ws["name"], "tabs": list(ws["tabs"]), "lastTab": ws["lastTab"]}
             for ws in state["workspaces"]

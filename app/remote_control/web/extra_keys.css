@@ -896,11 +896,11 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   font-weight: 700;
 }
 
-/* PC dictation: floats over everything in the bottom-right corner. */
-#rc-pc-mic {
+/* PC: mic and attach each float on their own, bottom-right by default. */
+#rc-pc-mic,
+#rc-pc-file {
   position: fixed;
   z-index: 2147483647;
-  right: 16px;
   bottom: 16px;
   width: 44px;
   height: 44px;
@@ -908,10 +908,8 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgb(var(--rc-orange-rgb) / 0.4);
   border-radius: 12px;
   background: var(--rc-surface);
-  color: var(--rc-orange);
   box-shadow: 0 2px 8px rgb(var(--rc-shade) / 0.45);
   cursor: grab;
   touch-action: none;
@@ -921,19 +919,34 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   transition: opacity 120ms ease;
 }
 
-#rc-pc-mic.is-dragging {
+#rc-pc-mic {
+  right: 16px;
+  border: 1px solid rgb(var(--rc-orange-rgb) / 0.4);
+  color: var(--rc-orange);
+}
+
+#rc-pc-file {
+  right: 72px;
+  border: 1px solid rgb(var(--rc-green-rgb) / 0.4);
+  color: var(--rc-green);
+}
+
+#rc-pc-mic.is-dragging,
+#rc-pc-file.is-dragging {
   cursor: grabbing;
   opacity: 1;
 }
 
-#rc-pc-mic svg {
+#rc-pc-mic svg,
+#rc-pc-file svg {
   display: block;
   width: 55%;
   height: 55%;
   pointer-events: none;
 }
 
-#rc-pc-mic.is-resizing {
+#rc-pc-mic.is-resizing,
+#rc-pc-file.is-resizing {
   opacity: 1;
 }
 
@@ -951,12 +964,19 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   transition: opacity 120ms ease;
 }
 
+#rc-pc-file .rc-mic-grip {
+  background: linear-gradient(135deg, transparent 50%, var(--rc-green) 50%);
+}
+
 #rc-pc-mic:hover .rc-mic-grip,
-#rc-pc-mic.is-resizing .rc-mic-grip {
+#rc-pc-mic.is-resizing .rc-mic-grip,
+#rc-pc-file:hover .rc-mic-grip,
+#rc-pc-file.is-resizing .rc-mic-grip {
   opacity: 1;
 }
 
-#rc-pc-mic:hover {
+#rc-pc-mic:hover,
+#rc-pc-file:hover {
   opacity: 1;
   background: var(--rc-raised);
 }
@@ -969,6 +989,7 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
   animation: rc-mic-pulse 1.2s ease-in-out infinite;
 }
 
-html.rc-touch #rc-pc-mic {
+html.rc-touch #rc-pc-mic,
+html.rc-touch #rc-pc-file {
   display: none;
 }
