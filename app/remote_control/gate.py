@@ -119,6 +119,38 @@ def preference_path(home: Path | None = None) -> Path:
     return Path.home() / ".config" / "remote-control" / "gate"
 
 
+def without_spaces(text: str) -> str:
+    return "".join(ch for ch in text if not ch.isspace())
+
+
+def password_strength(password: str) -> str:
+    """none, weak, ok, or strong. Empty stays open; weak does not block start."""
+    if not password:
+        return "none"
+    if len(password) < 8:
+        return "weak"
+    classes = 0
+    if any(ch.islower() for ch in password):
+        classes += 1
+    if any(ch.isupper() for ch in password):
+        classes += 1
+    if any(ch.isdigit() for ch in password):
+        classes += 1
+    if any(not ch.isalnum() for ch in password):
+        classes += 1
+    if len(password) >= 10 and classes >= 3:
+        return "strong"
+    return "ok"
+
+
+STRENGTH_LABEL = {
+    "none": "Sin contraseña",
+    "weak": "Débil",
+    "ok": "Regular",
+    "strong": "Fuerte",
+}
+
+
 def read_password(home: Path | None = None) -> str:
     path = preference_path(home)
     try:
@@ -131,6 +163,8 @@ def read_password(home: Path | None = None) -> str:
 
 
 def write_password(password: str, home: Path | None = None) -> None:
+    if any(ch.isspace() for ch in password):
+        raise GateUsage("la contraseña no puede llevar espacios")
     path = preference_path(home)
     if not password:
         path.unlink(missing_ok=True)
@@ -166,6 +200,8 @@ def consume_gate_args(argv: list[str]) -> tuple[list[str], str | None, bool]:
         index += 1
     if password is not None and clear:
         raise GateUsage("--password y --clear-password no van juntos")
+    if password is not None and any(ch.isspace() for ch in password):
+        raise GateUsage("la contraseña no puede llevar espacios")
     if password == "":
         raise GateUsage("--password necesita una contraseña")
     return rest, password, clear
