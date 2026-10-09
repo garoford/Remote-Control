@@ -30,6 +30,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.tunnel = TunnelService()
         self._busy = False
         self._current_url: str | None = None
+        self._syncing_switch = False
         self._last_update_check = 0.0
         self._update_debounce = 25.0
 
@@ -73,9 +74,8 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
         canvas.append(self._build_status())
         canvas.append(self._build_password())
-        canvas.append(self._build_start())
+        canvas.append(self._build_switch())
         canvas.append(self._build_url_card())
-        canvas.append(self._build_stop())
         canvas.append(self._build_error())
 
         self.set_content(toolbar)
@@ -117,20 +117,19 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         box.append(self.password_entry)
         return box
 
-    def _build_start(self) -> Gtk.Widget:
-        self.start_btn = Gtk.Button(label="Encender")
-        self.start_btn.add_css_class("rc-start-btn")
-        self.start_btn.set_hexpand(True)
-        self.start_btn.connect("clicked", self._on_start_clicked)
-        return self.start_btn
-
-    def _build_stop(self) -> Gtk.Widget:
-        self.stop_btn = Gtk.Button(label="Apagar")
-        self.stop_btn.add_css_class("rc-btn-stop")
-        self.stop_btn.set_hexpand(True)
-        self.stop_btn.set_visible(False)
-        self.stop_btn.connect("clicked", self._on_stop_clicked)
-        return self.stop_btn
+    def _build_switch(self) -> Gtk.Widget:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.add_css_class("rc-power")
+        label = Gtk.Label(label="Túnel", xalign=0)
+        label.add_css_class("rc-power-label")
+        label.set_hexpand(True)
+        row.append(label)
+        self.switch = Gtk.Switch()
+        self.switch.set_valign(Gtk.Align.CENTER)
+        self.switch.set_halign(Gtk.Align.END)
+        self.switch.connect("state-set", self._on_switch_state_set)
+        row.append(self.switch)
+        return row
 
     def _build_url_card(self) -> Gtk.Widget:
         self.url_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -170,21 +169,23 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.error_label.set_visible(False)
         return self.error_label
 
-    def _on_start_clicked(self, *_args) -> None:
-        if self._busy:
-            return
-        self._start_async()
-
-    def _on_stop_clicked(self, *_args) -> None:
-        if self._busy:
-            return
-        self._show_stop_dialog()
+    def _on_switch_state_set(self, _switch: Gtk.Switch, state: bool) -> bool:
+        if self._syncing_switch or self._busy:
+            return True
+        if state:
+            self._start_async()
+            return True
+        if self.tunnel.status().running or self._current_url:
+            self._show_stop_dialog()
+            return True
+        return False
 
     def _start_async(self) -> None:
         self._busy = True
         self._set_error(None)
         self._set_status("busy", "Encendiendo…")
-        self._set_buttons_sensitive(False)
+        self._set_switch(True)
+        self.switch.set_sensitive(False)
         password = self.password_entry.get_text()
         try:
             write_password(password)
@@ -203,12 +204,12 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_started(self, url: str) -> bool:
         self._busy = False
-        self._set_buttons_sensitive(True)
+        self.switch.set_sensitive(True)
         self._current_url = url
         self.url_entry.set_text(url)
         self.url_entry.select_region(0, -1)
         self.url_card.set_visible(True)
-        self._set_running(True)
+        self._set_switch(True)
         if self._local_dns_ok(url):
             self._set_status("on", "En línea")
         else:
@@ -218,11 +219,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_start_failed(self, message: str) -> bool:
         self._busy = False
-        self._set_buttons_sensitive(True)
+        self.switch.set_sensitive(True)
         self._current_url = None
         self.url_card.set_visible(False)
         self._set_status("off", "Apagado")
-        self._set_running(False)
+        self._set_switch(False)
         self._set_password_locked(False)
         self._set_error(message)
         return False
@@ -285,7 +286,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._busy = True
         self._set_error(None)
         self._set_status("busy", "Apagando…")
-        self._set_buttons_sensitive(False)
+        self.switch.set_sensitive(False)
 
         def work() -> None:
             try:
@@ -298,18 +299,18 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _on_stopped(self) -> bool:
         self._busy = False
-        self._set_buttons_sensitive(True)
+        self.switch.set_sensitive(True)
         self._current_url = None
         self.url_entry.set_text("")
         self.url_card.set_visible(False)
         self._set_status("off", "Apagado")
-        self._set_running(False)
+        self._set_switch(False)
         self._set_password_locked(False)
         return False
 
     def _on_stop_failed(self, message: str) -> bool:
         self._busy = False
-        self._set_buttons_sensitive(True)
+        self.switch.set_sensitive(True)
         self._set_error(message)
         return False
 
@@ -356,7 +357,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
                 self._set_status("on", "En línea")
             else:
                 self._set_status("busy", "Túnel ok · DNS…")
-            self._set_running(True)
+            self._set_switch(True)
             if changed:
                 self.url_entry.select_region(0, -1)
             self._set_password_locked(True)
@@ -364,7 +365,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._current_url = None
         self.url_card.set_visible(False)
         self._set_status("off", "Apagado")
-        self._set_running(False)
+        self._set_switch(False)
         self._set_password_locked(False)
 
     def _on_password_changed(self, *_args) -> None:
@@ -384,13 +385,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _set_password_locked(self, locked: bool) -> None:
         self.password_entry.set_sensitive(not locked)
 
-    def _set_running(self, running: bool) -> None:
-        self.start_btn.set_visible(not running)
-        self.stop_btn.set_visible(running)
-
-    def _set_buttons_sensitive(self, sensitive: bool) -> None:
-        self.start_btn.set_sensitive(sensitive)
-        self.stop_btn.set_sensitive(sensitive)
+    def _set_switch(self, active: bool) -> None:
+        self._syncing_switch = True
+        self.switch.set_state(active)
+        self.switch.set_active(active)
+        self._syncing_switch = False
 
     def _set_status(self, kind: str, text: str) -> None:
         self.status_label.set_label(text)

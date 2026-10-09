@@ -86,19 +86,21 @@ window.rc-window,
   color: #d6deeb;
 }
 
-.rc-start-btn {
+.rc-power-label {
+  color: #d6deeb;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.rc-power switch:checked {
   background: #21C7A8;
-  color: #011627;
-  border-radius: 10px;
-  min-height: 40px;
-  font-weight: 700;
 }
 
-.rc-start-btn:hover {
-  background: #7FDBCA;
+.rc-power switch:checked slider {
+  background: #011627;
 }
 
-.rc-start-btn:focus-visible {
+.rc-power switch:focus-visible {
   outline: 2px solid #82AAFF;
   outline-offset: 2px;
 }
