@@ -33,43 +33,9 @@ window.rc-window,
   background: #011627;
 }
 
-.rc-hero {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 4px 0 0;
-  box-shadow: none;
-}
-
-.rc-kicker {
-  color: #21C7A8;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1.8px;
-}
-
-.rc-title {
-  color: #d6deeb;
-  font-size: 28px;
-  font-weight: 700;
-}
-
-.rc-subtitle {
-  color: #7B88A1;
-  font-size: 13px;
-}
-
-.rc-status {
-  background: alpha(#011627, 0.7);
-  border-radius: 999px;
-  padding: 4px 10px;
-  border: 1px solid alpha(#82AAFF, 0.12);
-}
-
 .rc-status-label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.4px;
 }
 
 .rc-status-label.on {
@@ -93,31 +59,16 @@ window.rc-window,
 
 .rc-dot.on {
   background: #22DA6E;
-  box-shadow: 0 0 10px alpha(#22DA6E, 0.7);
-  animation: rc-pulse 1.7s ease-in-out infinite;
 }
 
 .rc-dot.busy {
   background: #82AAFF;
-  box-shadow: 0 0 10px alpha(#82AAFF, 0.55);
-  animation: rc-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes rc-pulse {
-  0% { opacity: 1; }
-  50% { opacity: 0.35; }
-  100% { opacity: 1; }
-}
-
-.rc-pass {
-  margin-top: 8px;
 }
 
 .rc-pass-label {
   color: #7B88A1;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1.2px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .rc-pass-entry {
@@ -135,26 +86,21 @@ window.rc-window,
   color: #d6deeb;
 }
 
-.rc-switch-wrap {
-  padding: 16px 0 8px;
-}
-
-.rc-hero switch {
-  min-width: 84px;
-  min-height: 44px;
-}
-
-.rc-hero switch slider {
-  min-width: 36px;
-  min-height: 36px;
-}
-
-.rc-hero switch:checked {
+.rc-start-btn {
   background: #21C7A8;
+  color: #011627;
+  border-radius: 10px;
+  min-height: 40px;
+  font-weight: 700;
 }
 
-.rc-hero switch:checked slider {
-  background: #011627;
+.rc-start-btn:hover {
+  background: #7FDBCA;
+}
+
+.rc-start-btn:focus-visible {
+  outline: 2px solid #82AAFF;
+  outline-offset: 2px;
 }
 
 .rc-url-card {
@@ -205,6 +151,14 @@ window.rc-window,
   background: #7FDBCA;
 }
 
+.rc-copy-btn:focus-visible,
+.rc-open-btn:focus-visible,
+.rc-btn-stop:focus-visible,
+.rc-btn-cancel:focus-visible {
+  outline: 2px solid #82AAFF;
+  outline-offset: 2px;
+}
+
 .rc-open-btn {
   background: alpha(#82AAFF, 0.16);
   color: #82AAFF;
@@ -213,16 +167,6 @@ window.rc-window,
 
 .rc-open-btn:hover {
   background: alpha(#82AAFF, 0.26);
-}
-
-.rc-idle {
-  color: #7B88A1;
-  font-size: 13px;
-}
-
-.rc-hint {
-  color: #575656;
-  font-size: 11px;
 }
 
 .rc-error {
