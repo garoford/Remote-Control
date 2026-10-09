@@ -33,6 +33,31 @@ window.rc-window,
   background: #011627;
 }
 
+.rc-kicker {
+  color: #21C7A8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+}
+
+.rc-title {
+  color: #d6deeb;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.rc-subtitle {
+  color: #7B88A1;
+  font-size: 13px;
+}
+
+.rc-status {
+  background: alpha(#011627, 0.7);
+  border-radius: 999px;
+  padding: 4px 10px;
+  border: 1px solid alpha(#82AAFF, 0.12);
+}
+
 .rc-status-label {
   font-size: 13px;
   font-weight: 600;
@@ -67,18 +92,32 @@ window.rc-window,
 
 .rc-pass-label {
   color: #7B88A1;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+}
+
+.rc-panel,
+.rc-url-card {
+  background: #0b2942;
+  border: 1px solid alpha(#21C7A8, 0.28);
+  border-radius: 18px;
+  padding: 16px;
 }
 
 .rc-pass-entry {
-  background: #0b2942;
+  background: #011627;
   color: #d6deeb;
-  border: 1px solid alpha(#82AAFF, 0.18);
-  border-radius: 10px;
-  padding: 8px 10px;
+  border: 1px solid alpha(#82AAFF, 0.22);
+  border-radius: 12px;
+  min-height: 38px;
+  padding: 8px 12px;
   caret-color: #21C7A8;
-  font-size: 13px;
+  font-size: 14px;
+}
+
+.rc-pass-entry:focus {
+  border-color: #21C7A8;
 }
 
 .rc-pass-entry selection {
@@ -86,10 +125,34 @@ window.rc-window,
   color: #d6deeb;
 }
 
-.rc-power-label {
-  color: #d6deeb;
-  font-size: 15px;
+.rc-strength {
+  font-size: 12px;
   font-weight: 600;
+}
+
+.rc-strength.none {
+  color: #7B88A1;
+}
+
+.rc-strength.weak {
+  color: #EF5350;
+}
+
+.rc-strength.ok {
+  color: #FFEB95;
+}
+
+.rc-strength.strong {
+  color: #22DA6E;
+}
+
+.rc-pass .rc-copy-btn {
+  min-height: 38px;
+  padding: 0 14px;
+}
+
+.rc-power {
+  padding: 6px 0 2px;
 }
 
 .rc-power switch:checked {
@@ -106,11 +169,7 @@ window.rc-window,
 }
 
 .rc-url-card {
-  background: #0b2942;
-  border: 1px solid alpha(#21C7A8, 0.28);
-  border-radius: 16px;
-  padding: 14px 14px 12px;
-  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.04);
+  padding: 16px;
 }
 
 .rc-url-label {
@@ -124,11 +183,16 @@ window.rc-window,
   background: #011627;
   color: #d6deeb;
   border: 1px solid alpha(#82AAFF, 0.18);
-  border-radius: 10px;
-  padding: 8px 10px;
+  border-radius: 12px;
+  min-height: 38px;
+  padding: 8px 12px;
   caret-color: #21C7A8;
   font-family: "FiraCode Nerd Font Mono", "Fira Code", monospace;
   font-size: 12.5px;
+}
+
+.rc-url-entry:focus {
+  border-color: #21C7A8;
 }
 
 .rc-url-entry selection {
@@ -171,6 +235,11 @@ window.rc-window,
   background: alpha(#82AAFF, 0.26);
 }
 
+.rc-hint {
+  color: #575656;
+  font-size: 11px;
+}
+
 .rc-error {
   background: alpha(#EF5350, 0.10);
   border: 1px solid alpha(#EF5350, 0.28);
@@ -186,14 +255,6 @@ window.rc-window,
   border: 1px solid alpha(#EF5350, 0.28);
   border-radius: 22px;
   padding: 26px 24px 22px;
-}
-
-.rc-dialog-icon {
-  background: alpha(#EF5350, 0.12);
-  color: #EF5350;
-  border-radius: 999px;
-  min-width: 52px;
-  min-height: 52px;
 }
 
 .rc-dialog-title {

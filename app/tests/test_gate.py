@@ -4,12 +4,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from remote_control.gate import (
+    STRENGTH_LABEL,
     GateUsage,
     consume_gate_args,
     load_gate,
+    password_strength,
     preference_path,
     read_password,
     set_cookie,
+    without_spaces,
     write_password,
 )
 from remote_control.tunnel import TunnelService
@@ -53,6 +56,32 @@ class GatePrefTests(unittest.TestCase):
             consume_gate_args(
                 ["remote-control", "--password", "a", "--clear-password"]
             )
+        with self.assertRaises(GateUsage) as spaced:
+            consume_gate_args(["remote-control", "--password", "mi clave"])
+        self.assertIn("espacios", str(spaced.exception))
+        with self.assertRaises(GateUsage):
+            consume_gate_args(["remote-control", "--password=a b"])
+
+    def test_strength_and_spaces(self) -> None:
+        self.assertEqual(password_strength(""), "none")
+        self.assertEqual(STRENGTH_LABEL["none"], "Sin contraseña")
+        self.assertEqual(password_strength("abc"), "weak")
+        self.assertEqual(password_strength("abcdefgh"), "ok")
+        self.assertEqual(password_strength("abcdefghij"), "ok")
+        self.assertEqual(password_strength("Abcdefghij1"), "strong")
+        self.assertEqual(STRENGTH_LABEL["weak"], "Débil")
+        self.assertEqual(STRENGTH_LABEL["ok"], "Regular")
+        self.assertEqual(STRENGTH_LABEL["strong"], "Fuerte")
+        self.assertEqual(without_spaces("mi clave"), "miclave")
+        self.assertEqual(without_spaces("a\tb\nc"), "abc")
+        self.assertEqual(without_spaces("clave"), "clave")
+
+    def test_write_rejects_spaces(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with self.assertRaises(GateUsage):
+                write_password("mi clave", home)
+            self.assertFalse(preference_path(home).exists())
 
     def test_runtime_gate_is_passed_only_with_password(self) -> None:
         with TemporaryDirectory() as tmp:
