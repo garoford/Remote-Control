@@ -2521,6 +2521,59 @@
       sendInput(out);
     }
 
+    // Phones have no right button: a two-finger tap sends one to apps that
+    // track the mouse (herdr's pane menu and the like).
+    function sendRightClick(x, y) {
+      var cell = cellAt(x, y) || { col: 0, row: 0 };
+      var at = ";" + (cell.col + 1) + ";" + (cell.row + 1);
+      var esc = String.fromCharCode(27);
+      sendInput(esc + "[<2" + at + "M" + esc + "[<2" + at + "m");
+    }
+
+    var twoTap = null;
+
+    function onTwoStart(ev) {
+      if (!ev.touches || fromKeys(ev)) return;
+      if (ev.touches.length === 2) {
+        clearHold();
+        var a = ev.touches[0];
+        var b = ev.touches[1];
+        twoTap = {
+          at: Date.now(),
+          pts: [
+            { id: a.identifier, x: a.clientX, y: a.clientY },
+            { id: b.identifier, x: b.clientX, y: b.clientY },
+          ],
+          x: (a.clientX + b.clientX) / 2,
+          y: (a.clientY + b.clientY) / 2,
+        };
+      } else if (ev.touches.length > 2) {
+        twoTap = null;
+      }
+    }
+
+    function onTwoMove(ev) {
+      if (!twoTap || !ev.touches) return;
+      for (var i = 0; i < ev.touches.length; i++) {
+        var t = ev.touches[i];
+        twoTap.pts.forEach(function (p) {
+          if (p.id === t.identifier && (Math.abs(t.clientX - p.x) > 10 || Math.abs(t.clientY - p.y) > 10)) {
+            twoTap = null;
+          }
+        });
+        if (!twoTap) return;
+      }
+    }
+
+    function onTwoEnd(ev) {
+      if (!twoTap || (ev.touches && ev.touches.length)) return;
+      var tap = twoTap;
+      twoTap = null;
+      if (Date.now() - tap.at > 350 || !appWantsWheel()) return;
+      if (ev.cancelable) ev.preventDefault();
+      sendRightClick(tap.x, tap.y);
+    }
+
     function fromKeys(ev) {
       var t = ev.target;
       return !!(
@@ -2769,6 +2822,12 @@
       el.addEventListener("touchmove", onMove, { passive: false });
       el.addEventListener("touchend", onEnd, { passive: true });
       el.addEventListener("touchcancel", onEnd, { passive: true });
+      el.addEventListener("touchstart", onTwoStart, { passive: true });
+      el.addEventListener("touchmove", onTwoMove, { passive: true });
+      el.addEventListener("touchend", onTwoEnd, { passive: false });
+      el.addEventListener("touchcancel", function () {
+        twoTap = null;
+      });
     }
 
     bindTouchHost = bind;
@@ -3522,6 +3581,30 @@
         }
       );
       return true;
+    });
+  }
+
+  // tmux sizes a shared window to the latest active client (window-size
+  // latest). Viewing or tapping does not count as activity, so a device
+  // that only looks keeps the other device's size. A focus-in report does
+  // count, and tmux only forwards it to apps that asked for focus events.
+  var sizeClaimAt = 0;
+  function claimSize() {
+    if (document.hidden) return;
+    var now = Date.now();
+    if (now - sizeClaimAt < 1500) return;
+    var ws = window.__rcTermSocket;
+    if (!ws || ws.readyState !== 1) return;
+    sizeClaimAt = now;
+    sendInput(String.fromCharCode(27) + "[I");
+  }
+
+  function bootSizeClaim() {
+    document.addEventListener("visibilitychange", claimSize);
+    window.addEventListener("focus", claimSize);
+    window.addEventListener("pageshow", claimSize);
+    ["pointerdown", "touchstart", "wheel"].forEach(function (type) {
+      document.addEventListener(type, claimSize, { capture: true, passive: true });
     });
   }
 
@@ -4411,6 +4494,7 @@
     bootPaste();
     bootCopyChip();
     bootOsc52();
+    bootSizeClaim();
     bootLinks();
     bootPinScroll();
     window.addEventListener("resize", function () {
