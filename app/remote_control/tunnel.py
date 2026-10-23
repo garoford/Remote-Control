@@ -580,15 +580,17 @@ class TunnelService:
         return html[:start] + html[end + 1 :]
 
     def _strip_tagged(self, html: str, tag: str, ident: str) -> str:
+        # Every copy: a page written before an id was listed here can hold several.
         open_tag = f'<{tag} id="{ident}"'
-        start = html.find(open_tag)
-        if start < 0:
-            return html
         close = f"</{tag}>"
-        end = html.find(close, start)
-        if end < 0:
-            return html
-        return html[:start] + html[end + len(close) :]
+        while True:
+            start = html.find(open_tag)
+            if start < 0:
+                return html
+            end = html.find(close, start)
+            if end < 0:
+                return html
+            html = html[:start] + html[end + len(close) :]
 
     def _strip_injects(self, html: str) -> str:
         html = self._strip_void(html, "meta", "rc-charset")
@@ -603,6 +605,8 @@ class TunnelService:
         html = self._strip_tagged(html, "script", "rc-tab-session-js")
         html = self._strip_tagged(html, "script", "rc-extra-keys-js")
         html = self._strip_tagged(html, "script", "rc-cache-js")
+        html = self._strip_tagged(html, "style", "rc-files-css")
+        html = self._strip_tagged(html, "script", "rc-files-js")
         token = '<meta id="rc-viewport"'
         start = html.find(token)
         if start >= 0:
@@ -643,6 +647,8 @@ class TunnelService:
         css_path = root / "extra_keys.css"
         keys_js = root / "extra_keys.js"
         tab_js = root / "tab_session.js"
+        files_css = root / "files.css"
+        files_js = root / "files.js"
         parts: list[str] = [
             '<meta id="rc-viewport" name="viewport" content="width=device-width,'
             "initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,"
@@ -662,6 +668,10 @@ class TunnelService:
             parts.append(
                 f'<script id="rc-extra-keys-js">{keys_js.read_text(encoding="utf-8")}</script>'
             )
+        if files_css.is_file():
+            parts.append(f'<style id="rc-files-css">{files_css.read_text(encoding="utf-8")}</style>')
+        if files_js.is_file():
+            parts.append(f'<script id="rc-files-js">{files_js.read_text(encoding="utf-8")}</script>')
         parts.append(
             f'<script id="rc-cache-js" src="/rc-assets/cache.js?v={__version__}"></script>'
         )
@@ -678,6 +688,26 @@ class TunnelService:
             wrapper.chmod(0o755)
         if conf_src.is_file():
             conf.write_text(conf_src.read_text(encoding="utf-8"), encoding="utf-8")
+        # zsh tabs load web/zdot, which wraps CLIs with rc_keephistory.py.
+        keep_src = root / "rc_keephistory.py"
+        if keep_src.is_file():
+            keep = self.run_dir / "rc_keephistory.py"
+            keep.write_text(keep_src.read_text(encoding="utf-8"), encoding="utf-8")
+            keep.chmod(0o755)
+        # ~/.zshrc sources this (one line) so new AI CLIs pick the active
+        # Remote Control profile, also inside herdr panes.
+        prof_src = root / "profiles.zsh"
+        if prof_src.is_file():
+            prof = self.home / ".local" / "share" / "remote-control" / "profiles.zsh"
+            prof.parent.mkdir(parents=True, exist_ok=True)
+            prof.write_text(prof_src.read_text(encoding="utf-8"), encoding="utf-8")
+        zdot_src = root / "zdot"
+        if zdot_src.is_dir():
+            zdot = self.run_dir / "zdot"
+            zdot.mkdir(parents=True, exist_ok=True)
+            for item in zdot_src.iterdir():
+                if item.is_file():
+                    (zdot / item.name).write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
 
     def _ensure_woff2_fonts(self) -> None:
         if self.font_reg_woff.is_file() and self.font_bold_woff.is_file():

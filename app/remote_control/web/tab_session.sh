@@ -20,4 +20,12 @@ if [[ -f "$conf" ]]; then
   args+=(-f "$conf")
 fi
 
-exec tmux "${args[@]}" new-session -A -s "$name" -- "$shell" -il
+# zsh tabs load the Remote Control zdot folder, which wraps CLIs that wipe
+# the scrollback (see rc_keephistory.py). Same as workspaces.tab_env_args.
+env_args=()
+run_dir="$(dirname "$conf")"
+if [[ "$(basename "$shell")" == "zsh" && -f "$run_dir/zdot/.zshrc" && -f "$run_dir/rc_keephistory.py" ]]; then
+  env_args=(-e "ZDOTDIR=$run_dir/zdot" -e "RC_KEEPHISTORY=$run_dir/rc_keephistory.py")
+fi
+
+exec tmux "${args[@]}" new-session -A "${env_args[@]}" -s "$name" -- "$shell" -il

@@ -30,6 +30,8 @@ from remote_control.history import (
     scrollback_payload,
     scrollback_state,
 )
+from remote_control import files as fs
+from remote_control import profiles
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control.workspaces import change_workspaces, snapshot, workspaces_payload
 from remote_control.mobile import (
@@ -46,7 +48,7 @@ MAX_HEADER = 1024 * 1024
 _API_EXTRA = [
     ("Cache-Control", "no-store"),
     ("Access-Control-Allow-Origin", "*"),
-    ("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS"),
+    ("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, OPTIONS"),
     ("Access-Control-Allow-Headers", "Content-Type, X-RC-Paste-Name"),
 ]
 
@@ -356,6 +358,20 @@ class Sidecar:
                 return
             if method == "POST" and path == "/rc-scroll":
                 self._serve_scroll(conn, parse_qs(parsed_url.query))
+                return
+            if path == "/rc-profiles" and method in ("GET", "POST"):
+                self._serve_profiles(conn, method, body)
+                return
+            if path == "/rc-profile-ping" and method == "POST":
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, ValueError):
+                    req = {}
+                pid = req.get("profile") if isinstance(req, dict) else ""
+                self._json(conn, profiles.set_active(str(pid or "")))
+                return
+            if path.startswith("/rc-fs/"):
+                self._serve_fs(conn, method, path[len("/rc-fs/") :], parse_qs(parsed_url.query), body, headers)
                 return
             if method == "POST" and path == "/rc-paste-reserve":
                 self._serve_paste_reserve(conn, body)
@@ -758,6 +774,206 @@ class Sidecar:
             )
             return
         self._paste_ok(conn, path)
+
+    # --- file explorer -------------------------------------------------------
+
+    def _json(self, conn: socket.socket, payload: dict, status: str = "200 OK") -> None:
+        conn.sendall(
+            _http_response(
+                status,
+                # File names that are not valid UTF-8 come back with "?" instead
+                # of breaking the whole listing.
+                json.dumps(payload, ensure_ascii=False).encode("utf-8", "replace"),
+                "application/json; charset=utf-8",
+                _API_EXTRA,
+            )
+        )
+
+    def _serve_profiles(self, conn: socket.socket, method: str, body: bytes) -> None:
+        if method == "GET":
+            self._json(conn, profiles.public())
+            return
+        try:
+            req = json.loads(body.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, ValueError):
+            req = {}
+        req = req if isinstance(req, dict) else {}
+        kind = req.get("op")
+        if kind == "create":
+            result = profiles.create(str(req.get("label") or ""))
+        elif kind == "delete":
+            result = profiles.delete(str(req.get("id") or ""))
+        else:
+            result = {"ok": False, "error": "Operación desconocida"}
+        self._json(conn, {**profiles.public(), **result})
+
+    def _serve_fs(
+        self,
+        conn: socket.socket,
+        method: str,
+        route: str,
+        query: dict[str, list[str]],
+        body: bytes,
+        headers: dict[str, str],
+    ) -> None:
+        def arg(name: str) -> str:
+            return (query.get(name) or [""])[0]
+
+        try:
+            if method == "GET" and route == "list":
+                where = arg("path")
+                if where == "recent://":
+                    self._json(conn, fs.recent())
+                elif where == "trash://":
+                    self._json(conn, fs.trash_list())
+                else:
+                    self._json(conn, fs.list_dir(where))
+            elif method == "GET" and route == "places":
+                self._json(conn, fs.places())
+            elif method == "GET" and route == "search":
+                self._json(conn, fs.search(arg("path"), arg("q"), arg("hidden") == "1"))
+            elif method == "GET" and route == "text":
+                self._json(conn, fs.text_preview(arg("path")))
+            elif method == "GET" and route == "thumb":
+                found = fs.thumb(arg("path"))
+                if found is None:
+                    self._json(conn, {"error": "sin miniatura"}, "404 Not Found")
+                    return
+                data = found.read_bytes()
+                conn.sendall(
+                    _http_response("200 OK", data, "image/png", [("Cache-Control", "private, max-age=3600")])
+                )
+            elif method in ("GET", "HEAD") and route == "file":
+                path, size, mime = fs.file_for_read(arg("path"))
+                name = path.name
+                self._send_file(conn, path, size, mime, headers, name if arg("dl") == "1" else "", method == "HEAD")
+            elif method == "POST" and route == "op":
+                op = json.loads(body.decode("utf-8") or "{}")
+                if not isinstance(op, dict):
+                    raise fs.FsError("Operación no válida")
+                if op.get("op") == "openTab":
+                    self._json(conn, self._fs_open_tab(op))
+                else:
+                    self._json(conn, fs.apply_op(op))
+            elif method == "PUT" and route == "upload":
+                self._json(
+                    conn,
+                    fs.upload_chunk(
+                        arg("dir"),
+                        arg("name"),
+                        int(arg("offset") or 0),
+                        int(arg("total") or 0),
+                        body,
+                        arg("id"),
+                    ),
+                )
+            elif method == "POST" and route == "zip":
+                req = json.loads(body.decode("utf-8") or "{}")
+                req = req if isinstance(req, dict) else {}
+                paths = req.get("paths") if isinstance(req.get("paths"), list) else []
+                self._json(conn, fs.start_zip(paths, str(req.get("label") or "")))
+            elif method == "GET" and route == "zip-status":
+                self._json(conn, fs.zip_status(arg("token")))
+            elif method == "GET" and route == "zip":
+                taken = fs.take_zip(arg("token"))
+                if taken is None:
+                    self._json(conn, {"error": "La descarga ya no está disponible"}, "404 Not Found")
+                    return
+                zpath, zname = taken
+                try:
+                    self._send_file(conn, zpath, zpath.stat().st_size, "application/zip", {}, zname, False)
+                finally:
+                    zpath.unlink(missing_ok=True)
+            else:
+                self._json(conn, {"error": "not found"}, "404 Not Found")
+        except fs.FsError as exc:
+            self._json(conn, {"ok": False, "error": str(exc)}, exc.status)
+        except (ValueError, UnicodeDecodeError):
+            self._json(conn, {"ok": False, "error": "Petición no válida"}, "400 Bad Request")
+        except PermissionError:
+            self._json(conn, {"ok": False, "error": "Sin permiso"}, "403 Forbidden")
+        except OSError as exc:
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                return
+            self._json(conn, {"ok": False, "error": str(exc.strerror or exc)}, "500 Internal Server Error")
+
+    def _send_file(
+        self,
+        conn: socket.socket,
+        path: Path,
+        size: int,
+        mime: str,
+        headers: dict[str, str],
+        attachment: str,
+        head_only: bool,
+    ) -> None:
+        start, end = 0, size - 1
+        status = "200 OK"
+        extra = [("Cache-Control", "no-store"), ("Accept-Ranges", "bytes")]
+        rng = (headers.get("range") or "").strip()
+        if rng.startswith("bytes=") and size > 0 and not attachment:
+            first = rng[len("bytes=") :].split(",", 1)[0]
+            lo, _, hi = first.partition("-")
+            try:
+                if lo:
+                    start = int(lo)
+                    end = min(int(hi), size - 1) if hi else size - 1
+                else:
+                    start = max(0, size - int(hi))
+                if start > end or start >= size:
+                    raise ValueError
+                status = "206 Partial Content"
+                extra.append(("Content-Range", f"bytes {start}-{end}/{size}"))
+            except ValueError:
+                conn.sendall(
+                    _http_response("416 Range Not Satisfiable", b"", "text/plain", [("Content-Range", f"bytes */{size}")])
+                )
+                return
+        if attachment:
+            extra.append(("Content-Disposition", fs.content_disposition(attachment)))
+        if mime.startswith("text/") or mime in ("application/json", "application/javascript"):
+            mime += "; charset=utf-8"
+        # Never let a previewed file run as a page on this origin.
+        extra.append(("X-Content-Type-Options", "nosniff"))
+        if mime.startswith(("text/html", "image/svg", "application/xhtml")):
+            extra.append(("Content-Security-Policy", "sandbox"))
+        length = max(0, end - start + 1) if size else 0
+        lines = [f"HTTP/1.1 {status}", f"Content-Type: {mime}", f"Content-Length: {length}", "Connection: close"]
+        lines += [f"{k}: {v}" for k, v in extra]
+        conn.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin1", "replace"))
+        if head_only or not length:
+            return
+        conn.settimeout(None)
+        with open(path, "rb") as fh:
+            conn.sendfile(fh, offset=start, count=length)
+
+    def _fs_open_tab(self, op: dict) -> dict:
+        import secrets
+        import subprocess
+
+        from remote_control.herdr import tab_launch_context
+        from remote_control.history import TAB_RE
+        from remote_control.workspaces import tab_env_args
+
+        folder = fs.resolve(op.get("path"))
+        if not folder.is_dir():
+            folder = folder.parent
+        if not folder.is_dir():
+            raise fs.FsError("No existe esa carpeta")
+        conf, shell, env = tab_launch_context()
+        tab = "rc" + secrets.token_hex(12)
+        assert TAB_RE.match(tab)
+        conf_args = ["-f", str(conf)] if conf.is_file() else []
+        made = subprocess.run(
+            ["tmux", "-L", self.tmux_socket, *conf_args, "new-session", *tab_env_args(conf, shell), "-d", "-s", tab, "-c", str(folder), "--", shell, "-il"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            env=env,
+        )
+        if made.returncode != 0:
+            raise fs.FsError("No pude abrir la terminal")
+        return {"ok": True, "tab": tab}
 
     def _proxy(
         self,

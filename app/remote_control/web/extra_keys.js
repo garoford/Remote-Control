@@ -58,6 +58,11 @@
     '<path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm-1-9a1 1 0 0 1 2 0v6a1 1 0 0 1-2 0V5Zm6 6a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/>' +
     "</svg>";
 
+  var FOLDER_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path fill="currentColor" d="M4 4h5.6l2 2H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 4v10h16V8H4Z"/>' +
+    "</svg>";
+
   var PASTE_CHUNK = 2048;
   var PASTE_EDGE = 1920;
   var PASTE_QUALITY = 0.82;
@@ -637,6 +642,7 @@
     tmuxScroll.pending = 0;
     armPaneScroll(pane.term);
     fitPane(pane);
+    claimSizeSoon();
     try {
       if (typeof pane.term.refresh === "function") {
         pane.term.refresh(0, Math.max(0, (pane.term.rows || 1) - 1));
@@ -1092,7 +1098,9 @@
 
   function armTextarea(ta) {
     if (!ta) return;
-    if (imeOpen) {
+    // The read-only/blur dance only keeps the phone keyboard down; on a PC it
+    // just took the focus away after every paste or upload.
+    if (imeOpen || !document.documentElement.classList.contains("rc-touch")) {
       ta.removeAttribute("readonly");
       ta.removeAttribute("inputmode");
       return;
@@ -1480,7 +1488,7 @@
   function isTypeTarget(el) {
     if (!el) return true;
     if (el.id === "rc-file-pick") return false;
-    if (el.closest && el.closest("#rc-sessions, #rc-file-pick, #rc-ws-drawer")) return false;
+    if (el.closest && el.closest("#rc-sessions, #rc-file-pick, #rc-ws-drawer, #rc-auto-modal, #rc-files")) return false;
     return true;
   }
 
@@ -1636,6 +1644,7 @@
 
   function sendInput(text) {
     if (!text) return false;
+    pingProfile(/[\r\n]/.test(text));
     var ws = window.__rcTermSocket;
     if (!ws || ws.readyState !== 1) {
       setLinkState(false);
@@ -3288,6 +3297,23 @@
     },
   });
 
+  var FILES_POS_KEY = "rc-files-pos";
+  var pcFiles = makeFloat({
+    id: "rc-pc-files",
+    key: FILES_POS_KEY,
+    op: "filesPos",
+    aria: "Archivos",
+    title: "Archivos (arrastra para moverlo; la esquina o la rueda cambian el tamaño)",
+    icon: FOLDER_ICON,
+    onTap: function () {
+      if (window.__rcFiles) window.__rcFiles.open();
+    },
+  });
+
+  function setFilesPos(pos, fromServer) {
+    pcFiles.setPos(pos, fromServer);
+  }
+
   function setMicPos(pos, fromServer) {
     pcMic.setPos(pos, fromServer);
   }
@@ -3588,21 +3614,31 @@
   // latest). Viewing or tapping does not count as activity, so a device
   // that only looks keeps the other device's size. A focus-in report does
   // count, and tmux only forwards it to apps that asked for focus events.
-  var sizeClaimAt = 0;
+  // Throttled per connection: switching tabs must claim the new tab at once
+  // even if the old one was just claimed by the same tap.
   function claimSize() {
     if (document.hidden) return;
-    var now = Date.now();
-    if (now - sizeClaimAt < 1500) return;
     var ws = window.__rcTermSocket;
     if (!ws || ws.readyState !== 1) return;
-    sizeClaimAt = now;
+    var now = Date.now();
+    if (now - (ws.__rcClaimAt || 0) < 1500) return;
+    ws.__rcClaimAt = now;
     sendInput(String.fromCharCode(27) + "[I");
+  }
+
+  // A tab already connected in the background keeps the size of whichever
+  // device used it last; showing it here must take the size back.
+  function claimSizeSoon() {
+    setTimeout(claimSize, 0);
+    setTimeout(claimSize, 400);
   }
 
   function bootSizeClaim() {
     document.addEventListener("visibilitychange", claimSize);
     window.addEventListener("focus", claimSize);
     window.addEventListener("pageshow", claimSize);
+    window.addEventListener("rc-tab-changed", claimSizeSoon);
+    window.addEventListener("rc-ws-open", claimSizeSoon);
     ["pointerdown", "touchstart", "wheel"].forEach(function (type) {
       document.addEventListener(type, claimSize, { capture: true, passive: true });
     });
@@ -3756,6 +3792,8 @@
   }
 
   function sessionLabel(item, counts) {
+    var named = wsState && wsState.labels && wsState.labels[item.id];
+    if (named) return named;
     if (!item.path && item.command === "nueva") return "Nueva sesión";
     var path = String(item.path || "");
     var parts = path.split("/").filter(Boolean);
@@ -3946,9 +3984,14 @@
   function takeWorkspaces(payload) {
     if (!payload || !Array.isArray(payload.workspaces)) return payload;
     wsState = payload;
-    if (payload.theme) setThemePref(payload.theme, true);
+    // Only this device's own choice; another device's theme never applies here.
+    var myTheme = payload.themes && payload.themes[foldDevice()];
+    if (myTheme) setThemePref(myTheme, true);
     if (payload.micPos) setMicPos(payload.micPos, true);
     if (payload.filePos) setFilePos(payload.filePos, true);
+    if (payload.filesPos) setFilesPos(payload.filesPos, true);
+    renderProfiles();
+    if (window.__rcFiles && window.__rcFiles.takePrefs) window.__rcFiles.takePrefs(payload.fsPrefs);
     if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
     renderDrawer();
     return payload;
@@ -4080,6 +4123,7 @@
     drawerConfirm = "";
     renderDrawer();
     pullSessions();
+    loadProfiles();
   }
 
   function closeDrawer() {
@@ -4112,109 +4156,961 @@
     return b;
   }
 
-  function renderDrawer() {
-    var list = document.getElementById("rc-ws-list");
-    if (!list || !wsState) return;
-    var focusName = document.activeElement && document.activeElement.id === "rc-ws-rename";
-    if (focusName) return;
-    var cur = currentWs();
-    list.innerHTML = "";
-    wsState.workspaces.forEach(function (ws) {
-      var row = document.createElement("div");
-      row.className = "rc-ws-item" + (ws === cur ? " is-current" : "");
-      if (drawerEdit === ws.id) {
-        var input = document.createElement("input");
-        input.id = "rc-ws-rename";
-        input.type = "text";
-        input.maxLength = 40;
-        input.value = ws.name;
-        input.addEventListener("keydown", function (ev) {
-          ev.stopPropagation();
-          if (ev.key === "Enter") {
-            ev.preventDefault();
-            var name = input.value.trim();
-            drawerEdit = "";
-            input.blur();
-            if (name && name !== ws.name) wsPost({ op: "rename", id: ws.id, name: name });
-            else renderDrawer();
-          } else if (ev.key === "Escape") {
-            ev.preventDefault();
-            drawerEdit = "";
-            input.blur();
-            renderDrawer();
-          }
-        });
-        input.addEventListener("blur", function () {
+  var groupEdit = "";
+  var groupConfirm = "";
+  var FOLD_KEY = "rc-ws-folded";
+
+  // Each device keeps its own folded groups. The tunnel URL (and with it the
+  // browser storage) changes on every start, so the server keeps them under a
+  // key made from the device kind and its browser, which survive that.
+  function foldDevice() {
+    var ua = navigator.userAgent || "";
+    var h = 5381;
+    for (var i = 0; i < ua.length; i++) h = ((h * 33) ^ ua.charCodeAt(i)) >>> 0;
+    return (document.documentElement.dataset.rcDevice || "pc") + "-" + h.toString(36);
+  }
+
+  function readFolded() {
+    var server = wsState && wsState.folded && wsState.folded[foldDevice()];
+    if (Array.isArray(server)) {
+      var out = {};
+      server.forEach(function (gid) {
+        out[gid] = true;
+      });
+      return out;
+    }
+    try {
+      var raw = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}");
+      return raw && typeof raw === "object" ? raw : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function toggleFold(gid) {
+    var folded = readFolded();
+    if (folded[gid]) delete folded[gid];
+    else folded[gid] = true;
+    try {
+      localStorage.setItem(FOLD_KEY, JSON.stringify(folded));
+    } catch (_) {}
+    var device = foldDevice();
+    if (wsState) {
+      wsState.folded = wsState.folded || {};
+      wsState.folded[device] = Object.keys(folded);
+    }
+    renderDrawer();
+    wsPost({ op: "fold", device: device, groups: Object.keys(folded) });
+  }
+
+  function wsGroups() {
+    var groups = wsState && Array.isArray(wsState.groups) ? wsState.groups : [];
+    return groups.length ? groups : [{ id: "gpc", name: "PC", fixed: true }];
+  }
+
+  function nameInput(id, value, done) {
+    var input = document.createElement("input");
+    input.id = id;
+    input.className = "rc-ws-input";
+    input.type = "text";
+    input.maxLength = 40;
+    input.value = value;
+    var settled = false;
+    function finish(save) {
+      if (settled) return;
+      settled = true;
+      done(save ? input.value.trim() : "");
+    }
+    input.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        finish(true);
+        input.blur();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        finish(false);
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", function () {
+      finish(true);
+    });
+    setTimeout(function () {
+      try {
+        input.focus();
+        input.select();
+      } catch (_) {}
+    }, 0);
+    return input;
+  }
+
+  function wsRow(ws, cur) {
+    var row = document.createElement("div");
+    row.className = "rc-ws-item" + (ws === cur ? " is-current" : "");
+    if (drawerEdit === ws.id) {
+      row.classList.add("is-editing");
+      row.appendChild(
+        nameInput("rc-ws-rename", ws.name, function (name) {
           if (drawerEdit !== ws.id) return;
-          var name = input.value.trim();
           drawerEdit = "";
           if (name && name !== ws.name) wsPost({ op: "rename", id: ws.id, name: name });
           else setTimeout(renderDrawer, 0);
+        })
+      );
+      var groups = wsGroups();
+      if (groups.length > 1) {
+        var pick = document.createElement("select");
+        pick.className = "rc-ws-move";
+        pick.setAttribute("aria-label", "Mover a grupo");
+        groups.forEach(function (g) {
+          var opt = document.createElement("option");
+          opt.value = g.id;
+          opt.textContent = g.name;
+          if (g.id === ws.group) opt.selected = true;
+          pick.appendChild(opt);
         });
-        row.appendChild(input);
-        list.appendChild(row);
-        setTimeout(function () {
-          try {
-            input.focus();
-            input.select();
-          } catch (_) {}
-        }, 0);
-        return;
+        // Picking a group must not count as leaving the name field.
+        pick.addEventListener("pointerdown", function (ev) {
+          ev.preventDefault();
+        });
+        pick.addEventListener("mousedown", function (ev) {
+          ev.stopPropagation();
+        });
+        pick.addEventListener("change", function () {
+          drawerEdit = "";
+          wsPost({ op: "move", id: ws.id, group: pick.value });
+        });
+        row.appendChild(pick);
       }
-      if (drawerConfirm === ws.id) {
-        var n = liveCount(ws);
-        var ask = document.createElement("span");
-        ask.className = "rc-ws-ask";
-        ask.textContent =
-          "¿Estás seguro? " +
-          (n ? "Se cerrará" + (n === 1 ? " 1 pestaña." : "n " + n + " pestañas.") : "Se borrará el workspace.");
-        row.appendChild(ask);
-        row.appendChild(
-          wsButton("Sí", "rc-ws-yes", "Confirmar", function () {
-            drawerConfirm = "";
-            deleteWorkspace(ws);
-          })
-        );
-        row.appendChild(
-          wsButton("No", "rc-ws-no", "Cancelar", function () {
-            drawerConfirm = "";
-            renderDrawer();
-          })
-        );
-        list.appendChild(row);
-        return;
-      }
-      var main = document.createElement("button");
-      main.type = "button";
-      main.className = "rc-ws-main";
-      var name = document.createElement("span");
-      name.className = "rc-ws-name";
-      name.textContent = ws.name;
-      var count = document.createElement("span");
-      count.className = "rc-ws-count";
-      count.textContent = String(liveCount(ws));
-      main.appendChild(name);
-      main.appendChild(count);
-      main.addEventListener("click", function () {
-        enterWorkspace(ws);
-      });
-      row.appendChild(main);
+      return row;
+    }
+    if (drawerConfirm === ws.id) {
+      var n = liveCount(ws);
+      var ask = document.createElement("span");
+      ask.className = "rc-ws-ask";
+      ask.textContent =
+        "¿Estás seguro? " +
+        (n ? "Se cerrará" + (n === 1 ? " 1 pestaña." : "n " + n + " pestañas.") : "Se borrará el workspace.");
+      row.appendChild(ask);
       row.appendChild(
-        wsButton("✎", "rc-ws-act", "Renombrar " + ws.name, function () {
-          drawerEdit = ws.id;
+        wsButton("Sí", "rc-ws-yes", "Confirmar", function () {
+          drawerConfirm = "";
+          deleteWorkspace(ws);
+        })
+      );
+      row.appendChild(
+        wsButton("No", "rc-ws-no", "Cancelar", function () {
           drawerConfirm = "";
           renderDrawer();
         })
       );
-      row.appendChild(
-        wsButton("🗑", "rc-ws-act", "Borrar " + ws.name, function () {
-          drawerConfirm = ws.id;
-          drawerEdit = "";
+      return row;
+    }
+    var main = document.createElement("button");
+    main.type = "button";
+    main.className = "rc-ws-main";
+    var name = document.createElement("span");
+    name.className = "rc-ws-name";
+    name.textContent = ws.name;
+    var count = document.createElement("span");
+    count.className = "rc-ws-count";
+    count.textContent = String(liveCount(ws));
+    main.appendChild(name);
+    main.appendChild(count);
+    main.addEventListener("click", function () {
+      enterWorkspace(ws);
+    });
+    row.appendChild(main);
+    row.appendChild(
+      wsButton("✎", "rc-ws-act", "Renombrar o mover " + ws.name, function () {
+        drawerEdit = ws.id;
+        drawerConfirm = "";
+        renderDrawer();
+      })
+    );
+    row.appendChild(
+      wsButton("🗑", "rc-ws-act", "Borrar " + ws.name, function () {
+        drawerConfirm = ws.id;
+        drawerEdit = "";
+        renderDrawer();
+      })
+    );
+    return row;
+  }
+
+  function groupHead(group, members, folded) {
+    var head = document.createElement("div");
+    head.className = "rc-ws-group" + (folded ? " is-folded" : "");
+    if (groupEdit === group.id) {
+      head.appendChild(
+        nameInput("rc-ws-group-name", group.name, function (name) {
+          if (groupEdit !== group.id) return;
+          groupEdit = "";
+          if (group.id === "new") {
+            if (name) wsPost({ op: "groupCreate", name: name });
+            else setTimeout(renderDrawer, 0);
+          } else if (name && name !== group.name) wsPost({ op: "groupRename", group: group.id, name: name });
+          else setTimeout(renderDrawer, 0);
+        })
+      );
+      return head;
+    }
+    if (groupConfirm === group.id) {
+      var ask = document.createElement("span");
+      ask.className = "rc-ws-ask";
+      ask.textContent = members.length
+        ? "¿Borrar el grupo? Sus workspaces pasan a PC."
+        : "¿Borrar el grupo?";
+      head.appendChild(ask);
+      head.appendChild(
+        wsButton("Sí", "rc-ws-yes", "Confirmar", function () {
+          groupConfirm = "";
+          wsPost({ op: "groupDelete", group: group.id });
+        })
+      );
+      head.appendChild(
+        wsButton("No", "rc-ws-no", "Cancelar", function () {
+          groupConfirm = "";
           renderDrawer();
         })
       );
-      list.appendChild(row);
+      return head;
+    }
+    var fold = document.createElement("button");
+    fold.type = "button";
+    fold.className = "rc-ws-group-name";
+    fold.setAttribute("aria-expanded", folded ? "false" : "true");
+    var caret = document.createElement("span");
+    caret.className = "rc-ws-caret";
+    caret.textContent = "▾";
+    var label = document.createElement("span");
+    label.className = "rc-ws-group-label";
+    label.textContent = group.name;
+    fold.appendChild(caret);
+    fold.appendChild(label);
+    if (folded && members.length) {
+      var hint = document.createElement("span");
+      hint.className = "rc-ws-count";
+      hint.textContent = String(members.length);
+      fold.appendChild(hint);
+    }
+    fold.setAttribute("aria-label", (folded ? "Mostrar " : "Ocultar ") + group.name);
+    fold.addEventListener("click", function () {
+      toggleFold(group.id);
     });
+    head.appendChild(fold);
+    if (group.id === "gphone") {
+      head.appendChild(
+        wsButton("Auto", "rc-ws-auto", "Copiar herdr a Phone", function () {
+          openAutoModal();
+        })
+      );
+    }
+    if (members.length) {
+      head.appendChild(
+        wsButton("Clear", "rc-ws-clear", "Vaciar " + group.name, function () {
+          openClearModal(group);
+        })
+      );
+    }
+    if (!group.fixed) {
+      head.appendChild(
+        wsButton("✎", "rc-ws-act", "Renombrar grupo " + group.name, function () {
+          groupEdit = group.id;
+          groupConfirm = "";
+          renderDrawer();
+        })
+      );
+      head.appendChild(
+        wsButton("🗑", "rc-ws-act", "Borrar grupo " + group.name, function () {
+          groupConfirm = group.id;
+          groupEdit = "";
+          renderDrawer();
+        })
+      );
+    }
+    head.appendChild(
+      wsButton("+", "rc-ws-act rc-ws-plus", "Nuevo workspace en " + group.name, function () {
+        var n = wsState ? wsState.workspaces.length + 1 : 1;
+        wsPost({ op: "create", name: "Workspace " + n, group: group.id }).then(function (payload) {
+          var ws = payload && findWs(payload.id);
+          if (ws) enterWorkspace(ws);
+        });
+      })
+    );
+    return head;
+  }
+
+  function renderDrawer() {
+    var list = document.getElementById("rc-ws-list");
+    if (!list || !wsState) return;
+    var active = document.activeElement;
+    if (active && list.contains(active) && active.tagName === "INPUT") return;
+    var cur = currentWs();
+    var folded = readFolded();
+    list.innerHTML = "";
+    var groups = wsGroups();
+    var known = {};
+    groups.forEach(function (g) {
+      known[g.id] = true;
+    });
+    groups.forEach(function (group) {
+      var members = wsState.workspaces.filter(function (ws) {
+        return ws.group === group.id || (!known[ws.group] && group.id === groups[0].id);
+      });
+      var isFolded = !!folded[group.id];
+      var section = document.createElement("section");
+      section.className = "rc-ws-section";
+      section.appendChild(groupHead(group, members, isFolded));
+      if (!isFolded) {
+        if (!members.length) {
+          var empty = document.createElement("div");
+          empty.className = "rc-ws-empty";
+          empty.textContent = group.id === "gphone" ? "Vacío. Usa Auto para copiar herdr." : "Sin workspaces";
+          section.appendChild(empty);
+        }
+        members.forEach(function (ws) {
+          section.appendChild(wsRow(ws, cur));
+        });
+      }
+      list.appendChild(section);
+    });
+    if (groupEdit === "new") {
+      var section = document.createElement("section");
+      section.className = "rc-ws-section";
+      section.appendChild(groupHead({ id: "new", name: "", fixed: false }, [], false));
+      list.appendChild(section);
+    }
+  }
+
+  // --- Auto: copy herdr into Phone ---------------------------------------------
+
+  var autoBusy = false;
+
+  function closeAutoModal() {
+    if (autoBusy) return;
+    var modal = document.getElementById("rc-auto-modal");
+    if (modal) modal.remove();
+  }
+
+  function autoModalShell() {
+    closeAutoModal();
+    var modal = document.createElement("div");
+    modal.id = "rc-auto-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-labelledby", "rc-auto-title");
+    modal.addEventListener("click", function (ev) {
+      if (ev.target === modal) closeAutoModal();
+    });
+    modal.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Escape") closeAutoModal();
+    });
+    var card = document.createElement("div");
+    card.className = "rc-auto-card";
+    var title = document.createElement("div");
+    title.id = "rc-auto-title";
+    title.className = "rc-auto-title";
+    title.textContent = "Copiar herdr a Phone";
+    card.appendChild(title);
+    modal.appendChild(card);
+    (document.body || document.documentElement).appendChild(modal);
+    return card;
+  }
+
+  function shortPath(path) {
+    var parts = String(path || "").split("/").filter(Boolean);
+    return parts.length ? parts.slice(-2).join("/") : "~";
+  }
+
+  function openAutoModal() {
+    if (autoBusy) return;
+    var card = autoModalShell();
+    var wait = document.createElement("div");
+    wait.className = "rc-auto-note";
+    wait.textContent = "Leyendo herdr…";
+    card.appendChild(wait);
+    fetch("/rc-workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "herdrPlan" }),
+      cache: "no-store",
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        if (!document.getElementById("rc-auto-modal")) return;
+        takeWorkspaces(payload);
+        if (!payload || !payload.ok) {
+          wait.textContent = (payload && payload.error) || "No pude leer herdr";
+          wait.classList.add("is-error");
+          card.appendChild(autoActions(null));
+          return;
+        }
+        fillAutoModal(card, wait, payload);
+      })
+      .catch(function () {
+        wait.textContent = "No pude leer herdr";
+        wait.classList.add("is-error");
+        card.appendChild(autoActions(null));
+      });
+  }
+
+  function fillAutoModal(card, note, payload) {
+    var plan = payload.plan || [];
+    var panes = 0;
+    plan.forEach(function (ws) {
+      panes += ws.panes.length;
+    });
+    note.className = "rc-auto-note is-warn";
+    note.textContent =
+      (payload.closing
+        ? "Se cerrará todo lo que hay en Phone (" + payload.closing + (payload.closing === 1 ? " pestaña" : " pestañas") + "). "
+        : "") +
+      "Se crearán " + plan.length + (plan.length === 1 ? " workspace" : " workspaces") +
+      " con " + panes + (panes === 1 ? " pestaña" : " pestañas") + ". herdr no se toca.";
+    var list = document.createElement("div");
+    list.className = "rc-auto-list";
+    plan.forEach(function (ws) {
+      var block = document.createElement("div");
+      block.className = "rc-auto-ws";
+      var head = document.createElement("div");
+      head.className = "rc-auto-ws-name";
+      head.textContent = ws.name;
+      block.appendChild(head);
+      ws.panes.forEach(function (pane) {
+        var row = document.createElement("div");
+        row.className = "rc-auto-pane";
+        var label = document.createElement("span");
+        label.className = "rc-auto-pane-label";
+        label.textContent = pane.label;
+        var what = document.createElement("span");
+        what.className = "rc-auto-pane-cmd" + (pane.command ? "" : " is-shell");
+        what.textContent = (pane.command || "terminal") + " · " + shortPath(pane.cwd);
+        what.title = (pane.command || "terminal") + " · " + pane.cwd;
+        row.appendChild(label);
+        row.appendChild(what);
+        block.appendChild(row);
+      });
+      list.appendChild(block);
+    });
+    card.appendChild(list);
+    card.appendChild(autoActions(plan.length ? applyAuto : null));
+  }
+
+  function autoActions(onApply) {
+    var bar = document.createElement("div");
+    bar.className = "rc-auto-actions";
+    var cancel = wsButton(onApply ? "Cancelar" : "Cerrar", "rc-auto-cancel", "", closeAutoModal);
+    bar.appendChild(cancel);
+    if (onApply) {
+      var go = wsButton("Reemplazar Phone", "rc-auto-go", "", function () {
+        onApply(cancel, go);
+      });
+      bar.appendChild(go);
+      setTimeout(function () {
+        try {
+          go.focus();
+        } catch (_) {}
+      }, 0);
+    } else {
+      setTimeout(function () {
+        try {
+          cancel.focus();
+        } catch (_) {}
+      }, 0);
+    }
+    return bar;
+  }
+
+  // --- Clear: empty a group ----------------------------------------------------
+
+  function openClearModal(group) {
+    if (autoBusy || !wsState) return;
+    var members = wsState.workspaces.filter(function (ws) {
+      return ws.group === group.id;
+    });
+    var card = autoModalShell();
+    card.querySelector(".rc-auto-title").textContent = "Vaciar " + group.name;
+    var tabs = 0;
+    members.forEach(function (ws) {
+      tabs += liveCount(ws);
+    });
+    var note = document.createElement("div");
+    note.className = "rc-auto-note is-warn";
+    note.textContent =
+      "Se borrarán " + members.length + (members.length === 1 ? " workspace" : " workspaces") +
+      (tabs ? " y se cerrarán " + tabs + (tabs === 1 ? " pestaña" : " pestañas") : "") +
+      ". El grupo " + group.name + " queda vacío.";
+    card.appendChild(note);
+    var list = document.createElement("div");
+    list.className = "rc-auto-list";
+    var labels = {};
+    sessionCache.forEach(function (item) {
+      labels[item.id] = item;
+    });
+    var counts = {};
+    sessionCache.forEach(function (item) {
+      var key = sessionKey(item);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    members.forEach(function (ws) {
+      var block = document.createElement("div");
+      block.className = "rc-auto-ws";
+      var head = document.createElement("div");
+      head.className = "rc-auto-ws-name";
+      head.textContent = ws.name;
+      block.appendChild(head);
+      ws.tabs.forEach(function (id) {
+        if (!labels[id]) return;
+        var row = document.createElement("div");
+        row.className = "rc-auto-pane";
+        var label = document.createElement("span");
+        label.className = "rc-auto-pane-label";
+        label.textContent = sessionLabel(labels[id], counts);
+        row.appendChild(label);
+        block.appendChild(row);
+      });
+      list.appendChild(block);
+    });
+    card.appendChild(list);
+    var bar = autoActions(function (cancel, go) {
+      applyClear(group, cancel, go);
+    });
+    bar.querySelector(".rc-auto-go").textContent = "Vaciar " + group.name;
+    card.appendChild(bar);
+  }
+
+  function applyClear(group, cancel, go) {
+    if (autoBusy || !wsState) return;
+    autoBusy = true;
+    cancel.disabled = true;
+    go.disabled = true;
+    go.textContent = "Vaciando…";
+    var current = tabId();
+    var old = [];
+    wsState.workspaces.forEach(function (ws) {
+      if (ws.group === group.id) old = old.concat(ws.tabs);
+    });
+    old.forEach(function (id) {
+      if (id !== current) disposePane(id);
+    });
+    var keep = old.indexOf(current) !== -1 ? current : "";
+    wsPost({ op: "groupClear", group: group.id, keep: keep }).then(function (payload) {
+      autoBusy = false;
+      if (!payload || !payload.ok) {
+        go.disabled = false;
+        cancel.disabled = false;
+        go.textContent = "Vaciar " + group.name;
+        showToast("No pude vaciar " + group.name);
+        return;
+      }
+      closeAutoModal();
+      if (keep) {
+        // Move to whatever workspace is left before closing the tab on screen.
+        var next = findWs(payload.active);
+        if (next) enterWorkspace(next);
+        else closeDrawer();
+        closeSession(keep);
+      }
+      showToast(group.name + " vacío");
+    });
+  }
+
+  function applyAuto(cancel, go) {
+    if (autoBusy) return;
+    autoBusy = true;
+    cancel.disabled = true;
+    go.disabled = true;
+    go.textContent = "Copiando…";
+    var current = tabId();
+    var old = [];
+    (wsState ? wsState.workspaces : []).forEach(function (ws) {
+      if (ws.group === "gphone") old = old.concat(ws.tabs);
+    });
+    // Close the old panes first so their reconnect does not revive them.
+    old.forEach(function (id) {
+      if (id !== current) disposePane(id);
+    });
+    var keep = old.indexOf(current) !== -1 ? current : "";
+    wsPost({ op: "herdrApply", keep: keep }).then(function (payload) {
+      autoBusy = false;
+      if (!payload || !payload.ok) {
+        go.disabled = false;
+        cancel.disabled = false;
+        go.textContent = "Reemplazar Phone";
+        showToast((payload && payload.error) || "No pude copiar herdr");
+        return;
+      }
+      closeAutoModal();
+      closeDrawer();
+      wsPinned = payload.id;
+      if (payload.firstTab) openSession(payload.firstTab);
+      if (keep) closeSession(keep);
+      showToast("Phone listo");
+    });
+  }
+
+  // --- profiles ---------------------------------------------------------------
+  // Several people can share this Remote Control, each with their own CLI
+  // accounts. Every device picks a profile; the device that typed last tells
+  // the server, and a new AI CLI (claude, agent…) then runs with that
+  // profile's folder as HOME (web/profiles.zsh). The primary user is "".
+
+  var PROFILE_KEY = "rc-profile";
+  var profState = { primary: "", profiles: [] };
+  var profEditing = false;
+  var profPinged = { at: 0, id: null };
+
+  function myProfile() {
+    // "" is a real choice (the primary user); null means this browser never chose.
+    var id = null;
+    try {
+      id = localStorage.getItem(PROFILE_KEY);
+    } catch (_) {}
+    if (id === null && wsState && wsState.profilePick) id = wsState.profilePick[foldDevice()];
+    id = id || "";
+    var known = profState.profiles.some(function (p) {
+      return p.id === id;
+    });
+    return known || !profState.primary ? id : "";
+  }
+
+  function profileLabel(id) {
+    if (!id) return profState.primary || "Principal";
+    for (var i = 0; i < profState.profiles.length; i++) {
+      if (profState.profiles[i].id === id) return profState.profiles[i].label;
+    }
+    return id;
+  }
+
+  function takeProfiles(payload) {
+    if (!payload || !Array.isArray(payload.profiles)) return payload;
+    profState = { primary: payload.primary || "", profiles: payload.profiles };
+    renderProfiles();
+    return payload;
+  }
+
+  function loadProfiles() {
+    return fetch("/rc-profiles", { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(takeProfiles)
+      .catch(function () {
+        return null;
+      });
+  }
+
+  function postProfiles(op) {
+    return fetch("/rc-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(op),
+      cache: "no-store",
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(takeProfiles)
+      .catch(function () {
+        return null;
+      });
+  }
+
+  // Tell the server this device is the one typing, so a CLI started now
+  // runs with this device's profile. Cheap; at most once a second unless forced.
+  function pingProfile(force) {
+    if (!profState.profiles.length && !force) return;
+    var id = myProfile();
+    var now = Date.now();
+    if (!force && profPinged.id === id && now - profPinged.at < 1000) return;
+    profPinged = { at: now, id: id };
+    try {
+      fetch("/rc-profile-ping", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile: id }),
+        cache: "no-store",
+        keepalive: true,
+      }).catch(function () {});
+    } catch (_) {}
+  }
+
+  function pickProfile(id) {
+    try {
+      localStorage.setItem(PROFILE_KEY, id);
+    } catch (_) {}
+    wsPost({ op: "profilePick", device: foldDevice(), profile: id });
+    pingProfile(true);
+    renderProfiles();
+    showToast("Perfil: " + profileLabel(id));
+  }
+
+  function renderProfiles() {
+    paintProfileChip();
+    var box = document.getElementById("rc-ws-profiles");
+    if (!box) return;
+    if (profEditing && document.activeElement && document.activeElement.id === "rc-ws-profile-name") return;
+    var mine = myProfile();
+    box.innerHTML = "";
+    var items = [{ id: "", label: profState.primary || "Principal", primary: true }].concat(profState.profiles);
+    items.forEach(function (p) {
+      var row = document.createElement("div");
+      row.className = "rc-ws-profile" + (p.id === mine ? " is-on" : "");
+      var main = wsButton("", "rc-ws-profile-main", "Usar el perfil " + p.label, function () {
+        pickProfile(p.id);
+      });
+      var dot = document.createElement("span");
+      dot.className = "rc-ws-profile-dot";
+      dot.textContent = (p.label || "?").charAt(0).toUpperCase();
+      var name = document.createElement("span");
+      name.className = "rc-ws-profile-name";
+      name.textContent = p.label;
+      main.appendChild(dot);
+      main.appendChild(name);
+      if (p.primary) {
+        var tag = document.createElement("span");
+        tag.className = "rc-ws-profile-tag";
+        tag.textContent = "principal";
+        main.appendChild(tag);
+      }
+      row.appendChild(main);
+      if (!p.primary) {
+        row.appendChild(
+          wsButton("🗑", "rc-ws-act", "Borrar el perfil " + p.label, function () {
+            confirmDeleteProfile(p);
+          })
+        );
+      }
+      box.appendChild(row);
+    });
+    if (profEditing) {
+      var input = document.createElement("input");
+      input.id = "rc-ws-profile-name";
+      input.className = "rc-ws-input";
+      input.type = "text";
+      input.maxLength = 40;
+      input.placeholder = "Nombre (ej. Luis)";
+      var settled = false;
+      var finish = function (save) {
+        if (settled) return;
+        settled = true;
+        profEditing = false;
+        var label = input.value.trim();
+        if (save && label) {
+          postProfiles({ op: "create", label: label }).then(function (payload) {
+            if (payload && payload.ok === false && payload.error) showToast(payload.error);
+            else if (payload && payload.id) showToast("Perfil «" + label + "» creado");
+            renderProfiles();
+          });
+        } else setTimeout(renderProfiles, 0);
+      };
+      input.addEventListener("keydown", function (ev) {
+        ev.stopPropagation();
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          finish(true);
+        } else if (ev.key === "Escape") {
+          ev.preventDefault();
+          finish(false);
+        }
+      });
+      input.addEventListener("blur", function () {
+        finish(true);
+      });
+      box.appendChild(input);
+      setTimeout(function () {
+        try {
+          input.focus();
+        } catch (_) {}
+      }, 0);
+    } else {
+      box.appendChild(
+        wsButton("+ Agregar perfil", "rc-ws-profile-add", "", function () {
+          profEditing = true;
+          renderProfiles();
+        })
+      );
+    }
+    var menu = document.getElementById("rc-ws-menu");
+    if (menu) {
+      menu.dataset.profile = mine ? profileLabel(mine).charAt(0).toUpperCase() : "";
+      menu.title = "Workspaces · perfil: " + profileLabel(mine);
+    }
+  }
+
+  function confirmDeleteProfile(p) {
+    if (autoBusy) return;
+    var card = autoModalShell();
+    card.querySelector(".rc-auto-title").textContent = "¿Borrar el perfil " + p.label + "?";
+    var note = document.createElement("div");
+    note.className = "rc-auto-note is-warn";
+    note.textContent =
+      "Se borrará su carpeta con sus sesiones y configuraciones de los CLIs (Claude, Cursor…). " +
+      "Lo que ya está corriendo con ese perfil sigue abierto, pero tendrá que iniciar sesión otra vez si se vuelve a crear.";
+    card.appendChild(note);
+    var bar = autoActions(function (cancel, go) {
+      cancel.disabled = true;
+      go.disabled = true;
+      postProfiles({ op: "delete", id: p.id }).then(function (payload) {
+        if (myProfile() === "" || !profState.profiles.some(function (x) { return x.id === myProfile(); })) {
+          try {
+            if ((localStorage.getItem(PROFILE_KEY) || "") === p.id) localStorage.setItem(PROFILE_KEY, "");
+          } catch (_) {}
+        }
+        closeAutoModal();
+        showToast(payload && payload.ok === false ? payload.error || "No pude borrarlo" : "Perfil borrado");
+        renderProfiles();
+      });
+    });
+    bar.querySelector(".rc-auto-go").textContent = "Borrar perfil";
+    card.appendChild(bar);
+  }
+
+  // Quick switch in the tab strip, right side.
+  function buildProfileChip() {
+    var chip = document.createElement("button");
+    chip.id = "rc-profile-chip";
+    chip.type = "button";
+    chip.setAttribute("aria-haspopup", "menu");
+    chip.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (document.getElementById("rc-profile-pop")) closeProfilePop();
+      else openProfilePop();
+    });
+    return chip;
+  }
+
+  function paintProfileChip() {
+    var chip = document.getElementById("rc-profile-chip");
+    if (!chip) return;
+    var mine = myProfile();
+    var label = profileLabel(mine);
+    chip.innerHTML = "";
+    var dot = document.createElement("span");
+    dot.className = "rc-ws-profile-dot";
+    dot.textContent = label.charAt(0).toUpperCase();
+    var name = document.createElement("span");
+    name.className = "rc-profile-chip-name";
+    name.textContent = label;
+    chip.appendChild(dot);
+    chip.appendChild(name);
+    chip.classList.toggle("is-extra", !!mine);
+    chip.title = "Perfil para los CLIs nuevos: " + label + (mine ? "" : " (principal)");
+    chip.setAttribute("aria-label", chip.title);
+  }
+
+  function closeProfilePop() {
+    var pop = document.getElementById("rc-profile-pop");
+    if (pop) pop.remove();
+    document.removeEventListener("pointerdown", profilePopOutside, true);
+    document.removeEventListener("keydown", profilePopKey, true);
+  }
+
+  function profilePopOutside(ev) {
+    var t = ev.target;
+    if (t && t.closest && t.closest("#rc-profile-pop, #rc-profile-chip")) return;
+    closeProfilePop();
+  }
+
+  function profilePopKey(ev) {
+    if (ev.key !== "Escape") return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    closeProfilePop();
+  }
+
+  function openProfilePop() {
+    closeProfilePop();
+    var chip = document.getElementById("rc-profile-chip");
+    if (!chip) return;
+    var pop = document.createElement("div");
+    pop.id = "rc-profile-pop";
+    pop.setAttribute("role", "menu");
+    var title = document.createElement("div");
+    title.className = "rc-profile-pop-title";
+    title.textContent = "Los CLIs nuevos que lances usan:";
+    pop.appendChild(title);
+    var mine = myProfile();
+    [{ id: "", label: profState.primary || "Principal", primary: true }].concat(profState.profiles).forEach(function (p) {
+      var b = wsButton("", "rc-profile-pop-item" + (p.id === mine ? " is-on" : ""), "Usar el perfil " + p.label, function () {
+        closeProfilePop();
+        if (p.id !== mine) pickProfile(p.id);
+      });
+      b.setAttribute("role", "menuitemradio");
+      b.setAttribute("aria-checked", p.id === mine ? "true" : "false");
+      var dot = document.createElement("span");
+      dot.className = "rc-ws-profile-dot";
+      dot.textContent = (p.label || "?").charAt(0).toUpperCase();
+      var name = document.createElement("span");
+      name.className = "rc-ws-profile-name";
+      name.textContent = p.label;
+      b.appendChild(dot);
+      b.appendChild(name);
+      if (p.primary) {
+        var tag = document.createElement("span");
+        tag.className = "rc-ws-profile-tag";
+        tag.textContent = "principal";
+        b.appendChild(tag);
+      }
+      pop.appendChild(b);
+    });
+    var sep = document.createElement("div");
+    sep.className = "rc-profile-pop-sep";
+    pop.appendChild(sep);
+    pop.appendChild(
+      wsButton(profState.profiles.length ? "Administrar perfiles…" : "+ Agregar perfil…", "rc-profile-pop-manage", "", function () {
+        closeProfilePop();
+        profEditing = !profState.profiles.length;
+        openDrawer();
+        renderProfiles();
+      })
+    );
+    (document.body || document.documentElement).appendChild(pop);
+    var r = chip.getBoundingClientRect();
+    pop.style.top = Math.round(r.bottom + 6) + "px";
+    pop.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + "px";
+    document.addEventListener("pointerdown", profilePopOutside, true);
+    document.addEventListener("keydown", profilePopKey, true);
+    loadProfiles();
+  }
+
+  function buildProfileBox() {
+    var wrap = document.createElement("div");
+    wrap.className = "rc-ws-theme-wrap rc-ws-profiles-wrap";
+    var label = document.createElement("div");
+    label.className = "rc-ws-title";
+    label.textContent = "Perfil";
+    var box = document.createElement("div");
+    box.id = "rc-ws-profiles";
+    wrap.appendChild(label);
+    wrap.appendChild(box);
+    return wrap;
+  }
+
+  function bootProfiles() {
+    loadProfiles().then(function () {
+      pingProfile(true);
+    });
+    document.addEventListener(
+      "keydown",
+      function (ev) {
+        pingProfile(ev.key === "Enter");
+      },
+      true
+    );
+    document.addEventListener(
+      "beforeinput",
+      function (ev) {
+        pingProfile(ev.inputType === "insertLineBreak");
+      },
+      true
+    );
   }
 
   // --- theme ----------------------------------------------------------------
@@ -4355,7 +5251,7 @@
       localStorage.setItem(THEME_KEY, value);
     } catch (_) {}
     if (changed) applyTheme();
-    if (!fromServer) wsPost({ op: "theme", theme: value });
+    if (!fromServer) wsPost({ op: "theme", theme: value, device: foldDevice() });
   }
 
   function paintThemeSwitch() {
@@ -4425,17 +5321,15 @@
     title.textContent = "Workspaces";
     var list = document.createElement("div");
     list.id = "rc-ws-list";
-    var add = wsButton("+ Nuevo workspace", "rc-ws-add", "", function () {
-      var n = wsState ? wsState.workspaces.length + 1 : 1;
-      wsPost({ op: "create", name: "Workspace " + n }).then(function (payload) {
-        var ws = payload && findWs(payload.id);
-        if (!ws) return;
-        enterWorkspace(ws);
-      });
+    var add = wsButton("+ Nuevo grupo", "rc-ws-add", "", function () {
+      groupEdit = "new";
+      groupConfirm = "";
+      renderDrawer();
     });
     drawer.appendChild(title);
     drawer.appendChild(list);
     drawer.appendChild(add);
+    drawer.appendChild(buildProfileBox());
     drawer.appendChild(buildThemeSwitch());
     var root = document.body || document.documentElement;
     root.appendChild(backdrop);
@@ -4464,7 +5358,9 @@
       '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
     host.appendChild(tabs);
     host.appendChild(fresh);
+    host.appendChild(buildProfileChip());
     (document.body || document.documentElement).appendChild(host);
+    paintProfileChip();
     bootWorkspaces(host);
     fresh.addEventListener("click", function (ev) {
       ev.preventDefault();
@@ -4484,11 +5380,55 @@
     paintSessions(sessionCache);
   };
 
+  // What the file explorer (files.js) needs from the terminal page.
+  window.__rcHost = {
+    sendInput: function (text) {
+      return sendInput(text);
+    },
+    focusTerm: function () {
+      focusTerm();
+    },
+    // Hide the phone keyboard and park the terminal while the explorer is up.
+    releaseKeyboard: function () {
+      imeGuard = 0;
+      if (document.documentElement.classList.contains("rc-touch")) lockIme();
+      var ta = termTextarea();
+      if (ta) {
+        try {
+          ta.blur();
+        } catch (_) {}
+      }
+    },
+    toast: function (text) {
+      showToast(text);
+    },
+    device: function () {
+      return foldDevice();
+    },
+    cwd: function () {
+      var id = tabId();
+      for (var i = 0; i < sessionCache.length; i++) {
+        if (sessionCache[i].id === id) return sessionCache[i].path || "";
+      }
+      return "";
+    },
+    post: function (op) {
+      return wsPost(op);
+    },
+    prefs: function () {
+      return wsState && wsState.fsPrefs ? wsState.fsPrefs[foldDevice()] || null : null;
+    },
+    openTab: function (id) {
+      if (typeof window.__rcOpenSession === "function") window.__rcOpenSession(id);
+    },
+  };
+
   function boot() {
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
     bootTheme();
+    bootProfiles();
     bootSessions();
     watchNativeClear();
     bootPaste();
@@ -4508,6 +5448,7 @@
       if (claimTries++ > 100) return;
       setTimeout(claimSoon, 50);
     })();
+    pcFiles.mount();
     if (device === "pc") {
       document.documentElement.classList.remove("rc-touch");
       mountPcMic();

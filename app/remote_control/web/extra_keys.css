@@ -91,7 +91,8 @@ body {
   align-items: flex-end;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: calc(100% - 76px);
+  /* room for ☰, + and the profile chip */
+  max-width: calc(100% - 76px - var(--rc-chip-w, 150px));
   height: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -992,4 +993,525 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
 html.rc-touch #rc-pc-mic,
 html.rc-touch #rc-pc-file {
   display: none;
+}
+
+/* Workspace groups (PC, Phone and the user's own) */
+.rc-ws-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rc-ws-section + .rc-ws-section {
+  margin-top: 10px;
+}
+
+.rc-ws-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 40px;
+  border-bottom: 1px solid var(--rc-raised);
+}
+
+.rc-ws-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--rc-teal);
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rc-ws-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-ws-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.rc-ws-group-name:hover .rc-ws-caret {
+  background: var(--rc-raised);
+}
+
+.rc-ws-group-name .rc-ws-count {
+  margin-left: 4px;
+  letter-spacing: 0;
+}
+
+.rc-ws-group.is-folded .rc-ws-caret {
+  transform: rotate(-90deg);
+}
+
+.rc-ws-plus {
+  color: var(--rc-blue);
+  font-size: 18px;
+}
+
+.rc-ws-auto {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--rc-on);
+  border-radius: 999px;
+  background: rgb(var(--rc-on-rgb) / 0.12);
+  color: var(--rc-on);
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rc-ws-auto:hover {
+  background: rgb(var(--rc-on-rgb) / 0.22);
+}
+
+.rc-ws-empty {
+  padding: 8px 10px;
+  color: var(--rc-muted);
+  font-size: 13px;
+}
+
+.rc-ws-item.is-editing {
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.rc-ws-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  margin: 0 4px;
+  padding: 0 10px;
+  border: 1px solid var(--rc-blue);
+  border-radius: 8px;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+  font: inherit;
+  outline: none;
+}
+
+.rc-ws-move {
+  flex: 1 0 100%;
+  height: 34px;
+  margin: 4px 4px 0;
+  padding: 0 8px;
+  border: 1px solid var(--rc-raised);
+  border-radius: 8px;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+  font: inherit;
+}
+
+/* "Auto" confirmation */
+#rc-auto-modal {
+  position: fixed;
+  z-index: 2147483010;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(var(--rc-shade) / 0.7);
+  font: 500 14px/1.35 ui-sans-serif, system-ui, sans-serif;
+}
+
+html[data-rc-theme="light"] #rc-auto-modal {
+  background: rgb(64 63 83 / 0.35);
+}
+
+.rc-auto-card {
+  width: min(100%, 460px);
+  max-height: min(86vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 16px 14px;
+  border-radius: 16px;
+  background: var(--rc-surface);
+  color: var(--rc-text);
+  box-shadow: 0 18px 48px rgb(var(--rc-shade) / 0.6);
+}
+
+.rc-auto-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.rc-auto-note {
+  color: var(--rc-muted);
+}
+
+.rc-auto-note.is-warn {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgb(var(--rc-orange-rgb) / 0.12);
+  color: var(--rc-warn);
+}
+
+html[data-rc-theme="light"] .rc-auto-note.is-warn {
+  color: var(--rc-orange);
+}
+
+.rc-auto-note.is-error {
+  color: var(--rc-red);
+}
+
+.rc-auto-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rc-auto-ws {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--rc-bg);
+}
+
+.rc-auto-ws-name {
+  margin-bottom: 4px;
+  color: var(--rc-teal);
+  font-weight: 700;
+}
+
+.rc-auto-pane {
+  display: flex;
+  flex-direction: column;
+  padding: 5px 0 5px 10px;
+  border-left: 2px solid var(--rc-raised);
+}
+
+.rc-auto-pane-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-auto-pane-cmd {
+  overflow: hidden;
+  color: var(--rc-blue);
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-auto-pane-cmd.is-shell {
+  color: var(--rc-muted);
+}
+
+.rc-auto-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.rc-auto-cancel,
+.rc-auto-go {
+  height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  font: 700 14px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rc-auto-cancel {
+  background: var(--rc-raised);
+  color: var(--rc-text);
+}
+
+.rc-auto-go {
+  background: var(--rc-red);
+  color: #fff;
+}
+
+.rc-auto-cancel:disabled,
+.rc-auto-go:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.rc-ws-clear {
+  flex: 0 0 auto;
+  height: 30px;
+  margin-left: 4px;
+  padding: 0 12px;
+  border: 1px solid rgb(var(--rc-orange-rgb) / 0.7);
+  border-radius: 999px;
+  background: rgb(var(--rc-orange-rgb) / 0.1);
+  color: var(--rc-orange);
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rc-ws-clear:hover {
+  background: rgb(var(--rc-orange-rgb) / 0.2);
+}
+
+/* Profiles (who runs new AI CLIs from this device) */
+#rc-ws-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rc-ws-profile {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 10px;
+}
+
+.rc-ws-profile.is-on {
+  background: var(--rc-bg);
+  box-shadow: inset 3px 0 0 var(--rc-teal);
+}
+
+.rc-ws-profile-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rc-ws-profile-dot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--rc-raised);
+  color: var(--rc-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rc-ws-profile.is-on .rc-ws-profile-dot {
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+}
+
+.rc-ws-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-ws-profile-tag {
+  margin-left: auto;
+  color: var(--rc-muted);
+  font-size: 11px;
+}
+
+.rc-ws-profile-add {
+  height: 34px;
+  margin-top: 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rc-blue);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.rc-ws-profile-add:hover {
+  background: rgb(var(--rc-blue-rgb) / 0.08);
+}
+
+#rc-ws-profiles .rc-ws-input {
+  margin: 2px 0;
+}
+
+/* The drawer button shows the initial of a non-primary profile. */
+#rc-ws-menu {
+  position: relative;
+}
+
+#rc-ws-menu[data-profile]:not([data-profile=""])::after {
+  content: attr(data-profile);
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 2px;
+  border-radius: 7px;
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+  font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Profile chip at the right of the tab strip */
+#rc-profile-chip {
+  align-self: center;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 150px;
+  height: 30px;
+  margin-left: auto;
+  padding: 0 10px 0 4px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+#rc-profile-chip:hover {
+  background: var(--rc-hover);
+  color: var(--rc-text);
+}
+
+#rc-profile-chip.is-extra {
+  border-color: rgb(var(--rc-teal-rgb) / 0.55);
+  background: rgb(var(--rc-teal-rgb) / 0.12);
+  color: var(--rc-text);
+}
+
+#rc-profile-chip .rc-ws-profile-dot {
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+
+#rc-profile-chip.is-extra .rc-ws-profile-dot {
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+}
+
+.rc-profile-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html.rc-touch #rc-sessions {
+  --rc-chip-w: 40px;
+}
+
+html.rc-touch #rc-profile-chip {
+  padding: 0 4px;
+}
+
+html.rc-touch .rc-profile-chip-name {
+  display: none;
+}
+
+#rc-profile-pop {
+  position: fixed;
+  z-index: 2147483008;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--rc-surface);
+  color: var(--rc-text);
+  box-shadow: 0 10px 30px rgb(var(--rc-shade) / 0.55), 0 0 0 1px rgb(var(--rc-text-rgb) / 0.08);
+  font: 500 14px/1.2 ui-sans-serif, system-ui, sans-serif;
+}
+
+.rc-profile-pop-title {
+  padding: 6px 10px 8px;
+  color: var(--rc-muted);
+  font-size: 12px;
+}
+
+.rc-profile-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rc-profile-pop-item:hover {
+  background: rgb(var(--rc-text-rgb) / 0.07);
+}
+
+.rc-profile-pop-item.is-on {
+  background: var(--rc-bg);
+  box-shadow: inset 3px 0 0 var(--rc-teal);
+}
+
+.rc-profile-pop-item.is-on .rc-ws-profile-dot {
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+}
+
+.rc-profile-pop-sep {
+  height: 1px;
+  margin: 6px 8px;
+  background: rgb(var(--rc-text-rgb) / 0.1);
+}
+
+.rc-profile-pop-manage {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rc-blue);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rc-profile-pop-manage:hover {
+  background: rgb(var(--rc-blue-rgb) / 0.08);
 }

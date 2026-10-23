@@ -22,6 +22,13 @@ from pathlib import Path
 from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, list_sessions
 
 WS_RE = re.compile(r"^w[a-f0-9]{8}$")
+GROUP_RE = re.compile(r"^(g[a-f0-9]{8}|gpc|gphone)$")
+# The two groups that always exist. Phone is the one "Auto" fills from herdr.
+BASE_GROUPS = (("gpc", "PC"), ("gphone", "Phone"))
+LABEL_MAX = 60
+# Folded groups are kept per device (phone and PC each remember their own).
+DEVICE_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+DEVICES_MAX = 20
 RESUME_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 NAME_MAX = 40
 THEMES = ("system", "light", "dark")
@@ -48,8 +55,33 @@ def _new_ws_id() -> str:
     return "w" + secrets.token_hex(4)
 
 
+def _new_group_id() -> str:
+    return "g" + secrets.token_hex(4)
+
+
 def _empty_state() -> dict:
-    return {"version": 1, "active": "", "theme": "system", "workspaces": [], "tabs": {}}
+    return {"version": 1, "active": "", "theme": "system", "groups": _base_groups(), "workspaces": [], "tabs": {}}
+
+
+def _base_groups() -> list[dict]:
+    return [{"id": gid, "name": name, "fixed": True} for gid, name in BASE_GROUPS]
+
+
+def _ensure_groups(state: dict) -> None:
+    """PC and Phone always exist and come first; every workspace has a group."""
+    own = [g for g in state.get("groups") or [] if g["id"] not in dict(BASE_GROUPS)]
+    state["groups"] = _base_groups() + own
+    known = {g["id"] for g in state["groups"]}
+    for ws in state["workspaces"]:
+        if ws.get("group") not in known:
+            ws["group"] = "gpc"
+
+
+def _find_group(state: dict, gid: str) -> dict | None:
+    for group in state["groups"]:
+        if group["id"] == gid:
+            return group
+    return None
 
 
 def load_state(base: Path | None = None) -> dict:
@@ -72,16 +104,52 @@ def load_state(base: Path | None = None) -> dict:
                 "tabs": tabs,
                 "lastTab": ws.get("lastTab") if ws.get("lastTab") in tabs else "",
                 "created": int(ws.get("created") or 0),
+                "group": str(ws.get("group") or ""),
             }
         )
+    for group in data.get("groups") or []:
+        if isinstance(group, dict) and GROUP_RE.match(str(group.get("id", ""))):
+            state["groups"].append({"id": group["id"], "name": _clean_name(group.get("name")) or "Grupo", "fixed": False})
+    _ensure_groups(state)
     tabs = data.get("tabs")
     if isinstance(tabs, dict):
         state["tabs"] = {k: v for k, v in tabs.items() if TAB_RE.match(k) and isinstance(v, dict)}
     if data.get("theme") in THEMES:
         state["theme"] = data["theme"]
+    themes = data.get("themes")
+    if isinstance(themes, dict):
+        state["themes"] = {
+            dev: t
+            for dev, t in list(themes.items())[-DEVICES_MAX:]
+            if isinstance(dev, str) and DEVICE_RE.match(dev) and t in THEMES
+        }
     mic = _clean_pos(data.get("micPos"))
     if mic:
         state["micPos"] = mic
+    folded = data.get("folded")
+    if isinstance(folded, dict):
+        state["folded"] = {
+            dev: [g for g in gids if isinstance(g, str) and GROUP_RE.match(g)]
+            for dev, gids in list(folded.items())[-DEVICES_MAX:]
+            if isinstance(dev, str) and DEVICE_RE.match(dev) and isinstance(gids, list)
+        }
+    files_pos = _clean_pos(data.get("filesPos"))
+    if files_pos:
+        state["filesPos"] = files_pos
+    picks = data.get("profilePick")
+    if isinstance(picks, dict):
+        state["profilePick"] = {
+            dev: pid
+            for dev, pid in list(picks.items())[-DEVICES_MAX:]
+            if isinstance(dev, str) and DEVICE_RE.match(dev) and isinstance(pid, str) and (pid == "" or PROFILE_RE.match(pid))
+        }
+    fs_prefs = data.get("fsPrefs")
+    if isinstance(fs_prefs, dict):
+        state["fsPrefs"] = {
+            dev: clean
+            for dev, raw in list(fs_prefs.items())[-DEVICES_MAX:]
+            if isinstance(dev, str) and DEVICE_RE.match(dev) and (clean := _clean_fs_prefs(raw))
+        }
     file_pos = _clean_pos(data.get("filePos"))
     if file_pos:
         state["filePos"] = file_pos
@@ -121,6 +189,35 @@ def _clean_pos(raw) -> dict | None:
     return pos
 
 
+FS_SORTS = ("name", "size", "mtime", "type")
+PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def _clean_fs_prefs(raw) -> dict | None:
+    """File explorer view settings of one device."""
+    if not isinstance(raw, dict):
+        return None
+    tabs = [t for t in raw.get("tabs") or [] if isinstance(t, str) and 0 < len(t) <= 4096][:12]
+    try:
+        active = int(raw.get("active") or 0)
+    except (TypeError, ValueError):
+        active = 0
+    try:
+        zoom = int(raw.get("zoom") or 0)
+    except (TypeError, ValueError):
+        zoom = 0
+    return {
+        "view": "list" if raw.get("view") == "list" else "grid",
+        "hidden": bool(raw.get("hidden")),
+        "sort": raw.get("sort") if raw.get("sort") in FS_SORTS else "name",
+        "desc": bool(raw.get("desc")),
+        "sidebar": raw.get("sidebar") is not False,
+        "zoom": max(0, min(4, zoom)),
+        "tabs": tabs,
+        "active": max(0, min(len(tabs) - 1, active)) if tabs else 0,
+    }
+
+
 def _clean_name(raw) -> str:
     name = " ".join(str(raw or "").split())
     return name[:NAME_MAX]
@@ -142,7 +239,7 @@ def _owner(state: dict, tab: str) -> dict | None:
 
 def _ensure_one(state: dict) -> dict:
     if not state["workspaces"]:
-        ws = {"id": _new_ws_id(), "name": "General", "tabs": [], "lastTab": "", "created": int(time.time())}
+        ws = {"id": _new_ws_id(), "name": "General", "tabs": [], "lastTab": "", "created": int(time.time()), "group": "gpc"}
         state["workspaces"].append(ws)
     if not _find(state, state["active"]):
         state["active"] = state["workspaces"][0]["id"]
@@ -180,6 +277,34 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
             return {"ok": False}
         state["micPos"] = pos
         return {"ok": True}
+    if kind == "filesPos":
+        pos = _clean_pos(op.get("pos"))
+        if not pos:
+            return {"ok": False}
+        state["filesPos"] = pos
+        return {"ok": True}
+    if kind == "profilePick":
+        device = str(op.get("device") or "")
+        pid = str(op.get("profile") or "")
+        if not DEVICE_RE.match(device) or not (pid == "" or PROFILE_RE.match(pid)):
+            return {"ok": False}
+        picks = state.setdefault("profilePick", {})
+        picks.pop(device, None)
+        picks[device] = pid
+        while len(picks) > DEVICES_MAX:
+            picks.pop(next(iter(picks)))
+        return {"ok": True}
+    if kind == "fsPrefs":
+        device = str(op.get("device") or "")
+        prefs = _clean_fs_prefs(op.get("prefs"))
+        if not DEVICE_RE.match(device) or not prefs:
+            return {"ok": False}
+        store = state.setdefault("fsPrefs", {})
+        store.pop(device, None)
+        store[device] = prefs
+        while len(store) > DEVICES_MAX:
+            store.pop(next(iter(store)))
+        return {"ok": True}
     if kind == "filePos":
         pos = _clean_pos(op.get("pos"))
         if not pos:
@@ -189,15 +314,77 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
     if kind == "theme":
         if op.get("theme") not in THEMES:
             return {"ok": False}
-        state["theme"] = op["theme"]
+        device = str(op.get("device") or "")
+        if not DEVICE_RE.match(device):
+            state["theme"] = op["theme"]
+            return {"ok": True}
+        # Each device keeps its own: a laptop can stay light while a phone is dark.
+        themes = state.setdefault("themes", {})
+        themes.pop(device, None)
+        themes[device] = op["theme"]
+        while len(themes) > DEVICES_MAX:
+            themes.pop(next(iter(themes)))
         return {"ok": True}
+    if kind == "fold":
+        device = str(op.get("device") or "")
+        gids = op.get("groups")
+        if not DEVICE_RE.match(device) or not isinstance(gids, list):
+            return {"ok": False}
+        folded = state.setdefault("folded", {})
+        folded.pop(device, None)
+        folded[device] = [g for g in gids if isinstance(g, str) and _find_group(state, g)]
+        while len(folded) > DEVICES_MAX:
+            folded.pop(next(iter(folded)))
+        return {"ok": True}
+    if kind == "groupCreate":
+        group = {"id": _new_group_id(), "name": _clean_name(op.get("name")) or "Grupo", "fixed": False}
+        state["groups"].append(group)
+        return {"ok": True, "group": group["id"]}
+    if kind in ("groupRename", "groupDelete"):
+        group = _find_group(state, str(op.get("group") or ""))
+        if not group or group["fixed"]:
+            return {"ok": False}
+        if kind == "groupRename":
+            name = _clean_name(op.get("name"))
+            if not name:
+                return {"ok": False}
+            group["name"] = name
+            return {"ok": True}
+        # Its workspaces go to PC; nothing is closed.
+        for ws in state["workspaces"]:
+            if ws["group"] == group["id"]:
+                ws["group"] = "gpc"
+        state["groups"] = [g for g in state["groups"] if g is not group]
+        return {"ok": True}
+    if kind == "groupClear":
+        return _group_clear(state, str(op.get("group") or ""), socket, keep=str(op.get("keep") or ""))
+    if kind == "herdrPlan":
+        from .herdr import herdr_plan
+
+        plan = herdr_plan()
+        if plan.get("error"):
+            return {"ok": False, "error": plan["error"]}
+        phone = [t for ws in state["workspaces"] if ws["group"] == "gphone" for t in ws["tabs"]]
+        return {"ok": True, "plan": plan["workspaces"], "closing": len(phone)}
+    if kind == "herdrApply":
+        return _herdr_apply(state, socket, keep=str(op.get("keep") or ""))
     if kind == "create":
         name = _clean_name(op.get("name")) or f"Workspace {len(state['workspaces']) + 1}"
-        ws = {"id": _new_ws_id(), "name": name, "tabs": [], "lastTab": "", "created": int(time.time())}
+        current = _find(state, state["active"])
+        group = str(op.get("group") or "") or (current["group"] if current else "gpc")
+        if not _find_group(state, group):
+            group = "gpc"
+        ws = {"id": _new_ws_id(), "name": name, "tabs": [], "lastTab": "", "created": int(time.time()), "group": group}
         state["workspaces"].append(ws)
         state["active"] = ws["id"]
         return {"ok": True, "id": ws["id"]}
     ws = _find(state, str(op.get("id") or ""))
+    if kind == "move":
+        group = _find_group(state, str(op.get("group") or ""))
+        if not ws or not group:
+            return {"ok": False}
+        ws["group"] = group["id"]
+        return {"ok": True}
     if kind == "rename":
         name = _clean_name(op.get("name"))
         if not ws or not name:
@@ -244,16 +431,98 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
     return {"ok": False}
 
 
+def _group_clear(state: dict, gid: str, socket: str, keep: str = "") -> dict:
+    """Close every tab of a group and delete its workspaces; the group stays.
+
+    ``keep`` is the tab on screen: the page closes it after moving away.
+    """
+    group = _find_group(state, gid)
+    if not group:
+        return {"ok": False}
+    for ws in [w for w in state["workspaces"] if w["group"] == gid]:
+        for tab in ws["tabs"]:
+            if tab == keep:
+                continue
+            close_session(tab, socket=socket)
+            state["tabs"].pop(tab, None)
+        state["workspaces"].remove(ws)
+    if not _find(state, state["active"]):
+        state["active"] = state["workspaces"][0]["id"] if state["workspaces"] else ""
+    _ensure_one(state)
+    return {"ok": True, "active": state["active"]}
+
+
+def _herdr_apply(state: dict, socket: str, keep: str = "") -> dict:
+    """Replace everything in Phone with herdr's workspaces, one tab per pane.
+
+    ``keep`` is the tab the phone is showing: the page closes it itself after
+    moving to the new tabs, so its reconnect does not bring it back.
+    """
+    from .herdr import herdr_plan, tab_launch_context
+
+    plan = herdr_plan()
+    if plan.get("error"):
+        return {"ok": False, "error": plan["error"]}
+    conf, shell, env = tab_launch_context()
+    conf_args = ["-f", str(conf)] if conf.is_file() else []
+    env_args = tab_env_args(conf, shell)
+    for ws in [w for w in state["workspaces"] if w["group"] == "gphone"]:
+        for tab in ws["tabs"]:
+            if tab == keep:
+                continue
+            close_session(tab, socket=socket)
+            state["tabs"].pop(tab, None)
+        state["workspaces"].remove(ws)
+    first_ws, first_tab = "", ""
+    now = int(time.time())
+    for item in plan["workspaces"]:
+        ws = {"id": _new_ws_id(), "name": _clean_name(item["name"]) or "herdr", "tabs": [], "lastTab": "", "created": now, "group": "gphone"}
+        for pane in item["panes"]:
+            tab = "rc" + secrets.token_hex(12)
+            made = subprocess.run(
+                ["tmux", "-L", socket, *conf_args, "new-session", *env_args, "-d", "-s", tab, "-c", pane["cwd"], "--", shell, "-il"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                env=env,
+            )
+            if made.returncode != 0:
+                continue
+            if pane["command"]:
+                _tmux(socket, "send-keys", "-t", f"={tab}:", "-l", pane["command"])
+                _tmux(socket, "send-keys", "-t", f"={tab}:", "Enter")
+            ws["tabs"].append(tab)
+            state["tabs"][tab] = {"cwd": pane["cwd"], "cli": "", "resume": "", "argv": [], "label": pane["label"][:LABEL_MAX], "updated": now}
+        if not ws["tabs"]:
+            continue
+        ws["lastTab"] = ws["tabs"][0]
+        state["workspaces"].append(ws)
+        if not first_ws:
+            first_ws, first_tab = ws["id"], ws["tabs"][0]
+    if not first_ws:
+        _ensure_one(state)
+        return {"ok": False, "error": "No pude abrir las pestañas"}
+    state["active"] = first_ws
+    return {"ok": True, "id": first_ws, "firstTab": first_tab}
+
+
 def public_view(state: dict, sessions: list[dict]) -> dict:
     return {
         "active": state["active"],
         "theme": state.get("theme", "system"),
+        "themes": state.get("themes") or {},
         "micPos": state.get("micPos"),
         "filePos": state.get("filePos"),
+        "filesPos": state.get("filesPos"),
+        "fsPrefs": state.get("fsPrefs") or {},
+        "profilePick": state.get("profilePick") or {},
+        "groups": [dict(g) for g in state["groups"]],
+        "folded": state.get("folded") or {},
         "workspaces": [
-            {"id": ws["id"], "name": ws["name"], "tabs": list(ws["tabs"]), "lastTab": ws["lastTab"]}
+            {"id": ws["id"], "name": ws["name"], "tabs": list(ws["tabs"]), "lastTab": ws["lastTab"], "group": ws["group"]}
             for ws in state["workspaces"]
         ],
+        "labels": {tab: info["label"] for tab, info in state["tabs"].items() if info.get("label")},
         "sessions": sessions,
     }
 
@@ -271,13 +540,41 @@ def change_workspaces(op: dict, socket: str = TMUX_SOCKET, base: Path | None = N
         sessions = list_sessions(socket=socket)
         state = reconcile(load_state(base), [s["id"] for s in sessions])
         result = apply_op(state, op, socket=socket)
-        if result.get("ok") and op.get("op") == "delete":
+        if result.get("ok") and op.get("op") in ("delete", "herdrApply", "groupClear"):
             sessions = list_sessions(socket=socket)
         save_state(state, base)
         return {**result, **public_view(state, sessions)}
 
 
 # --- which conversation is running in a pane --------------------------------
+
+
+def _profile_home(profile: str) -> Path | None:
+    if not profile:
+        return None
+    from .profiles import home_of
+
+    return home_of(profile)
+
+
+def cli_profile(pane_pid: int) -> str:
+    """The Remote Control profile a CLI under this pane runs with ("" = primary)."""
+    queue = list(_children(pane_pid))
+    seen = 0
+    while queue and seen < 32:
+        pid = queue.pop(0)
+        seen += 1
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            env = b""
+        for item in env.split(b"\0"):
+            if item.startswith(b"RC_PROFILE="):
+                value = item[len(b"RC_PROFILE=") :].decode("ascii", "replace")
+                if PROFILE_RE.match(value):
+                    return value
+        queue.extend(_children(pid))
+    return ""
 
 
 def _children(pid: int) -> list[int]:
@@ -463,7 +760,8 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
         if info is None:
             continue
         pane_pid, cwd, alternate = info
-        cli, resume = detect_cli(pane_pid)
+        profile = cli_profile(pane_pid)
+        cli, resume = detect_cli(pane_pid, home=_profile_home(profile))
         argv = [] if cli else foreground_argv(pane_pid)
         if not is_cli_tool(argv, alternate):
             argv = []
@@ -474,6 +772,8 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
             "argv": argv,
             "updated": int(time.time()),
         }
+        if profile and (cli or argv):
+            meta[tab]["profile"] = profile
         shot = _tmux(socket, "capture-pane", "-p", "-e", "-J", "-S", f"-{SCREEN_LINES}", "-t", f"={tab}:", text=True)
         if shot.returncode == 0:
             path = _screen_file(base, tab)
@@ -490,6 +790,8 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
                 idle = int(prev.get("idle") or now)
                 if now - idle < IDLE_FORGET_S:
                     info.update(cli=prev.get("cli", ""), resume=prev.get("resume", ""), argv=prev.get("argv", []), idle=idle)
+            if prev.get("label"):
+                info["label"] = prev["label"]
             state["tabs"][tab] = info
         save_state(state, base)
 
@@ -515,12 +817,17 @@ def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
 
 
 def _rerun(info: dict) -> str:
-    line = resume_command(str(info.get("cli") or ""), str(info.get("resume") or ""))
+    profile = str(info.get("profile") or "")
+    home = _profile_home(profile)
+    # The shell wrapper (web/profiles.zsh) honours an explicit RC_PROFILE.
+    prefix = f"RC_PROFILE={profile} " if home else ""
+    line = resume_command(str(info.get("cli") or ""), str(info.get("resume") or ""), home=home)
     if line:
-        return line
+        return prefix + line
     argv = info.get("argv")
     if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-        return rerun_line(argv)
+        line = rerun_line(argv)
+        return prefix + line if line else ""
     return ""
 
 
@@ -546,6 +853,16 @@ def restore_plan(state: dict, base: Path, shell: str) -> list[dict]:
     return plan
 
 
+def tab_env_args(conf: Path, shell: str) -> list[str]:
+    """tmux new-session -e flags that make a zsh tab load web/zdot (CLI wrappers)."""
+    run_dir = conf.parent
+    zdot = run_dir / "zdot"
+    keep = run_dir / "rc_keephistory.py"
+    if os.path.basename(shell) != "zsh" or not (zdot / ".zshrc").is_file() or not keep.is_file():
+        return []
+    return ["-e", f"ZDOTDIR={zdot}", "-e", f"RC_KEEPHISTORY={keep}"]
+
+
 def restore(
     socket: str,
     conf: Path,
@@ -562,9 +879,11 @@ def restore(
         plan = restore_plan(state, base, shell)
     made = 0
     conf_args = ["-f", str(conf)] if conf.is_file() else []
+    env_args = tab_env_args(conf, shell)
     for step in plan:
+        new = step["new"][:1] + env_args + step["new"][1:]
         result = subprocess.run(
-            ["tmux", "-L", socket, *conf_args, *step["new"]],
+            ["tmux", "-L", socket, *conf_args, *new],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
