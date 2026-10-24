@@ -345,6 +345,12 @@ class Sidecar:
             if method == "POST" and path.rstrip("/").endswith("/rc-session-close"):
                 self._serve_session_close(conn, parse_qs(parsed_url.query))
                 return
+            if method == "GET" and path == "/rc-tab-size":
+                from remote_control.history import tab_size
+
+                query = parse_qs(parsed_url.query)
+                self._json(conn, tab_size((query.get("tab") or [""])[0], (query.get("prof") or [""])[0], socket=self.tmux_socket))
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-hist-size"):
                 self._serve_hist_size(conn, parse_qs(parsed_url.query))
                 return
@@ -365,6 +371,15 @@ class Sidecar:
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
+                return
+            if path == "/rc-herdr-marks" and method == "POST":
+                from remote_control.herdr import pane_marks
+
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, ValueError):
+                    req = {}
+                self._json(conn, pane_marks(req.get("boxes") if isinstance(req, dict) else None))
                 return
             if path == "/rc-profile-ping" and method == "POST":
                 try:

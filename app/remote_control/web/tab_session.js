@@ -140,8 +140,41 @@
     location.assign(next);
   };
 
+  // Tabs only exist when someone asks for one: the server starts the tmux
+  // session first, and tab_session.sh never creates one on connect.
+  var creating = false;
   window.__rcNewSession = function () {
-    window.__rcOpenSession(makeTabId());
+    if (creating) return;
+    creating = true;
+    fetch("/rc-fs/op", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "openTab", path: "~" }),
+    })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (r) {
+        creating = false;
+        if (r && TAB_RE.test(r.tab || "")) window.__rcOpenSession(r.tab);
+        else if (typeof window.__rcToast === "function") window.__rcToast((r && r.error) || "No pude abrir la terminal");
+      })
+      .catch(function () {
+        creating = false;
+        if (typeof window.__rcToast === "function") window.__rcToast("No pude abrir la terminal");
+      });
+  };
+
+  // No tab to show: drop the tab from this browser and reload into the
+  // active workspace (its last live tab, or the empty screen).
+  window.__rcGoEmpty = function () {
+    try {
+      sessionStorage.removeItem(SS_KEY);
+    } catch (_) {}
+    var params = new URLSearchParams(location.search);
+    params.delete("arg");
+    var q = params.toString();
+    location.replace(location.pathname + (q ? "?" + q : "") + location.hash);
   };
 
   function knownTabId() {
@@ -161,11 +194,41 @@
     location.replace(urlForTab(id));
   }
 
+  function liveTarget(payload) {
+    var live = {};
+    ((payload && payload.sessions) || []).forEach(function (item) {
+      if (item && item.id) live[item.id] = true;
+    });
+    var target = "";
+    ((payload && payload.workspaces) || []).forEach(function (ws) {
+      if (ws.id !== payload.active || target) return;
+      if (live[ws.lastTab]) target = ws.lastTab;
+      for (var i = (ws.tabs || []).length - 1; i >= 0 && !target; i--) {
+        if (live[ws.tabs[i]]) target = ws.tabs[i];
+      }
+    });
+    return { live: live, target: target };
+  }
+
+  // Nothing to attach: the UI boots without a terminal (extra_keys.js shows
+  // the empty screen) and ttyd's socket stays held.
+  function enterEmpty() {
+    window.__rcEmpty = true;
+    window.__rcRedirecting = false;
+    var late = window.__rcLateBoot || [];
+    window.__rcLateBoot = null;
+    late.forEach(function (fn) {
+      try {
+        fn();
+      } catch (_) {}
+    });
+  }
+
   // A browser with no tab yet (new device, or a new tunnel URL) lands on the
-  // last tab of the active workspace instead of opening a fresh one.
+  // last live tab of the active workspace. It never opens a fresh one.
   function landOnWorkspace() {
     window.__rcRedirecting = true;
-    // Hold ttyd's socket so it does not start a throwaway tmux session.
+    // Hold ttyd's socket so it does not reach tab_session.sh at all.
     var Stub = function () {
       this.readyState = 0;
     };
@@ -181,19 +244,24 @@
         return resp.ok ? resp.json() : null;
       })
       .then(function (payload) {
-        var live = {};
-        ((payload && payload.sessions) || []).forEach(function (item) {
-          if (item && item.id) live[item.id] = true;
-        });
-        var target = "";
-        ((payload && payload.workspaces) || []).forEach(function (ws) {
-          if (ws.id === payload.active && live[ws.lastTab]) target = ws.lastTab;
-        });
-        goToTab(TAB_RE.test(target) ? target : makeTabId());
+        var target = liveTarget(payload).target;
+        if (TAB_RE.test(target)) goToTab(target);
+        else enterEmpty();
       })
-      .catch(function () {
-        goToTab(makeTabId());
-      });
+      .catch(enterEmpty);
+  }
+
+  // A remembered tab that no longer exists (closed elsewhere, or tmux was
+  // restarted) is not brought back: move to a live one or the empty screen.
+  function checkTabAlive(id) {
+    fetch("/rc-workspaces", { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        if (payload && Array.isArray(payload.sessions) && !liveTarget(payload).live[id]) window.__rcGoEmpty();
+      })
+      .catch(function () {});
   }
 
   function ensureTabArg() {
@@ -204,6 +272,7 @@
     var id = getTabId();
     document.documentElement.dataset.rcTab = id;
     if (currentArg() === id) {
+      checkTabAlive(id);
       return true;
     }
     window.__rcRedirecting = true;

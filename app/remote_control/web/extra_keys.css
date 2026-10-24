@@ -2984,3 +2984,124 @@ html.rc-settings-open #rc-pc-files {
 .rc-ws-add.rc-ws-add-in {
   margin: 0;
 }
+
+/* No tab open: the blank terminal hides behind this screen, under the tab
+   bar and drawer. Typing tools make no sense without a terminal. */
+#rc-empty {
+  position: fixed;
+  z-index: 2147482998;
+  top: var(--rc-bar-h);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  animation: rc-empty-in 260ms ease both;
+}
+
+.rc-empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(320px, 100%);
+  text-align: center;
+}
+
+.rc-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 10px;
+  border-radius: 18px;
+  background: rgb(var(--rc-blue-rgb) / 0.12);
+  color: var(--rc-blue);
+}
+
+.rc-empty-title {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.rc-empty-sub {
+  margin-bottom: 14px;
+  color: var(--rc-muted);
+  font-size: 13px;
+}
+
+.rc-empty-go {
+  height: 40px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--rc-blue);
+  color: var(--rc-on-accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    filter 120ms ease;
+}
+
+.rc-empty-go:hover {
+  filter: brightness(1.08);
+}
+
+.rc-empty-go:active {
+  transform: scale(0.97);
+}
+
+.rc-empty-go:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+html.rc-is-empty #rc-extra-keys,
+html.rc-is-empty #rc-pc-mic,
+html.rc-is-empty #rc-pc-file,
+html.rc-is-empty #rc-net-badge {
+  display: none !important;
+}
+
+@keyframes rc-empty-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Who opened each herdr pane: a mark on the pane frame's top-right corner
+   (extra_keys.js finds the frames). Clicks and selection pass through. */
+#rc-pane-marks {
+  position: fixed;
+  z-index: 2147482997;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#rc-pane-marks[hidden] {
+  display: none;
+}
+
+#rc-pane-marks .rc-ws-profile-dot {
+  position: absolute;
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  opacity: 0.74;
+  box-shadow:
+    0 0 0 2px rgb(var(--rc-surface-rgb) / 0.9),
+    0 2px 6px rgb(var(--rc-shade) / 0.3);
+  animation: rc-empty-in 220ms ease both;
+}

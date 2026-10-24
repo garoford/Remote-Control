@@ -441,14 +441,95 @@
     return null;
   }
 
+  // A tab opened by another profile keeps its owner's size (tab_session.sh).
+  // Instead of tmux's dots or a cut-off bottom, this page shows the owner's
+  // columns and rows scaled to fit: the font follows, the grid stays.
+  var BASE_FONT = 15;
+  var guestSize = {};
+
+  function fitGuest(term, host, size) {
+    var rect = host && host.getBoundingClientRect();
+    var cell = cellOf(term);
+    if (!rect || rect.width < 20 || rect.height < 20 || !cell) return;
+    var font = term.options.fontSize || BASE_FONT;
+    var want = Math.min(rect.width / ((size.cols * cell.width) / font), rect.height / ((size.rows * cell.height) / font));
+    var next = Math.max(6, Math.min(BASE_FONT, Math.floor(want * 2) / 2));
+    for (var tries = 0; tries < 6; tries++) {
+      if (term.options.fontSize !== next) term.options.fontSize = next;
+      cell = cellOf(term);
+      if (!cell || next <= 6 || (size.cols * cell.width <= rect.width && size.rows * cell.height <= rect.height)) break;
+      next -= 0.5;
+    }
+    term.__rcGuest = true;
+    if (term.cols !== size.cols || term.rows !== size.rows) term.resize(size.cols, size.rows);
+  }
+
+  // Back to owning the size: normal font, the grid follows the screen again.
+  function unguest(term) {
+    if (!term.__rcGuest) return;
+    term.__rcGuest = false;
+    term.options.fontSize = BASE_FONT;
+  }
+
+  function pollGuestSize() {
+    var id = tabId();
+    if (!id || document.hidden || window.__rcEmpty) return;
+    fetch("/rc-tab-size?tab=" + encodeURIComponent(id) + "&prof=" + encodeURIComponent(profileArg()), { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (info) {
+        var pane = panes[id] || (id === bootTabId ? ensurePrimary() : null);
+        if (!info || !pane || !pane.term) return;
+        var term = pane.term;
+        if (info.guest && info.cols > 1 && info.rows > 1) {
+          guestSize[id] = { cols: info.cols, rows: info.rows };
+          if (term.__rcGuest && term.cols === info.cols && term.rows === info.rows) return;
+        } else {
+          delete guestSize[id];
+          if (!term.__rcGuest) return;
+        }
+        fitPane(pane);
+      })
+      .catch(function () {});
+  }
+
+  function bootGuestSize() {
+    setInterval(pollGuestSize, 2000);
+    window.addEventListener("rc-tab-changed", pollGuestSize);
+    window.addEventListener("rc-ws-open", pollGuestSize);
+    pollGuestSize();
+  }
+
+  // ttyd's FitAddon: window resizes and font changes call it directly.
+  function fitAddonOf(term) {
+    try {
+      var list = term._addonManager._addons;
+      for (var i = 0; i < list.length; i++) {
+        var addon = list[i] && list[i].instance;
+        if (addon && typeof addon.fit === "function" && typeof addon.proposeDimensions === "function") return addon;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function hookPrimaryFit(term) {
     if (!term || term.__rcFitHook || typeof term.fit !== "function") return;
-    var native = term.fit.bind(term);
-    term.fit = function () {
-      var host = primaryPane && primaryPane.host;
-      if (host && host.hidden) return;
-      return native();
-    };
+    function guarded(native) {
+      return function () {
+        var host = primaryPane && primaryPane.host;
+        if (host && host.hidden) return;
+        var size = guestSize[bootTabId];
+        if (size) return fitGuest(term, host || document.getElementById("terminal-container"), size);
+        unguest(term);
+        return native();
+      };
+    }
+    term.fit = guarded(term.fit.bind(term));
+    // Without this a window resize puts back the screen's own size and tmux
+    // pans the owner's wider window (left columns cut off) until the next poll.
+    var addon = fitAddonOf(term);
+    if (addon) addon.fit = guarded(addon.fit.bind(addon));
     term.__rcFitHook = true;
   }
 
@@ -584,6 +665,7 @@
       if (prefs.fontFamily) pane.term.options.fontFamily = prefs.fontFamily;
       if (prefs.theme) pane.term.options.theme = termPalette();
       pane.term.options.scrollback = 20000;
+      if (guestSize[pane.id]) fitPane(pane);
     } catch (_) {}
   }
 
@@ -621,6 +703,11 @@
 
   function fitPane(pane) {
     if (!pane || !pane.term || !pane.host || pane.host.hidden) return;
+    if (!pane.primary && guestSize[pane.id]) {
+      fitGuest(pane.term, pane.host, guestSize[pane.id]);
+      return;
+    }
+    if (!pane.primary) unguest(pane.term);
     if (pane.primary && typeof pane.term.fit === "function") {
       try {
         pane.term.fit();
@@ -937,6 +1024,8 @@
   }
 
   window.__rcAttachSession = function () {
+    // The empty screen has no ttyd terminal behind it: load the tab instead.
+    if (window.__rcEmpty) return false;
     var id = tabId();
     if (!id || !window.term || typeof window.term.focus !== "function") return false;
     ensurePrimary();
@@ -1056,11 +1145,24 @@
     return id;
   }
 
+  // Third ?arg=: this browser's profile ("p" + id, "p" is the primary). The
+  // tab's size follows the profile that opened it (tab_session.sh). Read raw:
+  // the socket opens before the profile list arrives.
+  function profileArg() {
+    var id = null;
+    try {
+      id = localStorage.getItem("rc-profile");
+    } catch (_) {}
+    if (id === null && wsState && wsState.profilePick) id = wsState.profilePick[foldDevice()];
+    id = id || "";
+    return /^([a-z0-9][a-z0-9_-]{0,31})?$/.test(id) ? "p" + id : "p";
+  }
+
   function withDevice(url) {
     var text = String(url);
     var dev = deviceId();
     if (text.indexOf("arg=") === -1 || text.indexOf("arg=" + dev) !== -1) return text;
-    return text + (text.indexOf("?") === -1 ? "?" : "&") + "arg=" + dev;
+    return text + (text.indexOf("?") === -1 ? "?" : "&") + "arg=" + dev + "&arg=" + profileArg();
   }
 
   function wrapWebSocket() {
@@ -4129,8 +4231,9 @@
     if (ids.length > 1 && index >= 0) next = ids[index + 1] || ids[index - 1] || "";
     var current = id === tabId();
     if (current) {
+      // The last tab closed: show the empty screen, never a fresh tab.
       if (next) openSession(next);
-      else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+      else if (typeof window.__rcGoEmpty === "function") window.__rcGoEmpty();
     }
     disposePane(id);
     sessionCache = sessionCache.filter(function (item) {
@@ -4415,6 +4518,210 @@
 
   var sessionCache = [];
 
+  // herdr is where several people share a tab: every herdr pane carries, on
+  // its top-right corner, the avatar of the profile that opened it. Each
+  // device has its own herdr view, so the page finds the pane frames on its
+  // own screen and the server says whose each pane is (herdr.pane_marks).
+  // Marks only: clicks, taps and selection go through to the terminal.
+  var FRAME_TL = "┌┏╔╭";
+  var FRAME_TR = "┐┓╗╮";
+  var FRAME_V = "│┃║";
+  var FRAME_BL = "└┗╚╰";
+  var paneMarks = { sig: "", at: 0, busy: false, boxes: [], marks: [] };
+
+  function screenCells(term) {
+    var buf = term.buffer.active;
+    var rows = [];
+    for (var r = 0; r < term.rows; r++) {
+      var line = buf.getLine(buf.viewportY + r);
+      var cells = [];
+      for (var x = 0; x < term.cols; x++) {
+        var cell = line && line.getCell(x);
+        cells.push(cell ? cell.getChars() : "");
+      }
+      rows.push(cells);
+    }
+    return rows;
+  }
+
+  function isIn(set, ch) {
+    return !!ch && set.indexOf(ch) !== -1;
+  }
+
+  function findFrames(rows) {
+    var out = [];
+    rows.forEach(function (row, y) {
+      for (var x = 0; x < row.length; x++) {
+        if (!isIn(FRAME_TL, row[x])) continue;
+        var x2 = -1;
+        for (var k = x + 1; k < row.length; k++) {
+          if (isIn(FRAME_TR, row[k])) {
+            x2 = k;
+            break;
+          }
+          if (isIn(FRAME_TL, row[k])) break;
+        }
+        var next = rows[y + 1];
+        if (x2 < 0 || !next || !isIn(FRAME_V, next[x]) || !isIn(FRAME_V, next[x2])) continue;
+        var y2 = rows.length - 1;
+        for (var j = y + 1; j < rows.length; j++) {
+          if (isIn(FRAME_BL, rows[j][x])) {
+            y2 = j;
+            break;
+          }
+          if (!isIn(FRAME_V, rows[j][x])) {
+            y2 = j - 1;
+            break;
+          }
+        }
+        var lines = [];
+        for (var i = y + 1; i < y2 && lines.length < 8; i++) {
+          var text = rows[i].slice(x + 1, x2).join("").replace(/\s+/g, " ").trim();
+          if (text.length >= 4) lines.push(text);
+        }
+        out.push({ x: x, y: y, w: x2 - x + 1, h: y2 - y + 1, lines: lines });
+        x = x2;
+      }
+    });
+    return out;
+  }
+
+  // A herdr tab with one pane draws no frame: the pane is everything right
+  // of the sidebar's vertical rule and below the tab strip.
+  function singlePane(rows) {
+    var cols = rows.length ? rows[0].length : 0;
+    var rule = -1;
+    var bottom = rows.length - 1;
+    for (var x = 0; x < cols && rule < 0; x++) {
+      var hits = 0;
+      var last = 0;
+      for (var y = 0; y < rows.length; y++) {
+        if (isIn(FRAME_V, rows[y][x])) {
+          hits++;
+          last = y;
+        }
+      }
+      if (hits >= Math.max(4, rows.length * 0.7)) {
+        rule = x;
+        bottom = last;
+      }
+    }
+    var left = rule + 1;
+    if (rows.length < 4 || cols - left < 10) return null;
+    var lines = [];
+    for (var i = 1; i <= bottom && lines.length < 8; i++) {
+      var text = rows[i].slice(left).join("").replace(/\s+/g, " ").trim();
+      if (text.length >= 4) lines.push(text);
+    }
+    return { x: left, y: 1, w: cols - left, h: bottom, lines: lines };
+  }
+
+  function onHerdrTab() {
+    if (window.__rcEmpty) return false;
+    var id = tabId();
+    return sessionCache.some(function (item) {
+      return item.id === id && item.command === "herdr";
+    });
+  }
+
+  function placePaneMarks(term) {
+    var host = document.getElementById("rc-pane-marks");
+    var screen = term && term.element && term.element.querySelector(".xterm-screen");
+    if (!paneMarks.marks.length || !screen) {
+      if (host) host.hidden = true;
+      return;
+    }
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "rc-pane-marks";
+      host.setAttribute("aria-hidden", "true");
+      (document.body || document.documentElement).appendChild(host);
+    }
+    var rect = screen.getBoundingClientRect();
+    var cellW = rect.width / term.cols;
+    var cellH = rect.height / term.rows;
+    var size = Math.round(Math.max(20, Math.min(30, cellH * 1.7)));
+    var light = themeMode() === "light";
+    var dots = host.children;
+    var n = 0;
+    paneMarks.marks.forEach(function (mark) {
+      var box = paneMarks.boxes[mark.box];
+      if (!box || typeof mark.owner !== "string") return;
+      var dot = dots[n] || host.appendChild(document.createElement("span"));
+      n++;
+      dot.className = "rc-ws-profile-dot";
+      dot.textContent = (profileLabel(mark.owner) || "?").charAt(0).toUpperCase();
+      var a = profileAccent(mark.owner);
+      dot.style.background = a ? a.dot : "";
+      dot.style.color = a ? (light ? "#fff" : "#111214") : "";
+      dot.style.width = dot.style.height = size + "px";
+      // Tucked into the frame's top-right corner, over the corner glyph.
+      dot.style.left = Math.round(rect.left + (box.x + box.w) * cellW - size * 0.82) + "px";
+      dot.style.top = Math.round(rect.top + box.y * cellH + cellH * 0.62 - size * 0.42) + "px";
+    });
+    while (dots.length > n) host.removeChild(dots[dots.length - 1]);
+    host.hidden = n === 0;
+  }
+
+  function scanPaneMarks() {
+    var term = xterm();
+    if (!onHerdrTab() || !term || !term.buffer || document.hidden) {
+      paneMarks.marks = [];
+      paneMarks.sig = "";
+      placePaneMarks(null);
+      return;
+    }
+    var cells = screenCells(term);
+    var boxes = findFrames(cells);
+    if (!boxes.length) {
+      var whole = singlePane(cells);
+      if (whole) boxes = [whole];
+    }
+    var sig =
+      tabId() +
+      "|" +
+      boxes
+        .map(function (b) {
+          return [b.x, b.y, b.w, b.h].join(",");
+        })
+        .join(";");
+    // New frames: old marks would sit in the wrong places until the answer.
+    if (sig !== paneMarks.sig) paneMarks.marks = [];
+    paneMarks.boxes = boxes;
+    placePaneMarks(term);
+    var now = Date.now();
+    if (paneMarks.busy || (sig === paneMarks.sig && now - paneMarks.at < 4000)) return;
+    paneMarks.sig = sig;
+    paneMarks.at = now;
+    if (!boxes.length) return;
+    paneMarks.busy = true;
+    fetch("/rc-herdr-marks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ boxes: boxes }),
+    })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (payload) {
+        paneMarks.busy = false;
+        if (paneMarks.sig !== sig) return;
+        paneMarks.marks = (payload && payload.marks) || [];
+        placePaneMarks(xterm());
+      })
+      .catch(function () {
+        paneMarks.busy = false;
+      });
+  }
+
+  function bootPaneMarks() {
+    setInterval(scanPaneMarks, 1000);
+    window.addEventListener("resize", function () {
+      placePaneMarks(xterm());
+    });
+    window.addEventListener("rc-tab-changed", scanPaneMarks);
+  }
+
   function paintSessions(list) {
     if (Array.isArray(list)) sessionCache = list;
     var host = document.getElementById("rc-session-tabs");
@@ -4491,6 +4798,9 @@
     if (payload.filesPos) setFilesPos(payload.filesPos, true);
     renderProfiles();
     refreshLook();
+    var emptySub = document.querySelector("#rc-empty .rc-empty-sub");
+    var emptyWs = emptySub && currentWs();
+    if (emptyWs) emptySub.textContent = "Workspace " + emptyWs.name;
     if (window.__rcFiles && window.__rcFiles.takePrefs) window.__rcFiles.takePrefs(payload.fsPrefs);
     if (Array.isArray(payload.sessions)) {
       sessionCache = payload.sessions;
@@ -4578,13 +4888,16 @@
         if (live[ws.tabs[i]]) target = ws.tabs[i];
       }
     }
-    wsPost({ op: "activate", id: ws.id });
+    var activated = wsPost({ op: "activate", id: ws.id });
     if (target && target === tabId()) {
       paintSessions(sessionCache);
       return;
     }
     if (target) openSession(target);
-    else if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+    else if (typeof window.__rcGoEmpty === "function") {
+      // A workspace with no tabs opens empty; reload once the server knows.
+      activated.then(window.__rcGoEmpty, window.__rcGoEmpty);
+    }
   }
 
   function deleteWorkspace(ws) {
@@ -5432,6 +5745,7 @@
 
   function renderProfiles() {
     paintProfileChip();
+    if (paneMarks.marks.length) placePaneMarks(xterm());
     var box = document.getElementById("rc-ws-profiles");
     if (!box) return;
     if (profEditing && document.activeElement && document.activeElement.id === "rc-ws-profile-name") return;
@@ -7030,7 +7344,51 @@
     },
   };
 
+  // No tab open in this workspace: the terminal stays blank and this screen
+  // asks for the first one. Tabs only open from here or the + button.
+  function mountEmpty() {
+    if (!window.__rcEmpty || document.getElementById("rc-empty")) return;
+    var box = document.createElement("div");
+    box.id = "rc-empty";
+    var card = document.createElement("div");
+    card.className = "rc-empty-card";
+    var icon = document.createElement("div");
+    icon.className = "rc-empty-icon";
+    icon.innerHTML =
+      '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7.5 9.5 3 2.5-3 2.5M13 15h3.5"/></svg>';
+    var title = document.createElement("div");
+    title.className = "rc-empty-title";
+    title.textContent = "Sin terminales abiertas";
+    var sub = document.createElement("div");
+    sub.className = "rc-empty-sub";
+    var ws = currentWs();
+    sub.textContent = ws ? "Workspace " + ws.name : "Abre una terminal para empezar";
+    var go = document.createElement("button");
+    go.type = "button";
+    go.className = "rc-empty-go";
+    go.textContent = "+ Nueva terminal";
+    go.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      go.disabled = true;
+      go.textContent = "Abriendo…";
+      if (typeof window.__rcNewSession === "function") window.__rcNewSession();
+      setTimeout(function () {
+        go.disabled = false;
+        go.textContent = "+ Nueva terminal";
+      }, 4000);
+    });
+    card.appendChild(icon);
+    card.appendChild(title);
+    card.appendChild(sub);
+    card.appendChild(go);
+    box.appendChild(card);
+    (document.body || document.documentElement).appendChild(box);
+    document.documentElement.classList.add("rc-is-empty");
+  }
+
   function boot() {
+    window.__rcToast = showToast;
+    mountEmpty();
     var device = detectDevice();
     document.documentElement.dataset.rcDevice = device;
     document.documentElement.classList.add("rc-" + device);
@@ -7042,6 +7400,8 @@
     bootCopyChip();
     bootOsc52();
     bootSizeClaim();
+    bootPaneMarks();
+    bootGuestSize();
     bootLinks();
     bootPinScroll();
     window.addEventListener("resize", function () {
@@ -7072,24 +7432,30 @@
     bootTouchScroll();
   }
 
-  if (window.__rcRedirecting) return;
-  // ttyd runs execCommand("copy") on every selection change, so any drag
-  // replaced the clipboard. Copying now waits for the Copiar chip.
-  (function blockCopyOnSelect() {
-    var nativeExec = document.execCommand;
-    if (!nativeExec || nativeExec.__rcWrapped) return;
-    var wrapped = function (cmd) {
-      if (String(cmd || "").toLowerCase() === "copy") throw new Error("copy on select disabled");
-      return nativeExec.apply(document, arguments);
-    };
-    wrapped.__rcWrapped = true;
-    document.execCommand = wrapped;
-  })();
-  wrapWebSocket();
-  bootPrimaryRetry();
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
+  function start() {
+    // ttyd runs execCommand("copy") on every selection change, so any drag
+    // replaced the clipboard. Copying now waits for the Copiar chip.
+    (function blockCopyOnSelect() {
+      var nativeExec = document.execCommand;
+      if (!nativeExec || nativeExec.__rcWrapped) return;
+      var wrapped = function (cmd) {
+        if (String(cmd || "").toLowerCase() === "copy") throw new Error("copy on select disabled");
+        return nativeExec.apply(document, arguments);
+      };
+      wrapped.__rcWrapped = true;
+      document.execCommand = wrapped;
+    })();
+    wrapWebSocket();
+    bootPrimaryRetry();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
   }
+
+  // tab_session.js is still choosing a tab; it runs start() if it ends on
+  // the empty screen instead of navigating.
+  if (window.__rcRedirecting) (window.__rcLateBoot = window.__rcLateBoot || []).push(start);
+  else start();
 })();

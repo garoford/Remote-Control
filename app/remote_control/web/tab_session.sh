@@ -4,29 +4,19 @@ set -euo pipefail
 # ttyd --url-arg passes ?arg= from the tab. Only accept our token shape.
 name="${1:-}"
 if [[ ! "$name" =~ ^rc[a-z0-9]{10,32}$ ]]; then
-  name="rcanon${$}"
+  printf '\r\nSin pestaña.\r\n'
+  exit 0
 fi
 
-shell="${RC_SHELL:-${SHELL:-/bin/bash}}"
 conf="${XDG_CACHE_HOME:-$HOME/.cache}/cf-quick-tunnel/tmux.tab.conf"
 socket="cf-remote"
-
-if [[ ! -x "$shell" ]]; then
-  shell="/bin/bash"
-fi
 
 args=(-L "$socket")
 if [[ -f "$conf" ]]; then
   args+=(-f "$conf")
 fi
 
-# zsh tabs load the Remote Control zdot folder, which wraps CLIs that wipe
-# the scrollback (see rc_keephistory.py). Same as workspaces.tab_env_args.
-env_args=()
 run_dir="$(dirname "$conf")"
-if [[ "$(basename "$shell")" == "zsh" && -f "$run_dir/zdot/.zshrc" && -f "$run_dir/rc_keephistory.py" ]]; then
-  env_args=(-e "ZDOTDIR=$run_dir/zdot" -e "RC_KEEPHISTORY=$run_dir/rc_keephistory.py")
-fi
 
 # Second ?arg= is the browser's device id (extra_keys.js). The device that
 # opened the tab owns its pane. When that pane runs herdr, any other device
@@ -37,18 +27,70 @@ if [[ ! "$dev" =~ ^d[a-z0-9]{8,32}$ ]]; then
   dev=""
 fi
 
-# A tab closed from any device stays closed: another device's socket
-# reconnecting must not start it again (history.close_session marks it).
-if [[ -e "$run_dir/closed/$name" ]] && ! tmux "${args[@]}" has-session -t "=$name" 2>/dev/null; then
-  printf '\r\nEsta pestaña se cerró.\r\n'
+# Third ?arg= is the browser's profile ("p" + id, "p" alone is the primary).
+# The terminal size belongs to the profile that opened the tab: its devices
+# resize it (tmux.tab.conf hooks), anyone else attaches with ignore-size.
+prof="${3:-}"
+if [[ ! "$prof" =~ ^p([a-z0-9][a-z0-9_-]{0,31})?$ ]]; then
+  prof=""
+fi
+
+# Connecting never creates a tab: the server starts it when someone asks for
+# one (tab_session.js → /rc-fs/op openTab). A missing session was closed from
+# some device, or tmux restarted; the page moves to a live tab or to its
+# empty screen (tab_session.js).
+if ! tmux "${args[@]}" has-session -t "=$name" 2>/dev/null; then
+  if [[ -e "$run_dir/closed/$name" ]]; then
+    printf '\r\nEsta pestaña se cerró.\r\n'
+  else
+    printf '\r\nEsta pestaña ya no existe.\r\n'
+  fi
   exit 0
 fi
 
-if [[ -n "$dev" ]] && ! tmux "${args[@]}" has-session -t "=$name" 2>/dev/null; then
-  if tmux "${args[@]}" new-session -d "${env_args[@]}" -s "$name" -- "$shell" -il 2>/dev/null; then
-    tmux "${args[@]}" set-option -t "=$name:" @rc_dev "$dev" 2>/dev/null || true
-  fi
+size_of() {
+  tmux "${args[@]}" display-message -p -t "=$1:" '#{window_width} #{window_height}' 2>/dev/null || true
+}
+
+# A window that is not "manual" follows whoever attaches, ignore-size or not.
+# Pin it at its current size; the owner's clients resize it from the hooks.
+pin_size() {
+  local mode w h
+  mode="$(tmux "${args[@]}" show-options -w -t "=$1:" -qv window-size 2>/dev/null || true)"
+  [[ "$mode" == "manual" ]] && return 0
+  read -r w h <<<"$(size_of "$1")"
+  [[ -n "${w:-}" ]] && tmux "${args[@]}" resize-window -t "=$1:" -x "$w" -y "$h" 2>/dev/null || true
+}
+
+attach_flags=()
+owner_prof="$(tmux "${args[@]}" show-options -t "=$name:" -qv @rc_prof 2>/dev/null || true)"
+if [[ -z "$owner_prof" && -n "$prof" ]]; then
+  # The first profile to connect owns the tab: whoever asked for it, or
+  # whoever comes back first to a tab opened before this existed.
+  tmux "${args[@]}" set-option -t "=$name:" @rc_prof "$prof" 2>/dev/null || true
+  owner_prof="$prof"
 fi
+if [[ -n "$prof" && "$prof" != "$owner_prof" ]]; then
+  attach_flags=(-f ignore-size)
+fi
+pin_size "$name"
+
+pane_cmd() {
+  tmux "${args[@]}" display-message -p -t "=$name:" '#{pane_current_command}' 2>/dev/null || true
+}
+
+herdr_bin="$(command -v herdr || echo "$HOME/.local/bin/herdr")"
+
+# This device's own herdr client. herdr is exempt from the owner's size:
+# each device's view takes its own screen size, whatever its profile.
+make_view() {
+  local w h
+  tmux "${args[@]}" has-session -t "=$view" 2>/dev/null && return 0
+  read -r w h <<<"$(size_of "$name")"
+  tmux "${args[@]}" new-session -d -s "$view" -x "${w:-80}" -y "${h:-24}" -- env -u HERDR_ENV \
+    -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH "$herdr_bin" \
+    2>/dev/null
+}
 
 if [[ -n "$dev" ]]; then
   view="hv-$dev-$name"
@@ -57,17 +99,45 @@ if [[ -n "$dev" ]]; then
     tmux "${args[@]}" set-option -t "=$name:" @rc_dev "$dev" 2>/dev/null || true
     owner="$dev"
   fi
-  cmd="$(tmux "${args[@]}" display-message -p -t "=$name:" '#{pane_current_command}' 2>/dev/null || true)"
-  herdr_bin="$(command -v herdr || echo "$HOME/.local/bin/herdr")"
-  if [[ "$owner" != "$dev" && "$cmd" == "herdr" && -x "$herdr_bin" ]]; then
-    # Returns when this herdr client quits; then show the shared pane.
-    tmux "${args[@]}" new-session -A -s "$view" -- env -u HERDR_ENV -u HERDR_PANE_ID \
-      -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH "$herdr_bin" || true
-    # The tab was closed meanwhile: do not bring it back.
-    tmux "${args[@]}" has-session -t "=$name" 2>/dev/null || exit 0
-  else
-    tmux "${args[@]}" kill-session -t "=$view" 2>/dev/null || true
+  if [[ "$owner" != "$dev" && -x "$herdr_bin" ]]; then
+    # Any other device never shares the pane while it runs herdr, even when
+    # herdr starts after it attached: a watcher moves this client to its own
+    # view (switch-client, no detach, nothing printed). The view sizes to
+    # this screen, so the client drops ignore-size first.
+    me="$(tty 2>/dev/null || true)"
+    shell_pid=$$
+    (
+      while sleep 1; do
+        kill -0 "$shell_pid" 2>/dev/null || exit 0
+        tmux "${args[@]}" has-session -t "=$name" 2>/dev/null || exit 0
+        where="$(tmux "${args[@]}" display-message -p -c "$me" '#{client_session}' 2>/dev/null || true)"
+        if [[ "$where" == "$name" && "$(pane_cmd)" == "herdr" ]] && make_view; then
+          tmux "${args[@]}" refresh-client -t "$me" -f '!ignore-size' 2>/dev/null || true
+          tmux "${args[@]}" switch-client -c "$me" -t "=$view" 2>/dev/null || true
+        fi
+      done
+    ) &
+    watcher=$!
+    # One attach per pass. It returns only when the session it is on ends:
+    # this device's herdr client quit (a new view opens if the tab still
+    # runs herdr) or the tab was closed.
+    while tmux "${args[@]}" has-session -t "=$name" 2>/dev/null; do
+      # The browser went away (ttyd closed the terminal): stop, do not spin.
+      [[ -t 0 ]] || break
+      if [[ "$(pane_cmd)" == "herdr" ]] && make_view; then
+        tmux "${args[@]}" attach-session -t "=$view" || true
+      else
+        tmux "${args[@]}" attach-session "${attach_flags[@]}" -t "=$name" || true
+      fi
+      sleep 0.5
+    done
+    kill "$watcher" 2>/dev/null || true
+    exit 0
   fi
+  tmux "${args[@]}" kill-session -t "=$view" 2>/dev/null || true
 fi
 
-exec tmux "${args[@]}" new-session -A "${env_args[@]}" -s "$name" -- "$shell" -il
+# herdr is exempt from the owner's size: the device that runs it sizes it.
+[[ "$(pane_cmd)" == "herdr" ]] && attach_flags=()
+
+exec tmux "${args[@]}" attach-session "${attach_flags[@]}" -t "=$name"

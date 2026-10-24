@@ -178,15 +178,21 @@
     if (!navigator.onLine) setBadge("offline");
   }
 
-  if (window.__rcRedirecting) return;
-  window.addEventListener("rc-ws-open", onWsOpen);
-  window.addEventListener("rc-ws-close", onWsClose);
-  if (window.__rcTermSocket && window.__rcTermSocket.readyState === 1) {
-    onWsOpen();
+  function start() {
+    window.addEventListener("rc-ws-open", onWsOpen);
+    window.addEventListener("rc-ws-close", onWsClose);
+    if (window.__rcTermSocket && window.__rcTermSocket.readyState === 1) {
+      onWsOpen();
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
   }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+
+  // Still choosing a tab: tab_session.js runs start() if it lands on the
+  // empty screen instead of navigating.
+  if (window.__rcRedirecting) (window.__rcLateBoot = window.__rcLateBoot || []).push(start);
+  else start();
 })();

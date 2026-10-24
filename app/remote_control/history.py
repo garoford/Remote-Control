@@ -416,3 +416,28 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
         )
     sessions.sort(key=lambda item: item["activity"], reverse=True)
     return sessions
+
+
+PROF_RE = re.compile(r"^p([a-z0-9][a-z0-9_-]{0,31})?$")
+
+
+def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET) -> dict:
+    """The tab's size, and whether this profile only watches it.
+
+    The profile that opened a tab owns its size (tab_session.sh); another
+    profile's page scales the owner's columns and rows to fit its screen.
+    Tabs running herdr are exempt.
+    """
+    if not TAB_RE.match(tab or "") or not PROF_RE.match(prof or ""):
+        return {"guest": False}
+    result = _tmux(
+        socket, "display-message", "-p", "-t", f"={tab}:", "#{window_width}\t#{window_height}\t#{@rc_prof}\t#{pane_current_command}", text=True
+    )
+    parts = result.stdout.strip().split("\t") if result.returncode == 0 else []
+    # herdr is exempt: every device has its own herdr view at its own size.
+    if len(parts) < 4 or not parts[2] or parts[2] == prof or parts[3] == "herdr":
+        return {"guest": False}
+    try:
+        return {"guest": True, "cols": int(parts[0]), "rows": int(parts[1])}
+    except ValueError:
+        return {"guest": False}
