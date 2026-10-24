@@ -745,31 +745,54 @@
   // ttyd loads WebGL only for its own terminal; ours would fall back to the DOM
   // renderer, which draws block characters (QR codes, ASCII art) from the font
   // and leaves thin seams between cells. Reuse ttyd's addon class instead.
-  function gpuAddonClass() {
+  var GpuClass = null;
+
+  function gpuOf(term) {
     try {
-      var addons = (window.term && window.term._addonManager && window.term._addonManager._addons) || [];
+      var addons = (term && term._addonManager && term._addonManager._addons) || [];
       for (var i = 0; i < addons.length; i++) {
         var inst = addons[i] && addons[i].instance;
-        if (inst && typeof inst.clearTextureAtlas === "function") return inst.constructor;
+        if (inst && typeof inst.clearTextureAtlas === "function" && !inst.__rcDisposed) return inst;
       }
     } catch (_) {}
     return null;
   }
 
+  function gpuAddonClass() {
+    if (!GpuClass) {
+      var inst = gpuOf(window.term);
+      if (inst) GpuClass = inst.constructor;
+    }
+    return GpuClass;
+  }
+
   function loadGpu(term) {
     var Gpu = gpuAddonClass();
-    if (!Gpu) return;
+    if (!Gpu || gpuOf(term)) return;
     try {
       var addon = new Gpu();
       term.loadAddon(addon);
       if (typeof addon.onContextLoss === "function") {
         addon.onContextLoss(function () {
-          try {
-            addon.dispose();
-          } catch (_) {}
+          dropGpu(term);
         });
       }
     } catch (_) {}
+  }
+
+  function dropGpu(term) {
+    var inst = gpuOf(term);
+    if (!inst) return;
+    gpuAddonClass();
+    try {
+      inst.__rcDisposed = true;
+      inst.dispose();
+    } catch (_) {}
+  }
+
+  // Every terminal draws with WebGL (solid blocks, speed).
+  function syncRenderer(term) {
+    if (term) loadGpu(term);
   }
 
   // ttyd switches its own terminal to Unicode 11 widths. A pane left on the
@@ -785,6 +808,45 @@
       var provider = src._providers && src._providers[version];
       if (provider && !(dst._providers && dst._providers[version])) dst.register(provider);
       term.unicode.activeVersion = version;
+    } catch (_) {}
+  }
+
+  // On phones the 1.2 MB Nerd Font arrives after the terminals are built, so
+  // they start on the system mono, which has none of the CLI icons (they show
+  // as empty boxes). cache.js swaps the font on ttyd's terminal only; this does
+  // it for every pane, and redraws the glyph atlas the GPU renderer kept.
+  var NERD_STACK = "'FiraCode Nerd Font Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace";
+
+  function nerdFontReady() {
+    try {
+      return !!(document.fonts && document.fonts.check && document.fonts.check("16px 'FiraCode Nerd Font Mono'", "\uE0B0"));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function useNerdFont(term) {
+    if (!term || !term.options || !nerdFontReady()) return;
+    try {
+      if (term.options.fontFamily !== NERD_STACK) term.options.fontFamily = NERD_STACK;
+      if (typeof term.clearTextureAtlas === "function") term.clearTextureAtlas();
+      term.refresh(0, Math.max(0, (term.rows || 1) - 1));
+    } catch (_) {}
+  }
+
+  function useNerdFontEverywhere() {
+    Object.keys(panes).forEach(function (key) {
+      var pane = panes[key];
+      if (pane && pane.term && pane.term !== window.term) useNerdFont(pane.term);
+    });
+  }
+
+  if (document.fonts) {
+    try {
+      document.fonts.addEventListener("loadingdone", useNerdFontEverywhere);
+    } catch (_) {}
+    try {
+      document.fonts.load("16px 'FiraCode Nerd Font Mono'", "\uE0B0").then(useNerdFontEverywhere, function () {});
     } catch (_) {}
   }
 
@@ -804,7 +866,8 @@
       term.open(host);
       matchUnicode(term);
       lockTheme(term);
-      loadGpu(term);
+      syncRenderer(term);
+      useNerdFont(term);
       host.__rcTerm = term;
       hookOsc52(term);
     } catch (_) {
@@ -5347,7 +5410,6 @@
     }
     var menu = document.getElementById("rc-ws-menu");
     if (menu) {
-      menu.dataset.profile = (profileLabel(mine) || "?").charAt(0).toUpperCase();
       menu.title = "Workspaces · perfil: " + profileLabel(mine);
     }
   }
@@ -5537,13 +5599,13 @@
   var THEME_KEY = "rc-theme";
   var TERM_THEMES = {
     dark: {
-      background: "#011627",
-      foreground: "#d6deeb",
+      background: "#111214",
+      foreground: "#e4e6eb",
       cursor: "#80A4C2",
-      cursorAccent: "#011627",
-      selectionBackground: "#1d3b53",
-      selectionInactiveBackground: "#0b2942",
-      black: "#011627",
+      cursorAccent: "#111214",
+      selectionBackground: "#33363c",
+      selectionInactiveBackground: "#24262a",
+      black: "#1b1c1f",
       red: "#EF5350",
       green: "#22DA6E",
       yellow: "#ADDB67",
@@ -5619,6 +5681,11 @@
     return themeMode() === "light" || lookSeeThrough() ? 4.5 : 1;
   }
 
+  // Over a picture the terminal keeps a little opacity: at ~1% WebGL smooths
+  // glyph edges against nothing and dark text comes out thin; from ~5% the
+  // strokes are normal. The CSS veil is lowered by the same amount.
+  var TERM_VEIL_A = 0.08;
+
   function termPalette() {
     var look = myLook();
     if (look.kind === "color") {
@@ -5628,9 +5695,9 @@
     if (look.kind === "preset" || look.kind === "image") {
       // The picture shows through; the veil (dim) matches the mode, so the
       // mode's own palette stays readable on top of it.
-      // Not fully clear: xterm checks text contrast against this color, so it
-      // carries the veil's tone at 1% (invisible) instead of transparent black.
-      var veil = "rgba(" + behindText().join(",") + ",0.01)";
+      // Not fully clear: xterm checks text contrast against this color, and a
+      // little opacity keeps WebGL glyphs at their normal weight (TERM_VEIL_A).
+      var veil = "rgba(" + behindText().join(",") + "," + TERM_VEIL_A + ")";
       return Object.assign({}, TERM_THEMES[themeMode()], { background: veil });
     }
     return TERM_THEMES[themeMode()];
@@ -5650,6 +5717,10 @@
           get: desc.get,
           set: function () {
             desc.set.call(opts, termPalette());
+            // ttyd re-sends its preferences (renderer included) on reconnect.
+            setTimeout(function () {
+              syncRenderer(term);
+            }, 50);
           },
         });
       } catch (_) {}
@@ -5672,7 +5743,7 @@
       (document.head || root).appendChild(meta);
     }
     var ui = paintUiTint();
-    meta.content = ui ? ui.surface : mode === "light" ? "#eef1f5" : "#0b2942";
+    meta.content = ui ? ui.surface : mode === "light" ? "#eef1f5" : "#1a1b1e";
     var terms = [];
     Object.keys(panes).forEach(function (key) {
       if (panes[key] && panes[key].term) terms.push(panes[key].term);
@@ -5691,6 +5762,7 @@
           term.options.theme = termPalette();
         } catch (_) {}
       }
+      syncRenderer(term);
     });
     paintLookLayer();
     paintThemeSwitch();
@@ -5710,7 +5782,7 @@
 
   // --- terminal background per profile (Ajustes › Themes) ----------------------
 
-  var LOOK_DEFAULT = { kind: "default", value: "", dim: 35, blur: 0 };
+  var LOOK_DEFAULT = { kind: "default", value: "", dim: 35, blur: 0, adaptive: false };
   var LOOK_COLORS = [
     ["#011627", "Night Owl"],
     ["#000000", "Negro"],
@@ -5882,8 +5954,9 @@
     return null;
   }
 
-  // What the UI should be tinted with: {tint, accent, light} or null (default look).
-  function lookTint() {
+  // The look's colors {tint, accent, light}, or null for the default look.
+  // The veil and the contrast check always use them.
+  function lookColors() {
     var look = myLook();
     var raw = null;
     if (look.kind === "color") raw = { tint: colorFor(look.value), accent: look.value };
@@ -5898,10 +5971,12 @@
 
   var UI_TINT_KEYS = ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb", "--rc-blue", "--rc-blue-rgb", "--rc-teal", "--rc-teal-rgb", "--rc-on", "--rc-on-rgb"];
 
-  // Surfaces take the hue of the background; the accent replaces blue/teal.
+  // The accent (marks, active tab, buttons, chips) always follows the chosen
+  // color or image. "Color adaptativo" also tints the surfaces (bars, panels).
   function paintUiTint() {
     var style = document.documentElement.style;
-    var t = lookTint();
+    var t = lookColors();
+    var surfaces = !!(t && myLook().adaptive);
     if (!t) {
       UI_TINT_KEYS.forEach(function (k) {
         style.removeProperty(k);
@@ -5934,6 +6009,18 @@
     var set = function (k, v) {
       style.setProperty(k, v);
     };
+    set("--rc-blue", rgbHex(accent));
+    set("--rc-blue-rgb", accent.join(" "));
+    set("--rc-teal", rgbHex(accent2));
+    set("--rc-teal-rgb", accent2.join(" "));
+    set("--rc-on", rgbHex(accent2));
+    set("--rc-on-rgb", accent2.join(" "));
+    if (!surfaces) {
+      ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb"].forEach(function (k) {
+        style.removeProperty(k);
+      });
+      return null;
+    }
     // A solid color is the terminal itself: the area around it must match exactly.
     set("--rc-bg", t.kind === "color" ? t.tint : rgbHex(surf[0]));
     // Backdrops and shadows (modal, drawer, cards) darken with the look's own
@@ -5955,12 +6042,6 @@
     set("--rc-surface", rgbHex(surf[1]));
     set("--rc-raised", rgbHex(surf[2]));
     set("--rc-surface-rgb", surf[1].join(" "));
-    set("--rc-blue", rgbHex(accent));
-    set("--rc-blue-rgb", accent.join(" "));
-    set("--rc-teal", rgbHex(accent2));
-    set("--rc-teal-rgb", accent2.join(" "));
-    set("--rc-on", rgbHex(accent2));
-    set("--rc-on-rgb", accent2.join(" "));
     return { surface: rgbHex(surf[1]) };
   }
 
@@ -5982,14 +6063,16 @@
   // The veil over a gradient/photo: deep navy in dark mode, a pastel of the
   // look's own hue in light mode.
   function veilRgb() {
-    var t = lookTint();
+    // With "Color adaptativo" off the veil is plain white / black; on, it takes
+    // the hue of the color or image.
+    var t = myLook().adaptive ? lookColors() : null;
     if (themeMode() === "light") {
-      if (!t) return [236, 240, 246];
+      if (!t) return [248, 249, 251];
       // Light mode: a pastel with real color, not near-white.
       var lh = rgbHsl(hexRgb(t.tint));
       return hslRgb(lh[0], lh[1] < 0.08 ? 0.08 : Math.max(0.6, Math.min(lh[1], 0.85)), 0.74);
     }
-    if (!t) return [1, 22, 39];
+    if (!t) return [17, 18, 20];
     // Dark mode: a near-black of the look's own hue, not Night Owl navy.
     var hsl = rgbHsl(hexRgb(t.tint));
     return hslRgb(hsl[0], hsl[1] < 0.08 ? 0.06 : Math.max(0.3, Math.min(hsl[1], 0.6)), 0.06);
@@ -6046,7 +6129,8 @@
     }
     img.style.filter = look.blur ? "blur(" + look.blur + "px)" : "";
     img.style.transform = look.blur ? "scale(1.06)" : "";
-    layer.style.setProperty("--rc-bg-dim", String(veilAlpha(look)));
+    // The terminal already paints TERM_VEIL_A of the veil; the layer adds the rest.
+    layer.style.setProperty("--rc-bg-dim", String(Math.max(0, 1 - (1 - veilAlpha(look)) / (1 - TERM_VEIL_A))));
     root.style.setProperty("--rc-veil-rgb", veilRgb().join(" "));
     layer.hidden = false;
     root.classList.add("rc-has-bg");
@@ -6346,20 +6430,42 @@
     var t = document.createElement("div");
     t.className = "rc-set-title";
     t.textContent = "Fondo del terminal";
-    var sub = document.createElement("div");
-    sub.className = "rc-set-sub";
-    sub.appendChild(document.createTextNode("Se aplica al perfil "));
-    var who = document.createElement("strong");
-    who.textContent = profileLabel(myProfile());
-    sub.appendChild(who);
-    sub.appendChild(document.createTextNode(" y tiñe toda la interfaz."));
     head.appendChild(t);
-    head.appendChild(sub);
+    var adapt = document.createElement("button");
+    adapt.type = "button";
+    adapt.className = "rc-set-toggle" + (look.adaptive ? " is-on" : "");
+    adapt.setAttribute("role", "switch");
+    adapt.setAttribute("aria-checked", look.adaptive ? "true" : "false");
+    adapt.title = "Teñir toda la interfaz con el color o la imagen";
+    adapt.innerHTML = '<span class="rc-set-toggle-label">Color adaptativo</span><span class="rc-set-toggle-track"><span></span></span>';
+    adapt.addEventListener("click", function () {
+      setLook({ adaptive: !myLook().adaptive });
+    });
+    head.appendChild(adapt);
     box.appendChild(head);
+
+    // Light / dark, the same choice as Tema in the drawer.
+    var modes = document.createElement("div");
+    modes.className = "rc-set-modes";
+    modes.setAttribute("role", "group");
+    modes.setAttribute("aria-label", "Modo");
+    THEME_LABELS.forEach(function (item) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "rc-set-mode" + (themePref === item[0] ? " is-on" : "");
+      b.setAttribute("aria-pressed", themePref === item[0] ? "true" : "false");
+      b.innerHTML = THEME_ICONS[item[0]];
+      b.appendChild(document.createElement("span")).textContent = item[1];
+      b.addEventListener("click", function () {
+        setThemePref(item[0]);
+      });
+      modes.appendChild(b);
+    });
+    box.appendChild(modes);
     box.appendChild(lookHero(look));
 
     // Colors
-    var colors = lookCard("Colores", "Un color sólido de fondo", ICON_SWATCH);
+    var colors = lookCard("Colores", "", ICON_SWATCH);
     var row = document.createElement("div");
     row.className = "rc-look-swatches";
     row.appendChild(
@@ -6400,14 +6506,14 @@
     box.appendChild(colors);
 
     // Images
-    var images = lookCard("Imágenes", "Degradados incluidos y tus imágenes · PNG, JPG, WebP o GIF hasta 15 MB · se comparten entre perfiles", ICON_IMAGE);
+    var images = lookCard("Imágenes", "", ICON_IMAGE);
     var igrid = document.createElement("div");
     igrid.className = "rc-look-grid is-images";
     var up = document.createElement("label");
     up.className = "rc-look-tile is-upload";
     up.title = "Subir imagen";
     up.innerHTML =
-      '<span class="rc-look-up-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3.5M4.8 6.4L8 3.2l3.2 3.2M3 12.8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Subir imagen</span><small>o arrástrala aquí</small>';
+      '<span class="rc-look-up-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3.5M4.8 6.4L8 3.2l3.2 3.2M3 12.8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Subir imagen</span>';
     var file = document.createElement("input");
     file.type = "file";
     file.accept = "image/png,image/jpeg,image/webp,image/gif";
@@ -6476,7 +6582,7 @@
 
     // Readability
     var see = lookSeeThrough();
-    var tune = lookCard("Legibilidad", see ? "Ajusta la imagen para que el texto se lea bien" : "Disponible con un degradado o una imagen", ICON_TUNE);
+    var tune = lookCard("Legibilidad", "", ICON_TUNE);
     tune.classList.toggle("is-off", !see);
     [
       ["dim", "Oscurecer", 0, 85, "%"],

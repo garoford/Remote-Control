@@ -150,9 +150,9 @@ def ensure_trycloudflare_route() -> bool:
 
 DEFAULT_PORT = 7681
 NIGHT_OWL_THEME = (
-    '{"background":"#011627","foreground":"#d6deeb","cursor":"#80A4C2",'
-    '"cursorAccent":"#011627","selectionBackground":"#1d3b53",'
-    '"selectionInactiveBackground":"#0b2942","black":"#011627",'
+    '{"background":"#111214","foreground":"#e4e6eb","cursor":"#80A4C2",'
+    '"cursorAccent":"#111214","selectionBackground":"#33363c",'
+    '"selectionInactiveBackground":"#24262a","black":"#1b1c1f",'
     '"red":"#EF5350","green":"#22DA6E","yellow":"#ADDB67","blue":"#82AAFF",'
     '"magenta":"#C792EA","cyan":"#21C7A8","white":"#FFFFFF",'
     '"brightBlack":"#575656","brightRed":"#EF5350","brightGreen":"#22DA6E",'
@@ -800,7 +800,7 @@ class TunnelService:
             f"{preloads}"
             '<style id="cf-remote-theme">'
             f"{faces}"
-            "html,body{background:var(--rc-bg,#011627);margin:0;height:100%;}"
+            "html,body{background:var(--rc-bg,#111214);margin:0;height:100%;}"
             "body,.xterm,.xterm-viewport,.xterm-rows,.xterm-screen,"
             f".xterm-helper-textarea{{font-family:{stack}!important;"
             "font-feature-settings:'liga' 1,'calt' 1;}</style>"

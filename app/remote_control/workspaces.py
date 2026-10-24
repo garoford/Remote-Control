@@ -111,7 +111,14 @@ def _clean_look(raw) -> dict | None:
         except (TypeError, ValueError):
             return fallback
 
-    return {"kind": kind, "value": value.lower() if kind == "color" else value, "dim": num("dim", 0, 85, 35), "blur": num("blur", 0, 20, 0)}
+    return {
+        "kind": kind,
+        "value": value.lower() if kind == "color" else value,
+        "dim": num("dim", 0, 85, 35),
+        "blur": num("blur", 0, 20, 0),
+        # Tint the whole UI from the background (off: only the terminal changes).
+        "adaptive": raw.get("adaptive") is True,
+    }
 
 
 def drop_image_looks(state: dict, name: str) -> None:

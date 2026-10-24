@@ -3,11 +3,11 @@
 :root,
 html[data-rc-theme="dark"] {
   color-scheme: dark;
-  --rc-bg: #011627;
-  --rc-surface: #0b2942;
-  --rc-raised: #1d3b53;
-  --rc-text: #d6deeb;
-  --rc-muted: #9fb4c8;
+  --rc-bg: #111214;
+  --rc-surface: #1a1b1e;
+  --rc-raised: #2a2c31;
+  --rc-text: #e4e6eb;
+  --rc-muted: #a2a6ae;
   --rc-blue: #82aaff;
   --rc-teal: #7fdbca;
   --rc-on: #21c7a8;
@@ -16,16 +16,16 @@ html[data-rc-theme="dark"] {
   --rc-red: #ef5350;
   --rc-warn: #ffcb8b;
   --rc-yellow: #ffeb95;
-  --rc-on-accent: #011627;
-  --rc-hover: rgba(1, 22, 39, 0.55);
-  --rc-shade: 1 22 39;
-  --rc-text-rgb: 214 222 235;
+  --rc-on-accent: #111214;
+  --rc-hover: rgba(17, 18, 20, 0.55);
+  --rc-shade: 6 7 8;
+  --rc-text-rgb: 228 230 235;
   --rc-blue-rgb: 130 170 255;
   --rc-green-rgb: 195 232 141;
   --rc-teal-rgb: 127 219 202;
   --rc-on-rgb: 33 199 168;
   --rc-orange-rgb: 247 140 108;
-  --rc-surface-rgb: 11 41 66;
+  --rc-surface-rgb: 26 27 30;
   --rc-glass-a: 0.5;
 }
 
@@ -1762,28 +1762,6 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
   margin: 2px 0;
 }
 
-/* The drawer button shows the initial of a non-primary profile. */
-#rc-ws-menu {
-  position: relative;
-}
-
-#rc-ws-menu[data-profile]:not([data-profile=""])::after {
-  content: attr(data-profile);
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 2px;
-  border-radius: 7px;
-  background: var(--rc-teal);
-  color: var(--rc-on-accent);
-  font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
-}
-
 /* Profile chip at the left of the tab strip, next to ☰. Always marked,
    the primary profile too: it says who new CLIs run as. */
 #rc-profile-chip {
@@ -1934,7 +1912,7 @@ html.rc-touch .rc-profile-chip-name {
   left: 0;
   overflow: hidden;
   pointer-events: none;
-  background: rgb(var(--rc-veil-rgb, 1 22 39));
+  background: rgb(var(--rc-veil-rgb, 17 18 20));
 }
 
 #rc-term-bg[hidden] {
@@ -1952,7 +1930,7 @@ html.rc-touch .rc-profile-chip-name {
   content: "";
   position: absolute;
   inset: 0;
-  background: rgb(1 22 39 / var(--rc-bg-dim, 0.35));
+  background: rgb(17 18 20 / var(--rc-bg-dim, 0.35));
 }
 
 /* Light mode: a pale veil, so the light palette's dark text reads on it. */
@@ -1962,7 +1940,7 @@ html[data-rc-theme="light"] #rc-term-bg {
 
 html[data-rc-theme="light"] #rc-term-bg::after,
 #rc-term-bg::after {
-  background: rgb(var(--rc-veil-rgb, 1 22 39) / var(--rc-bg-dim, 0.35));
+  background: rgb(var(--rc-veil-rgb, 17 18 20) / var(--rc-bg-dim, 0.35));
 }
 
 html[data-rc-theme="light"] .rc-look-hero-veil {
@@ -2189,6 +2167,113 @@ html.rc-has-bg .xterm-viewport {
   margin-bottom: 16px;
 }
 
+.rc-set-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rc-set-head .rc-set-title {
+  flex: 1 1 auto;
+}
+
+.rc-set-modes {
+  display: flex;
+  gap: 4px;
+  margin: -4px 0 14px;
+  padding: 4px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+  border-radius: 12px;
+  background: rgb(var(--rc-shade) / 0.18);
+}
+
+.rc-set-mode {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.rc-set-mode svg {
+  width: 15px;
+  height: 15px;
+}
+
+.rc-set-mode:hover {
+  color: var(--rc-text);
+}
+
+.rc-set-mode.is-on {
+  background: var(--rc-raised);
+  color: var(--rc-text);
+  box-shadow: 0 0 0 1px rgb(var(--rc-blue-rgb) / 0.35), 0 2px 6px rgb(var(--rc-shade) / 0.3);
+}
+
+.rc-set-mode.is-on svg {
+  color: var(--rc-blue);
+}
+
+.rc-set-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 4px 0 12px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.12);
+  border-radius: 999px;
+  background: rgb(var(--rc-text-rgb) / 0.04);
+  color: var(--rc-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rc-set-toggle.is-on {
+  border-color: rgb(var(--rc-blue-rgb) / 0.5);
+  color: var(--rc-text);
+}
+
+.rc-set-toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgb(var(--rc-text-rgb) / 0.18);
+  transition: background-color 140ms ease;
+}
+
+.rc-set-toggle-track span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
+  transition: transform 140ms ease;
+}
+
+.rc-set-toggle.is-on .rc-set-toggle-track {
+  background: var(--rc-blue);
+}
+
+.rc-set-toggle.is-on .rc-set-toggle-track span {
+  transform: translateX(14px);
+}
+
 .rc-set-title {
   font-size: 19px;
   font-weight: 700;
@@ -2227,7 +2312,7 @@ html.rc-has-bg .xterm-viewport {
 }
 
 .rc-look-hero-veil {
-  background: rgb(1 22 39);
+  background: rgb(17 18 20);
 }
 
 .rc-look-hero-win {
@@ -2236,25 +2321,13 @@ html.rc-has-bg .xterm-viewport {
   left: 22px;
   right: 22px;
   bottom: -1px;
-  border: 1px solid rgb(255 255 255 / 0.1);
+  /* The window chrome uses the UI tokens, so it shows the adaptive tint. */
+  border: 1px solid rgb(var(--rc-blue-rgb) / 0.35);
   border-bottom: 0;
   border-radius: 12px 12px 0 0;
-  background: rgb(0 0 0 / 0.16);
+  background: rgb(var(--rc-surface-rgb) / 0.35);
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
-}
-
-html[data-rc-theme="light"] .rc-look-hero-win {
-  border-color: rgb(0 0 0 / 0.08);
-  background: rgb(255 255 255 / 0.35);
-}
-
-html[data-rc-theme="light"] .rc-look-hero-bar {
-  border-bottom-color: rgb(0 0 0 / 0.06);
-}
-
-html[data-rc-theme="light"] .rc-look-hero-bar span {
-  color: rgb(0 0 0 / 0.45);
 }
 
 .rc-look-hero-bar {
@@ -2263,7 +2336,9 @@ html[data-rc-theme="light"] .rc-look-hero-bar span {
   gap: 6px;
   height: 26px;
   padding: 0 10px;
-  border-bottom: 1px solid rgb(255 255 255 / 0.07);
+  border-radius: 11px 11px 0 0;
+  background: rgb(var(--rc-surface-rgb) / 0.92);
+  border-bottom: 1px solid rgb(var(--rc-text-rgb) / 0.08);
 }
 
 .rc-look-hero-bar i {
@@ -2283,7 +2358,7 @@ html[data-rc-theme="light"] .rc-look-hero-bar span {
 
 .rc-look-hero-bar span {
   margin-left: 8px;
-  color: rgb(255 255 255 / 0.55);
+  color: var(--rc-muted);
   font-size: 11px;
 }
 
@@ -2341,7 +2416,7 @@ html[data-rc-theme="light"] .rc-set-group {
 
 .rc-set-group-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -2431,7 +2506,7 @@ html[data-rc-theme="light"] .rc-set-group {
 }
 
 .rc-look-dot.is-default {
-  background: linear-gradient(135deg, #011627 50%, #fbfbfb 50%);
+  background: linear-gradient(135deg, #111214 50%, #fbfbfb 50%);
 }
 
 .rc-look-dot.is-custom {
