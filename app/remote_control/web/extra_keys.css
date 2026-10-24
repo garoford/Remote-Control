@@ -25,6 +25,8 @@ html[data-rc-theme="dark"] {
   --rc-teal-rgb: 127 219 202;
   --rc-on-rgb: 33 199 168;
   --rc-orange-rgb: 247 140 108;
+  --rc-surface-rgb: 11 41 66;
+  --rc-glass-a: 0.74;
 }
 
 html[data-rc-theme="light"] {
@@ -51,6 +53,8 @@ html[data-rc-theme="light"] {
   --rc-teal-rgb: 42 162 152;
   --rc-on-rgb: 42 162 152;
   --rc-orange-rgb: 211 96 47;
+  --rc-surface-rgb: 246 248 251;
+  --rc-glass-a: 0.8;
 }
 
 html,
@@ -76,10 +80,13 @@ body {
   height: var(--rc-bar-h);
   box-sizing: border-box;
   display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  padding: 0 6px 0 0;
-  background: var(--rc-tab-strip);
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 6px;
+  background: linear-gradient(180deg, rgb(var(--rc-surface-rgb) / 1), rgb(var(--rc-surface-rgb) / 0.92));
+  box-shadow:
+    inset 0 -1px 0 rgb(var(--rc-text-rgb) / 0.07),
+    0 6px 16px -10px rgb(var(--rc-shade) / 0.6);
   color: var(--rc-text);
   font: 500 13px/1 ui-sans-serif, system-ui, sans-serif;
   -webkit-user-select: none;
@@ -88,16 +95,19 @@ body {
 
 #rc-session-tabs {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  gap: 4px;
   flex: 0 1 auto;
   min-width: 0;
   /* room for ☰, + and the profile chip */
-  max-width: calc(100% - 76px - var(--rc-chip-w, 150px));
+  max-width: calc(100% - 84px - var(--rc-chip-w, 150px));
   height: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
-  padding-left: 8px;
+  padding: 0 2px 0 6px;
+  border-left: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  margin-left: 2px;
 }
 
 #rc-session-tabs::-webkit-scrollbar {
@@ -108,70 +118,109 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 0 1 220px;
-  width: 220px;
-  min-width: 56px;
-  max-width: 220px;
-  height: 34px;
+  gap: 7px;
+  flex: 0 1 190px;
+  width: 190px;
+  min-width: 64px;
+  max-width: 190px;
+  height: 30px;
+  box-sizing: border-box;
   margin: 0;
-  padding: 0 8px 0 12px;
-  border: 0;
-  border-radius: 10px 10px 0 0;
+  padding: 0 5px 0 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
   background: transparent;
   color: var(--rc-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  box-shadow: inset -1px 0 0 rgb(var(--rc-text-rgb) / 0.16);
-}
-
-.rc-tab:last-child,
-.rc-tab.is-active,
-.rc-tab.is-active + .rc-tab,
-.rc-tab:has(+ .rc-tab.is-active) {
-  box-shadow: none;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .rc-tab:not(.is-active):hover {
-  background: var(--rc-hover);
+  background: rgb(var(--rc-text-rgb) / 0.06);
+  border-color: rgb(var(--rc-text-rgb) / 0.06);
   color: var(--rc-text);
+}
+
+.rc-tab:focus-visible {
+  outline: 2px solid rgb(var(--rc-blue-rgb) / 0.6);
+  outline-offset: -2px;
 }
 
 .rc-tab.is-active {
   z-index: 1;
-  background: var(--rc-tab-active);
+  background: var(--rc-raised);
+  border-color: rgb(var(--rc-text-rgb) / 0.1);
   color: var(--rc-text);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.04) inset,
+    0 4px 12px -4px rgb(var(--rc-shade) / 0.7);
 }
 
-.rc-tab.is-active::before,
+/* Same blue mark as the current workspace in the drawer, laid flat. */
 .rc-tab.is-active::after {
   content: "";
   position: absolute;
-  bottom: 0;
-  width: 10px;
-  height: 10px;
+  left: 11px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--rc-teal);
+  box-shadow: 0 0 0 3px rgb(var(--rc-teal-rgb) / 0.18);
   pointer-events: none;
 }
 
-.rc-tab.is-active::before {
-  left: -10px;
-  border-bottom-right-radius: 10px;
-  box-shadow: 5px 0 0 0 var(--rc-tab-active);
-}
-
-.rc-tab.is-active::after {
-  right: -10px;
-  border-bottom-left-radius: 10px;
-  box-shadow: -5px 0 0 0 var(--rc-tab-active);
-}
-
 .rc-tab-label {
+  display: flex;
+  align-items: baseline;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The folder gives way first; the command keeps its full name. */
+.rc-tab-dir,
+.rc-tab-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rc-tab-dir {
+  min-width: 1em;
+  color: var(--rc-muted);
+  font-weight: 400;
+}
+
+.rc-tab-sep {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  color: rgb(var(--rc-text-rgb) / 0.3);
+}
+
+.rc-tab-cmd {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.rc-tab.is-active .rc-tab-cmd {
+  color: var(--rc-text);
+}
+
+.rc-tab.is-active {
+  padding-left: 24px;
 }
 
 .rc-tab-close {
@@ -179,16 +228,19 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   margin: 0;
   padding: 0;
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: inherit;
+  color: var(--rc-muted);
   opacity: 0;
   cursor: pointer;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease;
 }
 
 .rc-tab.is-active .rc-tab-close,
@@ -198,7 +250,8 @@ body {
 }
 
 .rc-tab-close:hover {
-  background: rgb(var(--rc-text-rgb) / 0.16);
+  background: rgb(var(--rc-orange-rgb) / 0.16);
+  color: var(--rc-orange);
 }
 
 .rc-tab-close svg {
@@ -208,48 +261,54 @@ body {
 }
 
 #rc-session-new {
-  align-self: center;
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  margin: 0 0 0 4px;
+  width: 30px;
+  height: 30px;
+  margin: 0 0 0 2px;
   padding: 0;
-  border: 0;
+  border: 1px dashed rgb(var(--rc-text-rgb) / 0.18);
   border-radius: 50%;
   background: transparent;
-  color: var(--rc-text);
+  color: var(--rc-muted);
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 #rc-session-new:hover {
-  background: var(--rc-hover);
+  border-style: solid;
+  border-color: rgb(var(--rc-blue-rgb) / 0.5);
+  background: rgb(var(--rc-blue-rgb) / 0.12);
+  color: var(--rc-blue);
 }
 
 #rc-session-new svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   display: block;
   margin: 0 auto;
 }
 
 #rc-ws-menu {
-  align-self: center;
   flex: 0 0 auto;
   width: 32px;
   height: 32px;
-  margin: 0 0 0 6px;
+  margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--rc-text);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: background-color 120ms ease;
 }
 
 #rc-ws-menu:hover,
 html.rc-ws-open #rc-ws-menu {
-  background: var(--rc-hover);
+  background: rgb(var(--rc-text-rgb) / 0.08);
 }
 
 #rc-ws-menu svg {
@@ -264,30 +323,45 @@ html.rc-ws-open #rc-ws-menu {
   position: fixed;
   z-index: 2147483005;
   inset: 0;
-  background: rgb(var(--rc-shade) / 0.6);
+  background: rgb(var(--rc-shade) / 0.38);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 160ms ease;
+  transition: opacity 200ms ease;
 }
 
 #rc-ws-drawer {
   position: fixed;
   z-index: 2147483006;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: min(80vw, 300px);
+  top: 8px;
+  bottom: 8px;
+  left: 8px;
+  width: min(calc(100vw - 48px), 316px);
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 12px 10px calc(12px + env(safe-area-inset-bottom, 0px));
-  background: var(--rc-surface);
+  gap: 2px;
+  padding: 16px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.09);
+  border-radius: 18px;
+  background: rgb(var(--rc-surface-rgb) / var(--rc-glass-a));
+  -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  backdrop-filter: blur(22px) saturate(1.5);
   color: var(--rc-text);
   font: 500 14px/1.2 ui-sans-serif, system-ui, sans-serif;
-  box-shadow: 4px 0 18px rgb(var(--rc-shade) / 0.6);
-  transform: translateX(-105%);
-  transition: transform 180ms ease;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.05) inset,
+    0 24px 60px -12px rgb(var(--rc-shade) / 0.75),
+    0 0 0 1px rgb(var(--rc-shade) / 0.25);
+  opacity: 0;
+  transform: translateX(-24px) scale(0.98);
+  transform-origin: left center;
+  visibility: hidden;
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    opacity 180ms ease,
+    visibility 0s linear 220ms;
 }
 
 html.rc-ws-open #rc-ws-backdrop {
@@ -296,38 +370,50 @@ html.rc-ws-open #rc-ws-backdrop {
 }
 
 html.rc-ws-open #rc-ws-drawer {
+  opacity: 1;
   transform: none;
+  visibility: visible;
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.9, 0.2, 1),
+    opacity 180ms ease,
+    visibility 0s;
 }
 
 .rc-ws-title {
-  padding: 4px 6px 10px;
-  color: var(--rc-teal);
-  font-size: 12px;
+  padding: 0 8px 8px;
+  color: var(--rc-muted);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 #rc-ws-list {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  scrollbar-width: thin;
 }
 
 .rc-ws-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
-  min-height: 44px;
+  gap: 0;
+  min-height: 40px;
+  padding-right: 4px;
   border-radius: 10px;
+  transition: background-color 120ms ease;
 }
 
 .rc-ws-item.is-current {
-  background: var(--rc-bg);
-  box-shadow: inset 3px 0 0 var(--rc-blue);
+  background: rgb(var(--rc-blue-rgb) / 0.12);
+  box-shadow: inset 0 0 0 1px rgb(var(--rc-blue-rgb) / 0.18);
 }
 
 .rc-ws-main {
@@ -336,11 +422,12 @@ html.rc-ws-open #rc-ws-drawer {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
-  padding: 0 10px;
+  height: 40px;
+  padding: 0 8px 0 12px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
-  color: inherit;
+  color: var(--rc-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -356,12 +443,15 @@ html.rc-ws-open #rc-ws-drawer {
 
 .rc-ws-count {
   flex: 0 0 auto;
-  min-width: 22px;
+  min-width: 20px;
   padding: 3px 6px;
+  box-sizing: border-box;
   border-radius: 999px;
-  background: var(--rc-raised);
+  background: rgb(var(--rc-text-rgb) / 0.08);
   color: var(--rc-muted);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
@@ -369,26 +459,34 @@ html.rc-ws-open #rc-ws-drawer {
 .rc-ws-yes,
 .rc-ws-no {
   flex: 0 0 auto;
-  height: 36px;
-  min-width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  min-width: 30px;
   padding: 0 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: var(--rc-muted);
   font: inherit;
+  font-size: 13px;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
 }
 
 .rc-ws-act:hover,
 .rc-ws-no:hover {
-  background: var(--rc-raised);
+  background: rgb(var(--rc-text-rgb) / 0.08);
   color: var(--rc-text);
 }
 
 .rc-ws-yes {
   background: var(--rc-red);
-  color: var(--rc-on-accent);
+  color: #fff;
   font-weight: 700;
 }
 
@@ -417,18 +515,105 @@ html.rc-ws-open #rc-ws-drawer {
 
 .rc-ws-add {
   flex: 0 0 auto;
-  height: 44px;
-  margin-top: 6px;
-  border: 1px dashed rgb(var(--rc-blue-rgb) / 0.5);
-  border-radius: 10px;
+  align-self: flex-start;
+  height: 32px;
+  margin: 6px 0 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
   background: transparent;
-  color: var(--rc-blue);
+  color: var(--rc-muted);
   font: inherit;
+  font-size: 13px;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .rc-ws-add:hover {
-  background: rgb(var(--rc-blue-rgb) / 0.08);
+  background: rgb(var(--rc-blue-rgb) / 0.1);
+  color: var(--rc-blue);
+}
+
+/* Current workspace / profile: a short rounded mark instead of a hard edge. */
+.rc-ws-item.is-current::before,
+.rc-ws-profile.is-on::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--rc-blue);
+  pointer-events: none;
+}
+
+.rc-ws-profile.is-on::before {
+  background: var(--rc-teal);
+}
+
+.rc-ws-item:not(.is-current):not(.is-editing):hover,
+.rc-ws-profile:not(.is-on):hover {
+  background: rgb(var(--rc-text-rgb) / 0.05);
+}
+
+.rc-ws-item.is-current .rc-ws-main,
+.rc-ws-item:hover .rc-ws-main,
+.rc-ws-profile.is-on .rc-ws-profile-main,
+.rc-ws-profile:hover .rc-ws-profile-main {
+  color: var(--rc-text);
+}
+
+.rc-ws-item.is-current .rc-ws-count {
+  background: rgb(var(--rc-blue-rgb) / 0.16);
+  color: var(--rc-blue);
+}
+
+.rc-ws-act svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+.rc-ws-plus svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rc-ws-act.is-danger:hover {
+  background: rgb(var(--rc-orange-rgb) / 0.14);
+  color: var(--rc-orange);
+}
+
+.rc-ws-plus:hover {
+  background: rgb(var(--rc-blue-rgb) / 0.12);
+  color: var(--rc-blue);
+}
+
+/* With a mouse, row actions take no room until the row is hovered, so the
+   count and Auto stay flush right; touch keeps them visible but quiet. */
+@media (hover: hover) {
+  .rc-ws-item:not(:hover):not(:has(:focus-visible)) .rc-ws-act,
+  .rc-ws-profile:not(:hover):not(:has(:focus-visible)) .rc-ws-act,
+  .rc-ws-group:not(:hover):not(:has(:focus-visible)) .rc-ws-act:not(.rc-ws-plus),
+  .rc-ws-group:not(:hover):not(:has(:focus-visible)) .rc-ws-clear {
+    display: none;
+  }
+}
+
+@media (hover: none) {
+  .rc-ws-act:not(.rc-ws-plus) {
+    opacity: 0.7;
+  }
+}
+
+/* Perfil and Tema sit at the bottom, under a hairline. */
+.rc-ws-theme-wrap.rc-ws-profiles-wrap {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid rgb(var(--rc-text-rgb) / 0.08);
 }
 
 html.rc-quiet-switch .xterm > div:not([class]) {
@@ -852,12 +1037,70 @@ html.rc-touch #rc-extra-keys {
 }
 
 html[data-rc-theme="light"] #rc-ws-backdrop {
-  background: rgb(64 63 83 / 0.28);
+  background: rgb(64 63 83 / 0.18);
+}
+
+/* Search at the top of the drawer */
+.rc-ws-find {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  margin: 0 0 10px;
+  padding: 0 12px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+  border-radius: 10px;
+  background: rgb(var(--rc-shade) / 0.28);
+  color: var(--rc-muted);
+  cursor: text;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+html[data-rc-theme="light"] .rc-ws-find {
+  background: rgb(255 255 255 / 0.7);
+}
+
+.rc-ws-find:focus-within {
+  border-color: rgb(var(--rc-blue-rgb) / 0.55);
+  box-shadow: 0 0 0 3px rgb(var(--rc-blue-rgb) / 0.15);
+}
+
+.rc-ws-find svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+}
+
+#rc-ws-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rc-text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+#rc-ws-search::placeholder {
+  color: var(--rc-muted);
+  opacity: 0.8;
+}
+
+#rc-ws-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
 }
 
 .rc-ws-theme-wrap {
   flex: 0 0 auto;
-  margin-top: 10px;
+  margin-top: 14px;
 }
 
 .rc-ws-theme-wrap .rc-ws-title {
@@ -866,25 +1109,72 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
 
 #rc-ws-theme {
   display: flex;
-  gap: 4px;
-  padding: 4px;
-  border-radius: 10px;
-  background: var(--rc-bg);
+  gap: 2px;
+  padding: 3px;
+  border-radius: 11px;
+  background: rgb(var(--rc-shade) / 0.28);
+  box-shadow: inset 0 0 0 1px rgb(var(--rc-text-rgb) / 0.07);
 }
 
 .rc-ws-theme-opt {
   flex: 1 1 0;
   min-width: 0;
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
   padding: 0 6px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--rc-muted);
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.rc-ws-theme-opt:focus,
+.rc-ws-act:focus,
+.rc-ws-main:focus,
+.rc-ws-group-name:focus,
+.rc-ws-profile-main:focus,
+.rc-ws-add:focus,
+.rc-ws-profile-add:focus,
+.rc-ws-auto:focus,
+.rc-ws-clear:focus {
+  outline: none;
+}
+
+.rc-ws-theme-opt:focus-visible,
+.rc-ws-act:focus-visible,
+.rc-ws-main:focus-visible,
+.rc-ws-group-name:focus-visible,
+.rc-ws-profile-main:focus-visible,
+.rc-ws-add:focus-visible,
+.rc-ws-profile-add:focus-visible,
+.rc-ws-auto:focus-visible,
+.rc-ws-clear:focus-visible {
+  outline: 2px solid rgb(var(--rc-blue-rgb) / 0.6);
+  outline-offset: -2px;
+}
+
+.rc-ws-theme-opt svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+html[data-rc-theme="light"] #rc-ws-theme {
+  background: rgb(var(--rc-shade) / 0.07);
+}
+
+html[data-rc-theme="light"] .rc-ws-theme-opt.is-on {
+  background: #fff;
 }
 
 .rc-ws-theme-opt:hover {
@@ -894,7 +1184,8 @@ html[data-rc-theme="light"] #rc-ws-backdrop {
 .rc-ws-theme-opt.is-on {
   background: var(--rc-raised);
   color: var(--rc-text);
-  font-weight: 700;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(var(--rc-shade) / 0.35);
 }
 
 /* PC: mic and attach each float on their own, bottom-right by default. */
@@ -1003,15 +1294,16 @@ html.rc-touch #rc-pc-file {
 }
 
 .rc-ws-section + .rc-ws-section {
-  margin-top: 10px;
+  margin-top: 14px;
 }
 
 .rc-ws-group {
   display: flex;
   align-items: center;
   gap: 2px;
-  min-height: 40px;
-  border-bottom: 1px solid var(--rc-raised);
+  min-height: 32px;
+  margin-bottom: 2px;
+  padding-right: 4px;
 }
 
 .rc-ws-group-name {
@@ -1019,14 +1311,15 @@ html.rc-touch #rc-pc-file {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 40px;
-  padding: 0 6px;
+  gap: 4px;
+  height: 32px;
+  padding: 0 6px 0 2px;
   border: 0;
+  border-radius: 7px;
   background: transparent;
   color: var(--rc-teal);
-  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.08em;
+  font: 700 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   text-align: left;
   cursor: pointer;
@@ -1043,15 +1336,24 @@ html.rc-touch #rc-pc-file {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  font-size: 14px;
-  transition: transform 140ms ease, background 140ms ease;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  color: var(--rc-muted);
+  transition:
+    transform 160ms ease,
+    background-color 120ms ease;
 }
 
 .rc-ws-group-name:hover .rc-ws-caret {
-  background: var(--rc-raised);
+  background: rgb(var(--rc-text-rgb) / 0.08);
+  color: var(--rc-text);
+}
+
+.rc-ws-caret svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .rc-ws-group-name .rc-ws-count {
@@ -1065,19 +1367,19 @@ html.rc-touch #rc-pc-file {
 
 .rc-ws-plus {
   color: var(--rc-blue);
-  font-size: 18px;
 }
 
 .rc-ws-auto {
   flex: 0 0 auto;
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--rc-on);
-  border-radius: 999px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
   background: rgb(var(--rc-on-rgb) / 0.12);
   color: var(--rc-on);
-  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
   cursor: pointer;
+  transition: background-color 120ms ease;
 }
 
 .rc-ws-auto:hover {
@@ -1085,9 +1387,11 @@ html.rc-touch #rc-pc-file {
 }
 
 .rc-ws-empty {
-  padding: 8px 10px;
+  padding: 6px 12px 8px;
   color: var(--rc-muted);
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  opacity: 0.8;
 }
 
 .rc-ws-item.is-editing {
@@ -1255,19 +1559,23 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
 
 .rc-ws-clear {
   flex: 0 0 auto;
-  height: 30px;
-  margin-left: 4px;
-  padding: 0 12px;
-  border: 1px solid rgb(var(--rc-orange-rgb) / 0.7);
-  border-radius: 999px;
-  background: rgb(var(--rc-orange-rgb) / 0.1);
-  color: var(--rc-orange);
-  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+  height: 26px;
+  margin-left: 2px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .rc-ws-clear:hover {
-  background: rgb(var(--rc-orange-rgb) / 0.2);
+  background: rgb(var(--rc-orange-rgb) / 0.14);
+  color: var(--rc-orange);
 }
 
 /* Profiles (who runs new AI CLIs from this device) */
@@ -1278,15 +1586,18 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
 }
 
 .rc-ws-profile {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
-  border-radius: 10px;
+  gap: 0;
+  padding-right: 4px;
+  border-radius: 8px;
+  transition: background-color 120ms ease;
 }
 
 .rc-ws-profile.is-on {
-  background: var(--rc-bg);
-  box-shadow: inset 3px 0 0 var(--rc-teal);
+  background: rgb(var(--rc-teal-rgb) / 0.1);
+  box-shadow: inset 0 0 0 1px rgb(var(--rc-teal-rgb) / 0.18);
 }
 
 .rc-ws-profile-main {
@@ -1296,10 +1607,11 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
   align-items: center;
   gap: 10px;
   height: 40px;
-  padding: 0 10px;
+  padding: 0 8px 0 10px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
-  color: inherit;
+  color: var(--rc-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -1338,21 +1650,26 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
 }
 
 .rc-ws-profile-add {
-  height: 34px;
+  align-self: flex-start;
+  height: 32px;
   margin-top: 2px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
-  color: var(--rc-blue);
+  color: var(--rc-muted);
   font: inherit;
   font-size: 13px;
   text-align: left;
   padding: 0 10px;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .rc-ws-profile-add:hover {
-  background: rgb(var(--rc-blue-rgb) / 0.08);
+  background: rgb(var(--rc-blue-rgb) / 0.1);
+  color: var(--rc-blue);
 }
 
 #rc-ws-profiles .rc-ws-input {
@@ -1381,45 +1698,41 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
   font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
 }
 
-/* Profile chip at the right of the tab strip */
+/* Profile chip at the left of the tab strip, next to ☰. Always marked,
+   the primary profile too: it says who new CLIs run as. */
 #rc-profile-chip {
-  align-self: center;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 7px;
   max-width: 150px;
   height: 30px;
-  margin-left: auto;
-  padding: 0 10px 0 4px;
-  border: 1px solid transparent;
+  box-sizing: border-box;
+  margin: 0 2px 0 4px;
+  padding: 0 11px 0 4px;
+  border: 1px solid rgb(var(--rc-teal-rgb) / 0.45);
   border-radius: 999px;
-  background: transparent;
-  color: var(--rc-muted);
+  background: rgb(var(--rc-teal-rgb) / 0.1);
+  color: var(--rc-text);
   font: inherit;
+  font-weight: 600;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
 }
 
 #rc-profile-chip:hover {
-  background: var(--rc-hover);
-  color: var(--rc-text);
-}
-
-#rc-profile-chip.is-extra {
-  border-color: rgb(var(--rc-teal-rgb) / 0.55);
-  background: rgb(var(--rc-teal-rgb) / 0.12);
-  color: var(--rc-text);
+  border-color: rgb(var(--rc-teal-rgb) / 0.7);
+  background: rgb(var(--rc-teal-rgb) / 0.18);
 }
 
 #rc-profile-chip .rc-ws-profile-dot {
   width: 22px;
   height: 22px;
-  font-size: 11px;
-}
-
-#rc-profile-chip.is-extra .rc-ws-profile-dot {
   background: var(--rc-teal);
   color: var(--rc-on-accent);
+  font-size: 11px;
 }
 
 .rc-profile-chip-name {
@@ -1431,6 +1744,12 @@ html[data-rc-theme="light"] .rc-auto-note.is-warn {
 
 html.rc-touch #rc-sessions {
   --rc-chip-w: 40px;
+}
+
+/* Phone tabs are narrow: the command alone says which tab it is. */
+html.rc-touch .rc-tab-dir,
+html.rc-touch .rc-tab-sep {
+  display: none;
 }
 
 html.rc-touch #rc-profile-chip {
@@ -1449,10 +1768,13 @@ html.rc-touch .rc-profile-chip-name {
   max-height: 70vh;
   overflow-y: auto;
   padding: 6px;
-  border-radius: 12px;
-  background: var(--rc-surface);
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.09);
+  border-radius: 14px;
+  background: rgb(var(--rc-surface-rgb) / var(--rc-glass-a));
+  -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  backdrop-filter: blur(22px) saturate(1.5);
   color: var(--rc-text);
-  box-shadow: 0 10px 30px rgb(var(--rc-shade) / 0.55), 0 0 0 1px rgb(var(--rc-text-rgb) / 0.08);
+  box-shadow: 0 18px 44px -10px rgb(var(--rc-shade) / 0.7);
   font: 500 14px/1.2 ui-sans-serif, system-ui, sans-serif;
 }
 

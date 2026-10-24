@@ -1665,3 +1665,275 @@ html.rc-touch .rcf-split .rcf-caret-btn {
 html.rc-touch .rcf-loc {
   margin: 0 4px;
 }
+
+/* Phone header: back, current folder, search, menu, close. New tab and the
+   view options move into ⋮; the path shows only the folder you are in. */
+html.rc-touch .rcf-newtab,
+html.rc-touch .rcf-split {
+  display: none;
+}
+
+html.rc-touch .rcf-crumbs {
+  overflow: hidden;
+  padding: 0 2px;
+}
+
+html.rc-touch .rcf-crumb:not(.is-last),
+html.rc-touch .rcf-crumb-sep {
+  display: none;
+}
+
+html.rc-touch .rcf-crumb.is-last {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+html.rc-touch .rcf-crumb.is-last span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html.rc-touch .rcf-crumb.is-last svg {
+  flex: 0 0 auto;
+}
+
+/* Folder tree from the location pill */
+.rcf-tree-layer:has(.rcf-tree.is-touch) {
+  background: rgb(0 0 0 / 0.35);
+}
+
+.rcf-tree {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  max-height: min(70vh, 560px);
+  border-radius: 14px;
+  background: var(--rc-surface);
+  box-shadow: 0 16px 44px rgb(0 0 0 / 0.42), 0 0 0 1px var(--rcf-line);
+  overflow: hidden;
+  animation: rcf-pop 120ms ease-out;
+}
+
+.rcf-tree.is-touch {
+  left: 8px;
+  right: 8px;
+  max-height: calc(100vh - 140px);
+  max-height: calc(100dvh - 140px);
+}
+
+.rcf-tree-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid var(--rcf-line);
+}
+
+.rcf-tree-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* keep the end of a long path visible */
+  direction: rtl;
+  text-align: left;
+  color: var(--rc-muted);
+  font: 12.5px/1.3 ui-monospace, "FiraCode Nerd Font Mono", monospace;
+}
+
+.rcf-tree-acts {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.rcf-tree-acts .rcf-btn {
+  width: 32px;
+  height: 32px;
+}
+
+.rcf-tree-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  overscroll-behavior: contain;
+}
+
+.rcf-tree-row {
+  --indent: calc(var(--depth, 0) * 16px);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  padding-left: var(--indent);
+  border-radius: 8px;
+}
+
+/* faint guide lines under each level */
+.rcf-tree-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--indent);
+  background: repeating-linear-gradient(90deg, transparent 0 13px, var(--rcf-line) 13px 14px, transparent 14px 16px);
+  pointer-events: none;
+}
+
+.rcf-tree-row:hover {
+  background: var(--rcf-hover);
+}
+
+.rcf-tree-row.is-here {
+  background: rgb(var(--rcf-accent-rgb) / 0.16);
+  box-shadow: inset 0 0 0 1px rgb(var(--rcf-accent-rgb) / 0.35);
+}
+
+.rcf-tree-tog {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rc-muted);
+  cursor: pointer;
+}
+
+.rcf-tree-tog:hover {
+  background: var(--rcf-hover);
+  color: var(--rc-text);
+}
+
+.rcf-tree-tog svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 140ms ease;
+}
+
+.rcf-tree-tog.is-open svg {
+  transform: rotate(90deg);
+}
+
+.rcf-tree-tog.is-empty {
+  visibility: hidden;
+}
+
+.rcf-tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rc-text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rcf-tree-name svg {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  color: var(--rc-blue);
+}
+
+.rcf-tree-name span:first-of-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rcf-tree-row.is-chain .rcf-tree-name {
+  font-weight: 600;
+}
+
+.rcf-tree-row.is-here .rcf-tree-name {
+  font-weight: 700;
+}
+
+.rcf-tree-here {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgb(var(--rcf-accent-rgb) / 0.22);
+  color: var(--rc-text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rcf-tree-all {
+  flex: 0 0 auto;
+  height: 24px;
+  margin-right: 4px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(var(--rcf-accent-rgb) / 0.12);
+  color: var(--rc-blue);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rcf-tree-all:hover {
+  background: rgb(var(--rcf-accent-rgb) / 0.22);
+}
+
+@media (hover: hover) {
+  .rcf-tree-row:not(:hover) .rcf-tree-all {
+    opacity: 0;
+  }
+}
+
+.rcf-tree-note {
+  display: block;
+  height: 28px;
+  margin-left: calc(var(--depth, 0) * 16px + 30px);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 28px;
+  text-align: left;
+}
+
+html.rc-touch .rcf-tree-row {
+  height: 42px;
+}
+
+html.rc-touch .rcf-tree-name {
+  height: 38px;
+  font-size: 15px;
+}
+
+html.rc-touch .rcf-tree-tog {
+  width: 34px;
+  height: 34px;
+}
+
+html.rc-touch .rcf-tree-note {
+  height: 36px;
+  line-height: 36px;
+}

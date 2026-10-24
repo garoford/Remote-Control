@@ -2,13 +2,48 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 TAB_RE = re.compile(r"^rc[a-z0-9]{10,32}$")
 MAX_RETURN_LINES = 20000
 TMUX_SOCKET = "cf-remote"
+CLOSED_KEEP_S = 7 * 24 * 3600
+
+
+def closed_dir() -> Path:
+    """Closed tab ids. tab_session.sh will not bring one of these back."""
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "cf-quick-tunnel" / "closed"
+
+
+def closed_tabs() -> list[str]:
+    folder = closed_dir()
+    if not folder.is_dir():
+        return []
+    cutoff = time.time() - CLOSED_KEEP_S
+    out = []
+    for item in folder.iterdir():
+        try:
+            if item.stat().st_mtime < cutoff:
+                item.unlink()
+            elif TAB_RE.match(item.name):
+                out.append(item.name)
+        except OSError:
+            continue
+    return out
+
+
+def _mark_closed(tab: str) -> None:
+    try:
+        folder = closed_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / tab).touch()
+    except OSError:
+        pass
 
 
 def normalize_line(line: str) -> str:
@@ -34,12 +69,20 @@ def close_session(tab: str, socket: str = TMUX_SOCKET) -> bool:
     """Kill one tunnel session. Refuses anything that is not a tab id."""
     if not TAB_RE.match(tab):
         return False
+    # Before the kill: another device's socket reconnects right away and
+    # would otherwise start the tab again.
+    _mark_closed(tab)
     result = subprocess.run(
         ["tmux", "-L", socket, "kill-session", "-t", f"={tab}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
+    # Per-device herdr views of this tab (tab_session.sh) go with it.
+    names = _tmux(socket, "list-sessions", "-F", "#{session_name}", text=True)
+    for name in (names.stdout or "").splitlines() if names.returncode == 0 else []:
+        if name.startswith("hv-") and name.endswith(f"-{tab}"):
+            _tmux(socket, "kill-session", "-t", f"={name}")
     return result.returncode == 0
 
 

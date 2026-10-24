@@ -719,8 +719,9 @@
         window.__rcTermSocket = null;
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
       }
+      if (typeof pullSessions === "function") pullSessions();
       setTimeout(function () {
-        if (!pane.intentional && panes[pane.id] === pane) connectPane(pane);
+        if (!pane.intentional && panes[pane.id] === pane && !closedTabs[pane.id]) connectPane(pane);
       }, 200);
     });
   }
@@ -904,6 +905,36 @@
     );
   }
 
+  // One id per browser. tab_session.sh gets it as the second ?arg= and gives
+  // each device its own herdr client when the tab's pane runs herdr.
+  function deviceId() {
+    var id = "";
+    try {
+      id = localStorage.getItem("rc-device-id") || "";
+    } catch (_) {}
+    if (!/^d[a-z0-9]{8,32}$/.test(id)) {
+      var bytes = new Uint8Array(8);
+      if (window.crypto && crypto.getRandomValues) {
+        crypto.getRandomValues(bytes);
+      } else {
+        for (var i = 0; i < bytes.length; i++) bytes[i] = (Math.random() * 256) | 0;
+      }
+      id = "d";
+      for (var j = 0; j < bytes.length; j++) id += ("0" + bytes[j].toString(16)).slice(-2);
+      try {
+        localStorage.setItem("rc-device-id", id);
+      } catch (_) {}
+    }
+    return id;
+  }
+
+  function withDevice(url) {
+    var text = String(url);
+    var dev = deviceId();
+    if (text.indexOf("arg=") === -1 || text.indexOf("arg=" + dev) !== -1) return text;
+    return text + (text.indexOf("?") === -1 ? "?" : "&") + "arg=" + dev;
+  }
+
   function wrapWebSocket() {
     if (!NativeWS || NativeWS.__rcWrapped) return;
     function RCWebSocket(url, protocols) {
@@ -915,6 +946,7 @@
       var tty = list.indexOf("tty") !== -1 || /\/ws/.test(String(url));
       var pane = tty ? window.__rcNextPane : null;
       if (tty) window.__rcNextPane = null;
+      if (tty) url = withDevice(url);
       var ws =
         protocols === undefined
           ? new NativeWS(url)
@@ -3851,6 +3883,31 @@
       ev.stopPropagation();
     }
     if (!id) return;
+    forgetSession(id);
+    fetch("/rc-session-close?tab=" + encodeURIComponent(id), {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+    }).catch(function () {});
+  }
+
+  // Tabs closed on any device (server list). Their sockets must not
+  // reconnect, and a browser showing one moves to its neighbour.
+  var closedTabs = {};
+
+  function takeClosed(list) {
+    if (!Array.isArray(list)) return;
+    list.forEach(function (id) {
+      closedTabs[id] = true;
+    });
+    Object.keys(panes).forEach(function (id) {
+      if (closedTabs[id]) forgetSession(id);
+    });
+    if (closedTabs[tabId()]) forgetSession(tabId());
+  }
+
+  function forgetSession(id) {
+    closedTabs[id] = true;
     var host = document.getElementById("rc-session-tabs");
     var ids = [];
     if (host) {
@@ -3871,11 +3928,32 @@
       return item.id !== id;
     });
     paintSessions(sessionCache);
-    fetch("/rc-session-close?tab=" + encodeURIComponent(id), {
-      method: "POST",
-      cache: "no-store",
-      keepalive: true,
-    }).catch(function () {});
+  }
+
+  // "folder · command": the folder recedes, the command carries the tab.
+  function paintTabLabel(text, label) {
+    text.dataset.label = label;
+    text.textContent = "";
+    var cut = label.indexOf(" · ");
+    if (cut < 0) {
+      var name = document.createElement("span");
+      name.className = "rc-tab-name";
+      name.textContent = label;
+      text.appendChild(name);
+      return;
+    }
+    var dir = document.createElement("span");
+    dir.className = "rc-tab-dir";
+    dir.textContent = label.slice(0, cut);
+    var sep = document.createElement("span");
+    sep.className = "rc-tab-sep";
+    sep.textContent = "·";
+    var cmd = document.createElement("span");
+    cmd.className = "rc-tab-cmd";
+    cmd.textContent = label.slice(cut + 3);
+    text.appendChild(dir);
+    text.appendChild(sep);
+    text.appendChild(cmd);
   }
 
   function fillTab(el, item, counts, current) {
@@ -3885,7 +3963,7 @@
     el.setAttribute("aria-selected", item.id === current ? "true" : "false");
     el.title = item.path || label;
     var text = el.querySelector(".rc-tab-label");
-    if (text && text.textContent !== label) text.textContent = label;
+    if (text && text.dataset.label !== label) paintTabLabel(text, label);
     var close = el.querySelector(".rc-tab-close");
     if (close) close.setAttribute("aria-label", "Cerrar " + label);
   }
@@ -3929,7 +4007,12 @@
     var host = document.getElementById("rc-session-tabs");
     if (!host) return;
     var current = tabId();
-    var items = orderedSessions(inWorkspace(sessionCache), current);
+    var items = orderedSessions(
+      inWorkspace(sessionCache).filter(function (item) {
+        return !closedTabs[item.id];
+      }),
+      current
+    );
     var counts = {};
     items.forEach(function (item) {
       var key = sessionKey(item);
@@ -3992,7 +4075,11 @@
     if (payload.filesPos) setFilesPos(payload.filesPos, true);
     renderProfiles();
     if (window.__rcFiles && window.__rcFiles.takePrefs) window.__rcFiles.takePrefs(payload.fsPrefs);
-    if (Array.isArray(payload.sessions)) paintSessions(payload.sessions);
+    if (Array.isArray(payload.sessions)) {
+      sessionCache = payload.sessions;
+      takeClosed(payload.closed);
+      paintSessions(sessionCache);
+    }
     renderDrawer();
     return payload;
   }
@@ -4130,7 +4217,18 @@
     document.documentElement.classList.remove("rc-ws-open");
     drawerEdit = "";
     drawerConfirm = "";
+    var find = document.getElementById("rc-ws-search");
+    if (find) {
+      find.value = "";
+      find.blur();
+    }
+    if (wsFilter) {
+      wsFilter = "";
+      renderDrawer();
+    }
   }
+
+  var wsFilter = "";
 
   function liveCount(ws) {
     var live = {};
@@ -4142,11 +4240,25 @@
     }).length;
   }
 
+  // Drawer glyphs drawn like the rest of the bar (16px grid, 1.6 stroke).
+  var WS_ICONS = {
+    "✎":
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.2 3.3l2.5 2.5M3 13l.6-3 7-7a1.4 1.4 0 0 1 2 0l.4.4a1.4 1.4 0 0 1 0 2l-7 7z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>',
+    "🗑":
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.4h10.4M6.4 4.4V3a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.4M4.2 4.4l.6 8.4a1 1 0 0 0 1 .9h4.4a1 1 0 0 0 1-.9l.6-8.4M6.8 7v4.2M9.2 7v4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>',
+    "+": '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  };
+  var WS_CARET =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.2L8 9.8l3.5-3.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
   function wsButton(label, cls, title, fn) {
     var b = document.createElement("button");
     b.type = "button";
     b.className = cls;
-    b.textContent = label;
+    if (WS_ICONS[label] && cls.indexOf("rc-ws-act") !== -1) {
+      b.innerHTML = WS_ICONS[label];
+      if (title) b.title = title;
+    } else b.textContent = label;
     if (title) b.setAttribute("aria-label", title);
     b.addEventListener("click", function (ev) {
       ev.preventDefault();
@@ -4330,7 +4442,7 @@
       })
     );
     row.appendChild(
-      wsButton("🗑", "rc-ws-act", "Borrar " + ws.name, function () {
+      wsButton("🗑", "rc-ws-act is-danger", "Borrar " + ws.name, function () {
         drawerConfirm = ws.id;
         drawerEdit = "";
         renderDrawer();
@@ -4383,7 +4495,7 @@
     fold.setAttribute("aria-expanded", folded ? "false" : "true");
     var caret = document.createElement("span");
     caret.className = "rc-ws-caret";
-    caret.textContent = "▾";
+    caret.innerHTML = WS_CARET;
     var label = document.createElement("span");
     label.className = "rc-ws-group-label";
     label.textContent = group.name;
@@ -4423,7 +4535,7 @@
         })
       );
       head.appendChild(
-        wsButton("🗑", "rc-ws-act", "Borrar grupo " + group.name, function () {
+        wsButton("🗑", "rc-ws-act is-danger", "Borrar grupo " + group.name, function () {
           groupConfirm = group.id;
           groupEdit = "";
           renderDrawer();
@@ -4459,7 +4571,13 @@
       var members = wsState.workspaces.filter(function (ws) {
         return ws.group === group.id || (!known[ws.group] && group.id === groups[0].id);
       });
-      var isFolded = !!folded[group.id];
+      if (wsFilter) {
+        members = members.filter(function (ws) {
+          return String(ws.name || "").toLowerCase().indexOf(wsFilter) !== -1;
+        });
+        if (!members.length) return;
+      }
+      var isFolded = !!folded[group.id] && !wsFilter;
       var section = document.createElement("section");
       section.className = "rc-ws-section";
       section.appendChild(groupHead(group, members, isFolded));
@@ -4476,6 +4594,12 @@
       }
       list.appendChild(section);
     });
+    if (wsFilter && !list.childNodes.length) {
+      var none = document.createElement("div");
+      none.className = "rc-ws-empty";
+      none.textContent = "Ningún workspace coincide.";
+      list.appendChild(none);
+    }
     if (groupEdit === "new") {
       var section = document.createElement("section");
       section.className = "rc-ws-section";
@@ -4881,7 +5005,7 @@
       row.appendChild(main);
       if (!p.primary) {
         row.appendChild(
-          wsButton("🗑", "rc-ws-act", "Borrar el perfil " + p.label, function () {
+          wsButton("🗑", "rc-ws-act is-danger", "Borrar el perfil " + p.label, function () {
             confirmDeleteProfile(p);
           })
         );
@@ -4938,7 +5062,7 @@
     }
     var menu = document.getElementById("rc-ws-menu");
     if (menu) {
-      menu.dataset.profile = mine ? profileLabel(mine).charAt(0).toUpperCase() : "";
+      menu.dataset.profile = (profileLabel(mine) || "?").charAt(0).toUpperCase();
       menu.title = "Workspaces · perfil: " + profileLabel(mine);
     }
   }
@@ -5074,7 +5198,7 @@
     (document.body || document.documentElement).appendChild(pop);
     var r = chip.getBoundingClientRect();
     pop.style.top = Math.round(r.bottom + 6) + "px";
-    pop.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + "px";
+    pop.style.left = Math.max(8, Math.round(r.left)) + "px";
     document.addEventListener("pointerdown", profilePopOutside, true);
     document.addEventListener("keydown", profilePopKey, true);
     loadProfiles();
@@ -5167,6 +5291,13 @@
       brightCyan: "#2AA298",
       brightWhite: "#F0F0F0",
     },
+  };
+  var THEME_ICONS = {
+    system:
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor"/></svg>',
+    light:
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M3.5 12.5l1.1-1.1M11.4 4.6l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    dark: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
   };
   var THEME_LABELS = [
     ["system", "Sistema"],
@@ -5275,9 +5406,13 @@
     box.setAttribute("role", "group");
     box.setAttribute("aria-label", "Tema");
     THEME_LABELS.forEach(function (item) {
-      var b = wsButton(item[1], "rc-ws-theme-opt", "Tema " + item[1].toLowerCase(), function () {
+      var b = wsButton("", "rc-ws-theme-opt", "Tema " + item[1].toLowerCase(), function () {
         setThemePref(item[0]);
       });
+      b.innerHTML = THEME_ICONS[item[0]];
+      var text = document.createElement("span");
+      text.textContent = item[1];
+      b.appendChild(text);
       b.dataset.theme = item[0];
       box.appendChild(b);
     });
@@ -5319,6 +5454,37 @@
     var title = document.createElement("div");
     title.className = "rc-ws-title";
     title.textContent = "Workspaces";
+    var find = document.createElement("label");
+    find.className = "rc-ws-find";
+    find.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.4 10.4l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    var findInput = document.createElement("input");
+    findInput.id = "rc-ws-search";
+    findInput.type = "search";
+    findInput.placeholder = "Buscar workspace…";
+    findInput.autocomplete = "off";
+    findInput.spellcheck = false;
+    findInput.setAttribute("aria-label", "Buscar workspace");
+    find.appendChild(findInput);
+    findInput.addEventListener("input", function () {
+      wsFilter = findInput.value.trim().toLowerCase();
+      renderDrawer();
+    });
+    findInput.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (findInput.value) {
+          findInput.value = "";
+          wsFilter = "";
+          renderDrawer();
+        } else closeDrawer();
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        var first = document.querySelector("#rc-ws-list .rc-ws-main");
+        if (first) first.click();
+      }
+    });
     var list = document.createElement("div");
     list.id = "rc-ws-list";
     var add = wsButton("+ Nuevo grupo", "rc-ws-add", "", function () {
@@ -5327,6 +5493,7 @@
       renderDrawer();
     });
     drawer.appendChild(title);
+    drawer.appendChild(find);
     drawer.appendChild(list);
     drawer.appendChild(add);
     drawer.appendChild(buildProfileBox());
@@ -5356,9 +5523,10 @@
     fresh.setAttribute("aria-label", "Nueva pestaña");
     fresh.innerHTML =
       '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    // ☰ (bootWorkspaces puts it first), then who is typing, then the tabs.
+    host.appendChild(buildProfileChip());
     host.appendChild(tabs);
     host.appendChild(fresh);
-    host.appendChild(buildProfileChip());
     (document.body || document.documentElement).appendChild(host);
     paintProfileChip();
     bootWorkspaces(host);

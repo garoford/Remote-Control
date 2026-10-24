@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, list_sessions
+from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, closed_tabs, list_sessions
 
 WS_RE = re.compile(r"^w[a-f0-9]{8}$")
 GROUP_RE = re.compile(r"^(g[a-f0-9]{8}|gpc|gphone)$")
@@ -524,6 +524,7 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
         ],
         "labels": {tab: info["label"] for tab, info in state["tabs"].items() if info.get("label")},
         "sessions": sessions,
+        "closed": closed_tabs(),
     }
 
 

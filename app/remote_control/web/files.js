@@ -597,8 +597,17 @@
     savePrefs();
     if (isTouch()) toggleSidebar(false, true);
   }
+  // Phone shows only the current folder, so with no history "back" goes up.
+  function upInstead(t) {
+    return isTouch() && !t.hist.length && t.search == null && t.path.indexOf("://") === -1 && !!parentOf(t.path);
+  }
+
   function goBack() {
     var t = tab();
+    if (upInstead(t)) {
+      go(parentOf(t.path), { noHist: true, focusName: baseName(t.path) });
+      return;
+    }
     if (!t.hist.length) return;
     t.fwd.push(t.path);
     var to = t.hist.pop();
@@ -1025,7 +1034,7 @@
 
   function renderHead() {
     var t = tab();
-    ui.back.disabled = !t.hist.length;
+    ui.back.disabled = !t.hist.length && !upInstead(t);
     ui.fwd.disabled = !t.fwd.length;
     ui.viewBtn.innerHTML = prefs.view === "list" ? I.grid : I.list;
     ui.viewBtn.title = prefs.view === "list" ? "Vista de cuadrícula (Ctrl+2)" : "Vista de lista (Ctrl+1)";
@@ -1077,7 +1086,7 @@
       b.title = p.path;
       b.addEventListener("click", function (ev) {
         ev.stopPropagation();
-        if (i === parts.length - 1) editPath();
+        if (i === parts.length - 1) openTree(b);
         else go(p.path);
       });
       dropTarget(b, p.path);
@@ -1627,6 +1636,16 @@
     var real = t.path.indexOf("://") === -1 && t.search == null;
     var cwd = host().cwd ? host().cwd() : "";
     popover(anchor, null, [
+      // Phone header has no room for the view button; it lives here.
+      isTouch()
+        ? {
+            icon: prefs.view === "grid" ? I.list : I.grid,
+            label: prefs.view === "grid" ? "Ver como lista" : "Ver como cuadrícula",
+            fn: function () { setView(prefs.view === "grid" ? "list" : "grid"); },
+          }
+        : null,
+      isTouch() ? { icon: stroke("M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"), label: "Ordenar y ajustes de vista…", fn: function () { viewMenu(anchor); } } : null,
+      isTouch() ? "-" : null,
       { icon: I.tab, label: "Pestaña nueva", fn: function () { openInNewTab(t.path); }, key: "Alt+T" },
       real ? { icon: I.folderPlus, label: "Carpeta nueva…", fn: newFolder, key: "Alt+N" } : null,
       real ? { icon: I.filePlus, label: "Archivo nuevo…", fn: newFile } : null,
@@ -2168,6 +2187,243 @@
       if (!t.data) load(t);
       ui.body.focus({ preventScroll: true });
     }
+  }
+
+  // --- folder tree from the location pill --------------------------------------------------------------
+  // The chain from / to here, the current folder open, every folder expandable
+  // in place. Ancestors start trimmed to the chain; "Ver todas" lists siblings.
+
+  var treeState = null;
+
+  function treeList(path) {
+    var node = treeState.nodes[path];
+    if (node.children || node.loading) return;
+    node.loading = true;
+    api("list", { path: path }).then(function (data) {
+      node.loading = false;
+      if (!treeState || treeState.nodes[path] !== node) return;
+      if (data.error) {
+        node.error = data.error;
+        node.children = [];
+      } else {
+        node.children = data.entries
+          .filter(function (it) {
+            return it.kind === "dir" && (prefs.hidden || !it.hidden);
+          })
+          .map(function (it) {
+            return it.path || joinPath(data.path || path, it.name);
+          })
+          .sort(function (a, b) {
+            return collator.compare(baseName(a), baseName(b));
+          });
+      }
+      paintTree();
+    });
+  }
+
+  function treeNode(path) {
+    var nodes = treeState.nodes;
+    if (!nodes[path]) nodes[path] = { mode: "closed", children: null, loading: false, error: "" };
+    return nodes[path];
+  }
+
+  function treeLabel(path) {
+    if (path === "/") return { name: "Sistema de archivos", icon: I.drive };
+    if (places && path === places.home) return { name: "Carpeta personal", icon: I.home };
+    return { name: baseName(path), icon: I.folder };
+  }
+
+  function paintTree() {
+    if (!treeState) return;
+    var box = treeState.list;
+    var keep = box.scrollTop;
+    box.innerHTML = "";
+    var here = treeState.here;
+    var chain = treeState.chain;
+    var onChain = {};
+    chain.forEach(function (p) {
+      onChain[p] = true;
+    });
+
+    function row(path, depth) {
+      var node = treeNode(path);
+      var label = treeLabel(path);
+      var r = el("div", "rcf-tree-row" + (path === here ? " is-here" : "") + (onChain[path] && path !== here ? " is-chain" : ""));
+      r.style.setProperty("--depth", depth);
+      var open = node.mode !== "closed";
+      var tog = el("button", "rcf-tree-tog" + (open ? " is-open" : ""));
+      tog.type = "button";
+      tog.innerHTML = I.fwd;
+      tog.setAttribute("aria-label", (open ? "Contraer " : "Expandir ") + label.name);
+      if (node.children && !node.children.length && !node.error) tog.classList.add("is-empty");
+      tog.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        node.mode = open ? "closed" : "full";
+        if (!open) treeList(path);
+        paintTree();
+      });
+      var go_ = el("button", "rcf-tree-name");
+      go_.type = "button";
+      go_.innerHTML = label.icon;
+      go_.appendChild(el("span", null, label.name));
+      if (path === here) go_.appendChild(el("span", "rcf-tree-here", "aquí"));
+      var all = null;
+      if (node.mode === "chain") {
+        all = el("button", "rcf-tree-all", "Ver todas");
+        all.type = "button";
+        all.title = "Mostrar todas las carpetas de " + label.name;
+        all.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          node.mode = "full";
+          treeList(path);
+          paintTree();
+        });
+      }
+      go_.title = path;
+      go_.addEventListener("click", function () {
+        closeTree();
+        if (path !== tab().path) go(path);
+      });
+      dropTarget(go_, path);
+      r.appendChild(tog);
+      r.appendChild(go_);
+      if (all) r.appendChild(all);
+      box.appendChild(r);
+      if (!open) return;
+      if (node.mode === "chain") {
+        var next = chain[chain.indexOf(path) + 1];
+        if (next) row(next, depth + 1);
+        return;
+      }
+      if (!node.children) {
+        var wait = el("div", "rcf-tree-note", "Cargando…");
+        wait.style.setProperty("--depth", depth + 1);
+        box.appendChild(wait);
+        return;
+      }
+      if (node.error || !node.children.length) {
+        var note = el("div", "rcf-tree-note", node.error || "Sin subcarpetas");
+        note.style.setProperty("--depth", depth + 1);
+        box.appendChild(note);
+        return;
+      }
+      node.children.forEach(function (child) {
+        row(child, depth + 1);
+      });
+    }
+
+    row(chain[0], 0);
+    box.scrollTop = keep;
+    if (!treeState.scrolled) {
+      var hit = box.querySelector(".is-here");
+      if (hit && hit.offsetTop > box.clientHeight - 60) box.scrollTop = hit.offsetTop - 60;
+      treeState.scrolled = !!box.querySelector(".is-here");
+    }
+  }
+
+  function closeTree() {
+    if (treeState && treeState.layer) treeState.layer.remove();
+    treeState = null;
+    if (openNow) ui.body.focus({ preventScroll: true });
+  }
+
+  function openTree(anchor) {
+    var t = tab();
+    if (t.search != null) return;
+    if (t.path.indexOf("://") !== -1) {
+      editPath();
+      return;
+    }
+    closeMenus();
+    closeTree();
+    var chain = ["/"];
+    t.path
+      .split("/")
+      .filter(Boolean)
+      .forEach(function (seg) {
+        chain.push(joinPath(chain[chain.length - 1], seg));
+      });
+    var layer = el("div", "rcf-layer rcf-menu-layer rcf-tree-layer");
+    var panel = el("div", "rcf-tree");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "Árbol de carpetas");
+    var head = el("div", "rcf-tree-head");
+    var where = el("div", "rcf-tree-path");
+    var shown = places && places.home && (t.path === places.home || t.path.indexOf(places.home + "/") === 0) ? "~" + t.path.slice(places.home.length) : t.path;
+    var pathText = el("bdi", null, shown);
+    pathText.setAttribute("dir", "ltr");
+    where.appendChild(pathText);
+    where.title = t.path;
+    var acts = el("div", "rcf-tree-acts");
+    acts.appendChild(
+      iconBtn(I.rename, "Escribir ruta", function () {
+        closeTree();
+        editPath();
+      })
+    );
+    acts.appendChild(
+      iconBtn(I.copy, "Copiar ruta", function () {
+        var text = t.path;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function () {
+              toast("Ruta copiada");
+            },
+            function () {
+              toast("No pude copiar");
+            }
+          );
+        }
+      })
+    );
+    acts.appendChild(
+      iconBtn(I.terminal, "Abrir en terminal", function () {
+        closeTree();
+        openTerminal(t.path);
+      })
+    );
+    head.appendChild(where);
+    head.appendChild(acts);
+    var list = el("div", "rcf-tree-list");
+    panel.appendChild(head);
+    panel.appendChild(list);
+    layer.appendChild(panel);
+    layer.addEventListener("mousedown", function (ev) {
+      if (ev.target === layer) {
+        ev.preventDefault();
+        closeTree();
+      }
+    });
+    panel.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeTree();
+      }
+    });
+    layer.__rcClose = closeTree;
+    root.appendChild(layer);
+
+    treeState = { layer: layer, list: list, here: t.path, chain: chain, nodes: {}, scrolled: false };
+    chain.forEach(function (p, i) {
+      treeNode(p).mode = i === chain.length - 1 ? "full" : "chain";
+    });
+    treeList(t.path);
+    paintTree();
+
+    var loc = ui.loc.getBoundingClientRect();
+    var vw = window.innerWidth;
+    if (isTouch()) {
+      panel.classList.add("is-touch");
+      panel.style.top = Math.round(loc.bottom + 8) + "px";
+    } else {
+      var w = Math.min(Math.max(loc.width, 360), vw - 16);
+      panel.style.width = w + "px";
+      panel.style.left = Math.max(8, Math.min(vw - w - 8, Math.round(loc.left))) + "px";
+      panel.style.top = Math.round(loc.bottom + 6) + "px";
+    }
+    var focusHere = list.querySelector(".is-here .rcf-tree-name");
+    if (focusHere && !isTouch()) focusHere.focus({ preventScroll: true });
   }
 
   function editPath() {

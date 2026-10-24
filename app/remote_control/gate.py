@@ -28,76 +28,256 @@ LOGIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#011627">
 <title>Remote Control</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #011627;
+    --card: 11 41 66;
+    --text: #d6deeb;
+    --muted: #9fb4c8;
+    --line: 214 222 235;
+    --blue: #82aaff;
+    --blue-rgb: 130 170 255;
+    --teal: #7fdbca;
+    --on: #21c7a8;
+    --on-rgb: 33 199 168;
+    --red: #ef5350;
+    --shade: 1 22 39;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #eef1f5;
+      --card: 255 255 255;
+      --text: #403f53;
+      --muted: #69708a;
+      --line: 64 63 83;
+      --blue: #2f7fd0;
+      --blue-rgb: 47 127 208;
+      --teal: #2aa298;
+      --on: #2aa298;
+      --on-rgb: 42 162 152;
+      --red: #de3d3b;
+      --shade: 64 63 83;
+    }
+  }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: #011627; color: #d6deeb; }
-  body { font: 15px/1.4 ui-sans-serif, system-ui, sans-serif; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+  body {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 24px 16px;
+    overflow: hidden;
+    font: 15px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Soft glows behind the glass card */
+  body::before, body::after {
+    content: "";
+    position: fixed;
+    z-index: 0;
+    width: 60vmax;
+    height: 60vmax;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.32;
+    pointer-events: none;
+  }
+  body::before { top: -24vmax; left: -18vmax; background: radial-gradient(circle, var(--on), transparent 65%); }
+  body::after { right: -22vmax; bottom: -26vmax; background: radial-gradient(circle, var(--blue), transparent 65%); }
   main {
-    min-height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    max-width: 360px;
-    margin: 0 auto;
-    padding: 24px;
-  }
-  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; }
-  .lead { margin: 0 0 20px; color: #7B88A1; font-size: 13px; }
-  label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 600; }
-  input {
+    position: relative;
+    z-index: 1;
     width: 100%;
-    padding: 10px 12px;
-    color: #d6deeb;
-    background: #011627;
-    border: 1px solid rgba(130, 170, 255, 0.28);
-    border-radius: 10px;
-    font: inherit;
+    max-width: 380px;
+    padding: 32px 28px 28px;
+    border: 1px solid rgb(var(--line) / 0.1);
+    border-radius: 22px;
+    background: rgb(var(--card) / 0.62);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    backdrop-filter: blur(24px) saturate(1.5);
+    box-shadow:
+      0 1px 0 rgb(255 255 255 / 0.06) inset,
+      0 30px 70px -20px rgb(var(--shade) / 0.7);
+    animation: rise 420ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
   }
-  input:focus { outline: 2px solid #82AAFF; outline-offset: 1px; }
-  button {
-    width: 100%;
-    min-height: 40px;
-    margin-top: 16px;
+  @keyframes rise { from { opacity: 0; transform: translateY(12px) scale(0.98); } }
+  .mark {
+    display: grid;
+    place-items: center;
+    width: 52px;
+    height: 52px;
+    margin-bottom: 20px;
+    border-radius: 15px;
+    background: linear-gradient(140deg, var(--on), var(--blue));
     color: #011627;
-    background: #21C7A8;
+    box-shadow: 0 10px 24px -8px rgb(var(--on-rgb) / 0.7);
+  }
+  .mark svg { width: 26px; height: 26px; }
+  h1 { margin: 0 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .lead { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+  label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 46px;
+    padding: 0 6px 0 14px;
+    border: 1px solid rgb(var(--line) / 0.12);
+    border-radius: 12px;
+    background: rgb(var(--shade) / 0.35);
+    color: var(--muted);
+    transition: border-color 140ms ease, box-shadow 140ms ease;
+  }
+  @media (prefers-color-scheme: light) { .field { background: rgb(255 255 255 / 0.8); } }
+  .field:focus-within { border-color: rgb(var(--blue-rgb) / 0.6); box-shadow: 0 0 0 4px rgb(var(--blue-rgb) / 0.16); }
+  .field.bad { border-color: var(--red); box-shadow: 0 0 0 4px rgb(239 83 80 / 0.14); animation: shake 320ms ease; }
+  @keyframes shake { 20%, 60% { transform: translateX(-5px); } 40%, 80% { transform: translateX(5px); } }
+  .field > svg { flex: 0 0 auto; width: 17px; height: 17px; }
+  input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
     border: 0;
-    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+  }
+  .eye {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .eye:hover { background: rgb(var(--line) / 0.08); color: var(--text); }
+  .eye svg { width: 18px; height: 18px; }
+  .eye .off { display: none; }
+  .eye[aria-pressed="true"] .on { display: none; }
+  .eye[aria-pressed="true"] .off { display: block; }
+  .err { min-height: 1.3em; margin: 10px 2px 0; color: var(--red); font-size: 13px; }
+  .go {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    height: 46px;
+    margin-top: 10px;
+    border: 0;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--on), color-mix(in srgb, var(--on) 70%, var(--blue)));
+    color: #011627;
     font: inherit;
     font-weight: 700;
     cursor: pointer;
+    box-shadow: 0 10px 24px -10px rgb(var(--on-rgb) / 0.8);
+    transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
   }
-  button:focus-visible { outline: 2px solid #82AAFF; outline-offset: 2px; }
-  .err { min-height: 1.2em; margin: 8px 0 0; color: #EF5350; font-size: 13px; }
+  .go:hover { filter: brightness(1.06); box-shadow: 0 14px 28px -10px rgb(var(--on-rgb) / 0.9); }
+  .go:active { transform: translateY(1px); }
+  .go:focus-visible, .eye:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .go svg { width: 17px; height: 17px; transition: transform 140ms ease; }
+  .go:hover svg { transform: translateX(2px); }
+  .go[disabled] { cursor: progress; filter: saturate(0.7); }
+  .go[disabled] svg { display: none; }
+  .go[disabled]::after {
+    content: "";
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgb(1 22 39 / 0.35);
+    border-top-color: #011627;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .foot { margin: 20px 0 0; color: var(--muted); font-size: 12px; text-align: center; opacity: 0.75; }
+  @media (prefers-color-scheme: light) {
+    .go, .mark { color: #fff; }
+    .go[disabled]::after { border-color: rgb(255 255 255 / 0.4); border-top-color: #fff; }
+  }
+  @media (prefers-reduced-motion: reduce) { main, .field.bad { animation: none; } }
 </style>
 </head>
 <body>
 <main>
+  <div class="mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24"><path d="M5 7l5 5-5 5M12.5 17H19" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
   <h1>Remote Control</h1>
   <p class="lead">Escribe la contraseña para usar la terminal.</p>
   <form id="gate">
     <label for="password">Contraseña</label>
-    <input id="password" type="password" autocomplete="current-password" autofocus required>
+    <div class="field" id="field">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      <input id="password" type="password" autocomplete="current-password" autofocus required>
+      <button class="eye" id="eye" type="button" aria-label="Mostrar contraseña" aria-pressed="false">
+        <svg class="on" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.6 8s2.4-4.6 6.4-4.6S14.4 8 14.4 8 12 12.6 8 12.6 1.6 8 1.6 8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+        <svg class="off" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5l11 11M6.6 4.6A6 6 0 0 1 8 3.4c4 0 6.4 4.6 6.4 4.6a11 11 0 0 1-1.9 2.4M10.2 11.9A5.6 5.6 0 0 1 8 12.6C4 12.6 1.6 8 1.6 8a11 11 0 0 1 2.3-2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
     <p class="err" id="err" role="alert"></p>
-    <button type="submit">Entrar</button>
+    <button class="go" id="go" type="submit">
+      <span>Entrar</span>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9.5M8.8 4.2L12.6 8l-3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
   </form>
+  <p class="foot">Se recuerda 30 días en este dispositivo</p>
 </main>
 <script>
   var form = document.getElementById("gate");
   var err = document.getElementById("err");
+  var field = document.getElementById("field");
+  var input = document.getElementById("password");
+  var go = document.getElementById("go");
+  var eye = document.getElementById("eye");
+  eye.addEventListener("click", function () {
+    var show = input.type === "password";
+    input.type = show ? "text" : "password";
+    eye.setAttribute("aria-pressed", show ? "true" : "false");
+    eye.setAttribute("aria-label", show ? "Ocultar contraseña" : "Mostrar contraseña");
+    input.focus();
+  });
+  input.addEventListener("input", function () {
+    field.classList.remove("bad");
+    err.textContent = "";
+  });
+  function fail(text) {
+    go.disabled = false;
+    err.textContent = text;
+    field.classList.remove("bad");
+    void field.offsetWidth;
+    field.classList.add("bad");
+    input.select();
+  }
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
+    if (go.disabled) return;
     err.textContent = "";
+    go.disabled = true;
     fetch("/rc-login", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({password: document.getElementById("password").value})
+      body: JSON.stringify({password: input.value})
     }).then(function (res) {
       if (res.ok) { location.replace("/"); return; }
-      err.textContent = "Contraseña incorrecta";
+      fail("Contraseña incorrecta");
     }).catch(function () {
-      err.textContent = "Contraseña incorrecta";
+      fail("No hay conexión con el servidor");
     });
   });
 </script>
