@@ -1873,19 +1873,80 @@
     if (imeOpen) keepImeFocus();
   }
 
-  function showToast(text) {
+  // Glass pill under the tab strip: icon by tone, slides in, a thin bar runs
+  // down while it stays, fades out. Same look as the rest of the UI.
+  var TOAST_MS = 2600;
+  var TOAST_ICONS = {
+    ok: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.6 8.4l2.9 2.9 5.9-6.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    warn: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4.6v4.2M8 11.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    info: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 7.4v4M8 4.6v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    live: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.6" y="2" width="4.8" height="8" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.6 7.6a4.4 4.4 0 0 0 8.8 0M8 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  };
+
+  function toastTone(text) {
+    var t = String(text || "").toLowerCase();
+    if (/^no |no pude|error|falló|fallo|sin conexi|demasiad|pasa de|no es una/.test(t)) return "warn";
+    if (/copiad|guardad|listo|lista|cread|subid|cerrad|generad|movid|pegad|enviad|^perfil|actualizad/.test(t)) return "ok";
+    return "info";
+  }
+
+  // live: dictation. One steady mic pill that stays while you speak and only
+  // its text changes; no tone guessing, no countdown, no re-entrance.
+  function showToast(text, live) {
     var el = document.getElementById("rc-toast");
     if (!el) {
       el = document.createElement("div");
       el.id = "rc-toast";
+      el.setAttribute("role", "status");
+      el.setAttribute("aria-live", "polite");
+      el.innerHTML = '<span class="rc-toast-icon"></span><span class="rc-toast-text"></span><span class="rc-toast-bar"></span>';
       document.body.appendChild(el);
     }
-    el.textContent = text;
-    el.hidden = false;
+    var tone = live ? "live" : toastTone(text);
+    var shown = !el.hidden && el.classList.contains("is-on");
+    var box = el.querySelector(".rc-toast-text");
+    box.textContent = "";
+    // ltr inside: the live pill is rtl only so the overflow is cut on the left
+    var words = document.createElement("bdi");
+    words.setAttribute("dir", "ltr");
+    words.textContent = text;
+    box.appendChild(words);
+    el.style.setProperty("--rc-toast-ms", TOAST_MS + "ms");
+    if (shown) {
+      // Already on screen (dictation sends many updates): just swap the text
+      // and tone and restart the countdown bar, no entrance again.
+      if (!el.classList.contains("is-" + tone)) {
+        el.classList.remove("is-ok", "is-warn", "is-info", "is-live");
+        el.classList.add("is-" + tone);
+        el.querySelector(".rc-toast-icon").innerHTML = TOAST_ICONS[tone];
+      }
+      var bar = el.querySelector(".rc-toast-bar");
+      bar.style.animation = "none";
+      void bar.offsetWidth;
+      bar.style.animation = "";
+    } else {
+      el.className = "is-" + tone;
+      el.querySelector(".rc-toast-icon").innerHTML = TOAST_ICONS[tone];
+      el.hidden = false;
+      void el.offsetWidth;
+      el.classList.add("is-on");
+    }
     clearTimeout(showToast._t);
-    showToast._t = setTimeout(function () {
+    clearTimeout(showToast._h);
+    if (live) return; // stays until hideToast()
+    showToast._t = setTimeout(hideToast, TOAST_MS);
+  }
+
+  function hideToast() {
+    var el = document.getElementById("rc-toast");
+    clearTimeout(showToast._t);
+    clearTimeout(showToast._h);
+    if (!el || el.hidden) return;
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    showToast._h = setTimeout(function () {
       el.hidden = true;
-    }, 2600);
+    }, 260);
   }
 
   function shellQuote(path) {
@@ -3496,6 +3557,8 @@
     dictation = null;
     rec.__rcStopping = true;
     syncMicBtn();
+    var el = document.getElementById("rc-toast");
+    if (el && el.classList.contains("is-live")) hideToast();
     try {
       rec.stop();
     } catch (_) {}
@@ -3515,15 +3578,23 @@
     var silent = false;
     rec.onresult = function (ev) {
       if (dictation !== rec) return;
+      // The phrase can arrive in pieces (settled words + the word still being
+      // guessed). Join them; a piece that already repeats what came before
+      // (Android sends growing copies) replaces it instead of doubling it.
       var text = "";
       var final = false;
       for (var i = 0; i < ev.results.length; i++) {
         var res = ev.results[i];
-        text = String(res[0] && res[0].transcript ? res[0].transcript : "").trim() || text;
+        var piece = String(res[0] && res[0].transcript ? res[0].transcript : "").trim();
         if (res.isFinal) final = true;
+        if (!piece) continue;
+        var low = text.toLowerCase();
+        var plow = piece.toLowerCase();
+        if (!text || plow.indexOf(low) === 0) text = piece;
+        else if (low.slice(-plow.length) !== plow) text += " " + piece;
       }
       if (final) said = text;
-      showToast(text || "Escuchando…");
+      showToast(text || "Escuchando…", true);
     };
     rec.onerror = function (ev) {
       if (dictation !== rec) return;
@@ -3571,7 +3642,7 @@
     }
     dictationSent = false;
     listenOnce();
-    if (dictation) showToast("Escuchando…");
+    if (dictation) showToast("Escuchando…", true);
   }
 
   function toggleDictation() {
@@ -4928,11 +4999,17 @@
       section.className = "rc-ws-section";
       section.appendChild(groupHead(group, members, isFolded));
       if (!isFolded) {
-        if (!members.length) {
-          var empty = document.createElement("div");
-          empty.className = "rc-ws-empty";
-          empty.textContent = group.id === "gphone" ? "Vacío. Usa Auto para copiar herdr." : "Sin workspaces";
-          section.appendChild(empty);
+        if (!members.length && !wsFilter) {
+          // An empty group offers to start its first workspace right there.
+          section.appendChild(
+            wsButton("+ Nuevo workspace", "rc-ws-add rc-ws-add-in", "Nuevo workspace en " + group.name, function () {
+              var n = wsState ? wsState.workspaces.length + 1 : 1;
+              wsPost({ op: "create", name: "Workspace " + n, group: group.id }).then(function (payload) {
+                var ws = payload && findWs(payload.id);
+                if (ws) enterWorkspace(ws);
+              });
+            })
+          );
         }
         members.forEach(function (ws) {
           section.appendChild(wsRow(ws, cur));
@@ -5322,6 +5399,37 @@
     showToast("Perfil: " + profileLabel(id));
   }
 
+  // Each profile shows its own accent: the one of the background it picked in
+  // Themes (color, gradient or image). Default background: the usual teal.
+  function profileAccent(pid) {
+    var look = wsState && wsState.looks ? wsState.looks[pid] : null;
+    if (!look || !look.kind || look.kind === "default") return null;
+    var raw = "";
+    if (look.kind === "color") raw = look.value;
+    else if (look.kind === "preset") {
+      var p = presetOf(look.value);
+      raw = p ? p[4] : "";
+    } else if (look.kind === "image") {
+      var t = imageTint(look.value);
+      raw = t ? t.accent : "";
+    }
+    if (!raw) return null;
+    var hsl = rgbHsl(hexRgb(raw));
+    var sat = hsl[1] < 0.12 ? hsl[1] : Math.max(0.55, hsl[1]);
+    var light = themeMode() === "light";
+    return {
+      dot: rgbHex(hslRgb(hsl[0], sat, light ? 0.45 : 0.68)),
+      text: rgbHex(hslRgb(hsl[0], sat, light ? 0.32 : 0.78)),
+    };
+  }
+
+  function paintProfileLabel(dot, name, pid) {
+    var a = profileAccent(pid);
+    dot.style.background = a ? a.dot : "";
+    dot.style.color = a ? (themeMode() === "light" ? "#fff" : "#111214") : "";
+    name.style.color = a ? a.text : "";
+  }
+
   function renderProfiles() {
     paintProfileChip();
     var box = document.getElementById("rc-ws-profiles");
@@ -5342,14 +5450,9 @@
       var name = document.createElement("span");
       name.className = "rc-ws-profile-name";
       name.textContent = p.label;
+      paintProfileLabel(dot, name, p.id);
       main.appendChild(dot);
       main.appendChild(name);
-      if (p.primary) {
-        var tag = document.createElement("span");
-        tag.className = "rc-ws-profile-tag";
-        tag.textContent = "principal";
-        main.appendChild(tag);
-      }
       row.appendChild(main);
       if (!p.primary) {
         row.appendChild(
@@ -5469,6 +5572,7 @@
     var name = document.createElement("span");
     name.className = "rc-profile-chip-name";
     name.textContent = label;
+    paintProfileLabel(dot, name, mine);
     chip.appendChild(dot);
     chip.appendChild(name);
     chip.classList.toggle("is-extra", !!mine);
@@ -5505,7 +5609,7 @@
     pop.setAttribute("role", "menu");
     var title = document.createElement("div");
     title.className = "rc-profile-pop-title";
-    title.textContent = "Los CLIs nuevos que lances usan:";
+    title.textContent = "Perfil";
     pop.appendChild(title);
     var mine = myProfile();
     [{ id: "", label: profState.primary || "Principal", primary: true }].concat(profState.profiles).forEach(function (p) {
@@ -5521,14 +5625,9 @@
       var name = document.createElement("span");
       name.className = "rc-ws-profile-name";
       name.textContent = p.label;
+      paintProfileLabel(dot, name, p.id);
       b.appendChild(dot);
       b.appendChild(name);
-      if (p.primary) {
-        var tag = document.createElement("span");
-        tag.className = "rc-ws-profile-tag";
-        tag.textContent = "principal";
-        b.appendChild(tag);
-      }
       pop.appendChild(b);
     });
     var sep = document.createElement("div");
@@ -5766,6 +5865,8 @@
     });
     paintLookLayer();
     paintThemeSwitch();
+    // profile accents depend on the mode and on image colors read later
+    if (typeof renderProfiles === "function" && profState) renderProfiles();
     if (document.getElementById("rc-settings")) paintSettings();
   }
 
@@ -6905,8 +7006,8 @@
         } catch (_) {}
       }
     },
-    toast: function (text) {
-      showToast(text);
+    toast: function (text, live) {
+      showToast(text, live);
     },
     device: function () {
       return foldDevice();

@@ -1,0 +1,69 @@
+bajAgregaremos una marca en la esquina superior con
+la miniatura del usuario: esa miniatura solo estara encima pero 
+no interrumpira el click o la interaccion del mouse en ese terminal
+
+
+**
+
+El explorador de archivos tambien con transparencia Xd
+
+un switch
+**
+
+el env para dominios
+
+**
+
+como desplegarlo en un entorno mejor
+
+**
+
+el side bar mas compacto pls Xd
+
+*
+
+agregar imagenes de videos en loop en el fondo Xd
+como wallpaper engine
+
+**
+
+
+un boton de "logout"
+
+**
+
+la misma vaina 
+
+**
+
+porque el cursor para escribir parpadea tanto? Xd
+
+**
+
+crear una funcion para capturar puertos y exponerlos en la 
+misma url ya expuesta
+
+*
+*
+
+Toda la interfaz en ingles pls xd
+**
+
+elegir color no funciona
+
+
+**
+
+en el explorador de archivos en pc al arrastrar que me permita 
+
+dejar x carpeta o cosa como bookmark (como en nautilos lo que corresponda)
+
+y la misma funcionalidad adaptarla para celular de alguna manera
+**
+
+que el qr tanto para la app de escritorio como para el CLI,
+
+vaya rotando, que no sea estatico Xd
+**
+
+adaptar todo esto tamien a codex
