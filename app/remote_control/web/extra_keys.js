@@ -4306,6 +4306,7 @@
     if (payload.filePos) setFilePos(payload.filePos, true);
     if (payload.filesPos) setFilesPos(payload.filesPos, true);
     renderProfiles();
+    refreshLook();
     if (window.__rcFiles && window.__rcFiles.takePrefs) window.__rcFiles.takePrefs(payload.fsPrefs);
     if (Array.isArray(payload.sessions)) {
       sessionCache = payload.sessions;
@@ -5203,6 +5204,8 @@
     wsPost({ op: "profilePick", device: foldDevice(), profile: id });
     pingProfile(true);
     renderProfiles();
+    lookDraft = null;
+    refreshLook();
     showToast("Perfil: " + profileLabel(id));
   }
 
@@ -5440,8 +5443,16 @@
     var wrap = document.createElement("div");
     wrap.className = "rc-ws-theme-wrap rc-ws-profiles-wrap";
     var label = document.createElement("div");
-    label.className = "rc-ws-title";
-    label.textContent = "Perfil";
+    label.className = "rc-ws-title rc-ws-title-row";
+    var text = document.createElement("span");
+    text.textContent = "Perfil";
+    label.appendChild(text);
+    var gear = wsButton("", "rc-ws-act rc-ws-gear", "Ajustes del perfil", function () {
+      openSettings("themes");
+    });
+    gear.innerHTML = GEAR_ICON;
+    gear.title = "Ajustes del perfil (fondo del terminal)";
+    label.appendChild(gear);
     var box = document.createElement("div");
     box.id = "rc-ws-profiles";
     wrap.appendChild(label);
@@ -5552,7 +5563,39 @@
     return lightQuery && lightQuery.matches ? "light" : "dark";
   }
 
+  // CLIs (Claude Code and others) pick colors for dark terminals; on a light
+  // background xterm darkens any text below WCAG AA contrast.
+  function contrastFloor() {
+    return themeMode() === "light" || lookSeeThrough() ? 4.5 : 1;
+  }
+
+  // The WebGL renderer smooths glyph edges against one fixed color, which
+  // leaves halos over a picture. With a see-through look the terminal falls
+  // back to the DOM renderer (real text, real transparency).
+  function dropGpuRenderer(term) {
+    try {
+      var addons = (term._addonManager && term._addonManager._addons) || [];
+      addons.slice().forEach(function (entry) {
+        var inst = entry && entry.instance;
+        if (inst && typeof inst.clearTextureAtlas === "function") inst.dispose();
+      });
+    } catch (_) {}
+  }
+
   function termPalette() {
+    var look = myLook();
+    if (look.kind === "color") {
+      var bg = colorFor(look.value);
+      return Object.assign({}, TERM_THEMES[themeMode()], { background: bg, cursorAccent: bg });
+    }
+    if (look.kind === "preset" || look.kind === "image") {
+      // The picture shows through; the veil (dim) matches the mode, so the
+      // mode's own palette stays readable on top of it.
+      // Not fully clear: xterm checks text contrast against this color, so it
+      // carries the veil's tone at 1% (invisible) instead of transparent black.
+      var veil = "rgba(" + behindText().join(",") + ",0.01)";
+      return Object.assign({}, TERM_THEMES[themeMode()], { background: veil });
+    }
     return TERM_THEMES[themeMode()];
   }
 
@@ -5570,11 +5613,19 @@
           get: desc.get,
           set: function () {
             desc.set.call(opts, termPalette());
+            // ttyd reapplies its preferences (renderer included) on reconnect.
+            if (lookSeeThrough()) {
+              setTimeout(function () {
+                dropGpuRenderer(term);
+              }, 50);
+            }
           },
         });
       } catch (_) {}
     }
     try {
+      opts.allowTransparency = lookSeeThrough();
+      opts.minimumContrastRatio = contrastFloor();
       opts.theme = termPalette();
     } catch (_) {}
   }
@@ -5589,21 +5640,31 @@
       meta.name = "theme-color";
       (document.head || root).appendChild(meta);
     }
-    meta.content = mode === "light" ? "#eef1f5" : "#0b2942";
+    var ui = paintUiTint();
+    meta.content = ui ? ui.surface : mode === "light" ? "#eef1f5" : "#0b2942";
     var terms = [];
     Object.keys(panes).forEach(function (key) {
       if (panes[key] && panes[key].term) terms.push(panes[key].term);
     });
     if (window.term) terms.push(window.term);
+    var clear = lookSeeThrough();
+    var floor = contrastFloor();
     terms.forEach(function (term) {
+      try {
+        if (term.options.allowTransparency !== clear) term.options.allowTransparency = clear;
+        if (term.options.minimumContrastRatio !== floor) term.options.minimumContrastRatio = floor;
+      } catch (_) {}
       if (!term.__rcTheme) lockTheme(term);
       else {
         try {
           term.options.theme = termPalette();
         } catch (_) {}
       }
+      if (clear) dropGpuRenderer(term);
     });
+    paintLookLayer();
     paintThemeSwitch();
+    if (document.getElementById("rc-settings")) paintSettings();
   }
 
   function setThemePref(value, fromServer) {
@@ -5615,6 +5676,892 @@
     } catch (_) {}
     if (changed) applyTheme();
     if (!fromServer) wsPost({ op: "theme", theme: value, device: foldDevice() });
+  }
+
+  // --- terminal background per profile (Ajustes › Themes) ----------------------
+
+  var LOOK_DEFAULT = { kind: "default", value: "", dim: 35, blur: 0 };
+  var LOOK_COLORS = [
+    ["#011627", "Night Owl"],
+    ["#000000", "Negro"],
+    ["#1e1e1e", "Grafito"],
+    ["#0d1b3e", "Azul noche"],
+    ["#1f1235", "Morado"],
+    ["#0f2a1d", "Bosque"],
+    ["#2b0f17", "Vino"],
+    ["#2a1f14", "Café"],
+    ["#f4efe6", "Hueso"],
+    ["#e9edf2", "Gris claro"],
+  ];
+  // [id, name, dark css, tint for the UI surfaces, accent, light css]
+  var LOOK_PRESETS = [
+    ["aurora", "Aurora", "radial-gradient(120% 90% at 10% 0%, #0f5c63 0%, transparent 55%), radial-gradient(90% 80% at 100% 100%, #3a2a7a 0%, transparent 60%), linear-gradient(160deg, #04121f, #0a1630)", "#0b2a36", "#5fdccd", "radial-gradient(120% 90% at 10% 0%, #7fd6ca 0%, transparent 60%), radial-gradient(90% 80% at 100% 100%, #b4a8ef 0%, transparent 62%), linear-gradient(160deg, #c9ece6, #d3d8f4)"],
+    ["sunset", "Atardecer", "radial-gradient(100% 80% at 80% 10%, #a1452e 0%, transparent 55%), radial-gradient(90% 90% at 0% 100%, #5a1e5c 0%, transparent 60%), linear-gradient(170deg, #1a0d1f, #2a0f1a)", "#2a1220", "#ff9e6e", "radial-gradient(100% 80% at 80% 10%, #ffb48a 0%, transparent 58%), radial-gradient(90% 90% at 0% 100%, #e3a6e3 0%, transparent 62%), linear-gradient(170deg, #f8dccf, #f1d3e2)"],
+    ["ocean", "Océano", "radial-gradient(100% 70% at 50% 0%, #1b5f9e 0%, transparent 60%), linear-gradient(180deg, #06223f, #020c18)", "#082039", "#72b6ff", "radial-gradient(100% 70% at 50% 0%, #8fc3ff 0%, transparent 62%), linear-gradient(180deg, #cfe3fa, #bfd6f2)"],
+    ["forest", "Bosque", "radial-gradient(90% 70% at 20% 10%, #1f6b46 0%, transparent 55%), linear-gradient(165deg, #06180f, #0b2418)", "#0c2517", "#6fdc9f", "radial-gradient(90% 70% at 20% 10%, #92d9ad 0%, transparent 58%), linear-gradient(165deg, #d2ecdb, #c4e2cf)"],
+    ["nebula", "Nebulosa", "radial-gradient(60% 50% at 30% 30%, #7a2d9c 0%, transparent 60%), radial-gradient(50% 50% at 75% 70%, #1d6fa3 0%, transparent 60%), linear-gradient(135deg, #0a0614, #120a24)", "#1b1030", "#c191ff", "radial-gradient(60% 50% at 30% 30%, #cfa6f2 0%, transparent 62%), radial-gradient(50% 50% at 75% 70%, #9ccdf0 0%, transparent 62%), linear-gradient(135deg, #e6dcf6, #d8d4f2)"],
+    ["graphite", "Grafito", "radial-gradient(80% 60% at 50% 0%, #3b4250 0%, transparent 60%), linear-gradient(180deg, #16181d, #0c0d10)", "#181a20", "#a8b5cc", "radial-gradient(80% 60% at 50% 0%, #bcc4d2 0%, transparent 62%), linear-gradient(180deg, #dde1e8, #d0d5de)"],
+    ["rose", "Rosa", "radial-gradient(90% 70% at 85% 15%, #9c3a63 0%, transparent 55%), linear-gradient(160deg, #1d0d17, #12091a)", "#26101c", "#ff8fbb", "radial-gradient(90% 70% at 85% 15%, #f3a2c3 0%, transparent 58%), linear-gradient(160deg, #f6d6e3, #eccfe0)"],
+    ["mint", "Menta", "radial-gradient(90% 70% at 15% 85%, #1f8a74 0%, transparent 55%), radial-gradient(70% 60% at 90% 10%, #2b6f8f 0%, transparent 60%), linear-gradient(150deg, #04161a, #071e22)", "#07211f", "#6fefd2", "radial-gradient(90% 70% at 15% 85%, #8fe6cf 0%, transparent 58%), radial-gradient(70% 60% at 90% 10%, #9fcfe8 0%, transparent 62%), linear-gradient(150deg, #cdf0e7, #c8e5ea)"],
+  ];
+  var lookDraft = null; // what the modal shows before the server confirms it
+
+  function presetOf(id) {
+    for (var i = 0; i < LOOK_PRESETS.length; i++) if (LOOK_PRESETS[i][0] === id) return LOOK_PRESETS[i];
+    return null;
+  }
+
+  function presetCss(id) {
+    var p = presetOf(id);
+    if (!p) return "";
+    return themeMode() === "light" ? p[5] : p[2];
+  }
+
+  // A swatch is a hue: dark mode gets a deep version of it, light mode a pale one.
+  // Light mode never means white: any hue becomes a real pastel of itself
+  // (greys stay a soft neutral grey).
+  function pastel(hex) {
+    var hsl = rgbHsl(hexRgb(hex));
+    if (hsl[1] < 0.08) return rgbHex(hslRgb(hsl[0], 0.05, 0.87));
+    return rgbHex(hslRgb(hsl[0], Math.max(0.38, Math.min(hsl[1], 0.62)), 0.85));
+  }
+
+  function colorFor(hex, mode) {
+    var hsl = rgbHsl(hexRgb(hex));
+    if ((mode || themeMode()) === "light") return pastel(hex);
+    if (hsl[2] <= 0.16) return hex;
+    return rgbHex(hslRgb(hsl[0], Math.min(hsl[1], 0.6), hsl[1] < 0.08 ? 0.1 : 0.12));
+  }
+
+  function hexLuma(hex) {
+    var m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    if (!m) return 0;
+    var c = [m[1], m[2], m[3]].map(function (h) {
+      var v = parseInt(h, 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+
+  function hexRgb(hex) {
+    var m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [0, 0, 0];
+  }
+
+  function rgbHsl(rgb) {
+    var r = rgb[0] / 255;
+    var g = rgb[1] / 255;
+    var b = rgb[2] / 255;
+    var max = Math.max(r, g, b);
+    var min = Math.min(r, g, b);
+    var l = (max + min) / 2;
+    var h = 0;
+    var sat = 0;
+    if (max !== min) {
+      var d = max - min;
+      sat = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h /= 6;
+    }
+    return [h, sat, l];
+  }
+
+  function hslRgb(h, sat, l) {
+    function f(n) {
+      var k = (n + h * 12) % 12;
+      var a = sat * Math.min(l, 1 - l);
+      return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+    }
+    return [f(0), f(8), f(4)];
+  }
+
+  function rgbHex(rgb) {
+    return "#" + rgb.map(function (v) {
+      return ("0" + Math.max(0, Math.min(255, v)).toString(16)).slice(-2);
+    }).join("");
+  }
+
+  // Average color of an uploaded image, for tinting the UI (same origin, so the
+  // canvas can be read). Cached by name; applyTheme runs again once it is known.
+  var imageTints = {};
+
+  function imageTint(name) {
+    if (imageTints[name] !== undefined) return imageTints[name];
+    imageTints[name] = null;
+    var img = new Image();
+    img.onload = function () {
+      try {
+        var c = document.createElement("canvas");
+        c.width = c.height = 48;
+        var ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0, 48, 48);
+        var px = ctx.getImageData(0, 0, 48, 48).data;
+        // Hue buckets (30 deg each), weighted by how vivid each pixel is: the
+        // heaviest one tints the surfaces, the next distinct one is the second
+        // accent. The plain average is kept for the contrast check.
+        var sum = [0, 0, 0];
+        var buckets = {};
+        for (var i = 0; i < px.length; i += 4) {
+          var rgb = [px[i], px[i + 1], px[i + 2]];
+          sum[0] += rgb[0];
+          sum[1] += rgb[1];
+          sum[2] += rgb[2];
+          var hsl = rgbHsl(rgb);
+          if (hsl[1] < 0.12 || hsl[2] < 0.08 || hsl[2] > 0.95) continue;
+          var key = Math.floor(hsl[0] * 12) % 12;
+          var w = hsl[1] * (1 - Math.abs(hsl[2] - 0.5));
+          var e = buckets[key] || (buckets[key] = { w: 0, r: 0, g: 0, b: 0, key: key });
+          e.w += w;
+          e.r += rgb[0] * w;
+          e.g += rgb[1] * w;
+          e.b += rgb[2] * w;
+        }
+        var n = px.length / 4;
+        var avg = rgbHex([sum[0] / n, sum[1] / n, sum[2] / n].map(Math.round));
+        var ranked = Object.keys(buckets)
+          .map(function (k) {
+            return buckets[k];
+          })
+          .sort(function (x, y) {
+            return y.w - x.w;
+          });
+        var color = function (e) {
+          return rgbHex([e.r / e.w, e.g / e.w, e.b / e.w].map(Math.round));
+        };
+        if (!ranked.length) {
+          imageTints[name] = { avg: avg, tint: avg, accent: avg };
+        } else {
+          var main = ranked[0];
+          var second = ranked.filter(function (e) {
+            var gap = Math.abs(e.key - main.key);
+            return Math.min(gap, 12 - gap) >= 1 && e.w > main.w * 0.15;
+          })[0];
+          imageTints[name] = { avg: avg, tint: color(main), accent: color(main), accent2: second ? color(second) : "" };
+        }
+      } catch (_) {
+        imageTints[name] = false;
+      }
+      applyTheme();
+    };
+    img.onerror = function () {
+      imageTints[name] = false;
+    };
+    img.src = "/rc-bg/" + name;
+    return null;
+  }
+
+  // What the UI should be tinted with: {tint, accent, light} or null (default look).
+  function lookTint() {
+    var look = myLook();
+    var raw = null;
+    if (look.kind === "color") raw = { tint: colorFor(look.value), accent: look.value };
+    else if (look.kind === "preset") {
+      var p = presetOf(look.value);
+      if (p) raw = { tint: p[3], accent: p[4] };
+    } else if (look.kind === "image") raw = imageTint(look.value) || null;
+    if (!raw) return null;
+    var light = themeMode() === "light";
+    return { tint: raw.tint, accent: raw.accent, accent2: raw.accent2 || "", light: light, kind: look.kind };
+  }
+
+  var UI_TINT_KEYS = ["--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb", "--rc-blue", "--rc-blue-rgb", "--rc-teal", "--rc-teal-rgb", "--rc-on", "--rc-on-rgb"];
+
+  // Surfaces take the hue of the background; the accent replaces blue/teal.
+  function paintUiTint() {
+    var style = document.documentElement.style;
+    var t = lookTint();
+    if (!t) {
+      UI_TINT_KEYS.forEach(function (k) {
+        style.removeProperty(k);
+      });
+      return null;
+    }
+    var base = rgbHsl(hexRgb(t.tint));
+    var hue = base[0];
+    var sat = base[1];
+    var acc = rgbHsl(hexRgb(t.accent));
+    var acc2Hue = t.accent2 ? rgbHsl(hexRgb(t.accent2))[0] : (acc[0] + 0.06) % 1;
+    var surf;
+    var accent;
+    var accent2;
+    if (t.light) {
+      var ls = sat < 0.08 ? 0.05 : Math.max(0.3, Math.min(sat, 0.5));
+      surf = [hslRgb(hue, ls, 0.88), hslRgb(hue, ls, 0.91), hslRgb(hue, ls, 0.82)];
+      var as = acc[1] < 0.12 ? 0 : Math.max(0.5, acc[1]);
+      accent = as ? hslRgb(acc[0], as, 0.42) : [47, 127, 208];
+      accent2 = as ? hslRgb(acc2Hue, as, 0.36) : [42, 162, 152];
+    } else {
+      var ds = Math.min(sat, 0.55);
+      surf = [hslRgb(hue, ds, 0.075), hslRgb(hue, ds, 0.13), hslRgb(hue, ds, 0.2)];
+      var das = acc[1] < 0.12 ? 0 : Math.max(0.55, acc[1]);
+      accent = das ? hslRgb(acc[0], das, 0.7) : [130, 170, 255];
+      accent2 = das ? hslRgb(acc2Hue, das, 0.72) : [127, 219, 202];
+    }
+    var set = function (k, v) {
+      style.setProperty(k, v);
+    };
+    // A solid color is the terminal itself: the area around it must match exactly.
+    set("--rc-bg", t.kind === "color" ? t.tint : rgbHex(surf[0]));
+    set("--rc-surface", rgbHex(surf[1]));
+    set("--rc-raised", rgbHex(surf[2]));
+    set("--rc-surface-rgb", surf[1].join(" "));
+    set("--rc-blue", rgbHex(accent));
+    set("--rc-blue-rgb", accent.join(" "));
+    set("--rc-teal", rgbHex(accent2));
+    set("--rc-teal-rgb", accent2.join(" "));
+    set("--rc-on", rgbHex(accent2));
+    set("--rc-on-rgb", accent2.join(" "));
+    return { surface: rgbHex(surf[1]) };
+  }
+
+  function myLook() {
+    var look = lookDraft;
+    if (!look && wsState && wsState.looks) {
+      try {
+        look = wsState.looks[myProfile()];
+      } catch (_) {}
+    }
+    return look && look.kind ? look : LOOK_DEFAULT;
+  }
+
+  function lookSeeThrough() {
+    var kind = myLook().kind;
+    return kind === "preset" || kind === "image";
+  }
+
+  // The veil over a gradient/photo: deep navy in dark mode, a pastel of the
+  // look's own hue in light mode.
+  function veilRgb() {
+    var t = lookTint();
+    if (themeMode() === "light") return t ? hexRgb(pastel(t.tint)) : [236, 240, 246];
+    if (!t) return [1, 22, 39];
+    // Dark mode: a near-black of the look's own hue, not Night Owl navy.
+    var hsl = rgbHsl(hexRgb(t.tint));
+    return hslRgb(hsl[0], hsl[1] < 0.08 ? 0.06 : Math.max(0.3, Math.min(hsl[1], 0.6)), 0.06);
+  }
+
+  // Light mode puts dark text over a photo: its pale veil starts at 50%. The
+  // light gradients are already pastel and keep the slider as is.
+  function veilAlpha(look) {
+    return (look.dim || 0) / 100;
+  }
+
+  // Roughly what sits behind the text: the picture's average under the veil.
+  // xterm's contrast check runs against this color.
+  function behindText() {
+    var look = myLook();
+    var veil = veilRgb();
+    var a = veilAlpha(look);
+    var under = null;
+    if (look.kind === "image") {
+      var t = imageTints[look.value];
+      if (t && t.avg) under = hexRgb(t.avg);
+    } else if (look.kind === "preset") {
+      var p = presetOf(look.value);
+      if (p) under = themeMode() === "light" ? hexRgb(pastel(p[3])) : hexRgb(p[3]);
+    }
+    if (!under) return veil;
+    return [0, 1, 2].map(function (i) {
+      return Math.round(under[i] * (1 - a) + veil[i] * a);
+    });
+  }
+
+  function paintLookLayer() {
+    var look = myLook();
+    var root = document.documentElement;
+    var layer = document.getElementById("rc-term-bg");
+    if (!lookSeeThrough()) {
+      root.classList.remove("rc-has-bg");
+      if (layer) layer.hidden = true;
+      return;
+    }
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "rc-term-bg";
+      layer.setAttribute("aria-hidden", "true");
+      layer.appendChild(document.createElement("div")).className = "rc-term-bg-img";
+      var body = document.body || root;
+      body.insertBefore(layer, body.firstChild);
+    }
+    var img = layer.firstChild;
+    var css = look.kind === "preset" ? presetCss(look.value) : 'url("/rc-bg/' + look.value + '") center / cover no-repeat';
+    if (img.dataset.src !== css) {
+      img.dataset.src = css;
+      img.style.background = css;
+    }
+    img.style.filter = look.blur ? "blur(" + look.blur + "px)" : "";
+    img.style.transform = look.blur ? "scale(1.06)" : "";
+    layer.style.setProperty("--rc-bg-dim", String(veilAlpha(look)));
+    root.style.setProperty("--rc-veil-rgb", veilRgb().join(" "));
+    layer.hidden = false;
+    root.classList.add("rc-has-bg");
+  }
+
+  var lookSaveTimer = 0;
+
+  function setLook(next, now, fromSlider) {
+    lookDraft = Object.assign({}, LOOK_DEFAULT, myLook(), next);
+    if (lookDraft.kind === "default") lookDraft.value = "";
+    lookSig = JSON.stringify(lookDraft) + "|" + myProfile();
+    // Sliders: the terminal's contrast check depends on the veil too.
+    if (fromSlider) applyTheme();
+    else {
+      applyTheme();
+      paintSettings(true);
+    }
+    clearTimeout(lookSaveTimer);
+    var pid = myProfile();
+    var look = lookDraft;
+    lookSaveTimer = setTimeout(
+      function () {
+        wsPost({ op: "look", profile: pid, look: look }).then(function () {
+          if (wsState) {
+            wsState.looks = wsState.looks || {};
+            wsState.looks[pid] = look;
+          }
+          if (lookDraft === look) lookDraft = null;
+        });
+      },
+      now ? 0 : 300
+    );
+  }
+
+  var lookSig = "";
+
+  // Called when the workspace payload arrives or the profile changes.
+  function refreshLook() {
+    var sig = JSON.stringify(myLook()) + "|" + myProfile();
+    if (sig === lookSig) return;
+    lookSig = sig;
+    applyTheme();
+    paintSettings();
+  }
+
+  // --- settings modal --------------------------------------------------------
+
+  var SETTINGS_TABS = [
+    {
+      id: "themes",
+      label: "Themes",
+      icon: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a6.2 6.2 0 1 0 0 12.4c.9 0 1.3-.5 1.3-1.1 0-.7-.6-1-.6-1.7 0-.6.5-1.1 1.2-1.1h1.5a3.4 3.4 0 0 0 3.4-3.4C14.8 4.1 11.8 1.8 8 1.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="4.8" cy="7.4" r="1" fill="currentColor"/><circle cx="7.2" cy="4.7" r="1" fill="currentColor"/><circle cx="10.6" cy="5.4" r="1" fill="currentColor"/></svg>',
+    },
+  ];
+  var settingsTab = "themes";
+  var bgImages = [];
+  var GEAR_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 1.8h2.8l.4 1.8 1.2.7 1.8-.6 1.4 2.4-1.4 1.3v1.2l1.4 1.3-1.4 2.4-1.8-.6-1.2.7-.4 1.8H6.6l-.4-1.8-1.2-.7-1.8.6-1.4-2.4 1.4-1.3V7.4L1.8 6.1l1.4-2.4 1.8.6 1.2-.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+  var CHECK_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.4l3 3 6-6.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  function closeSettings() {
+    var layer = document.getElementById("rc-settings");
+    if (layer) layer.remove();
+    document.documentElement.classList.remove("rc-settings-open");
+  }
+
+  function loadBgImages() {
+    return fetch("/rc-bg", { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        if (payload && Array.isArray(payload.images)) bgImages = payload.images;
+        paintSettings();
+      })
+      .catch(function () {});
+  }
+
+  function uploadBg(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type || "")) {
+      showToast("Eso no es una imagen");
+      return;
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      showToast("La imagen pasa de 15 MB");
+      return;
+    }
+    showToast("Subiendo imagen…");
+    fetch("/rc-bg", { method: "PUT", body: file, cache: "no-store" })
+      .then(function (resp) {
+        return resp.json().catch(function () {
+          return {};
+        });
+      })
+      .then(function (payload) {
+        if (!payload || !payload.ok) {
+          showToast((payload && payload.error) || "No pude subir la imagen");
+          return;
+        }
+        bgImages = payload.images || bgImages;
+        setLook({ kind: "image", value: payload.name }, true);
+        showToast("Imagen lista");
+      })
+      .catch(function () {
+        showToast("No pude subir la imagen");
+      });
+  }
+
+  function deleteBg(name) {
+    fetch("/rc-bg/" + encodeURIComponent(name), { method: "DELETE", cache: "no-store" })
+      .then(function (resp) {
+        return resp.json().catch(function () {
+          return {};
+        });
+      })
+      .then(function (payload) {
+        if (payload && Array.isArray(payload.images)) bgImages = payload.images;
+        var look = myLook();
+        if (look.kind === "image" && look.value === name) {
+          lookDraft = null;
+          if (wsState && wsState.looks) wsState.looks[myProfile()] = Object.assign({}, look, { kind: "default", value: "" });
+        }
+        pullSessions();
+        refreshLook();
+        paintSettings();
+      });
+  }
+
+  function lookTile(cls, label, on, onPick) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "rc-look-tile " + cls + (on ? " is-on" : "");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    var mark = document.createElement("span");
+    mark.className = "rc-look-check";
+    mark.innerHTML = CHECK_ICON;
+    b.appendChild(mark);
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      onPick();
+    });
+    return b;
+  }
+
+  function lookGroup(title, hint) {
+    var sec = document.createElement("section");
+    sec.className = "rc-set-group";
+    var h = document.createElement("div");
+    h.className = "rc-set-group-title";
+    h.textContent = title;
+    sec.appendChild(h);
+    if (hint) {
+      var p = document.createElement("div");
+      p.className = "rc-set-hint";
+      p.textContent = hint;
+      sec.appendChild(p);
+    }
+    return sec;
+  }
+
+  function lookBackgroundCss(look) {
+    if (look.kind === "color") return colorFor(look.value);
+    if (look.kind === "preset") return presetCss(look.value);
+    if (look.kind === "image") return 'url("/rc-bg/' + look.value + '") center / cover no-repeat';
+    return TERM_THEMES[themeMode()].background;
+  }
+
+  // A small fake terminal with the chosen background and palette.
+  function lookHero(look) {
+    var pal = termPalette();
+    var hero = document.createElement("div");
+    hero.className = "rc-look-hero";
+    var bg = document.createElement("div");
+    bg.className = "rc-look-hero-bg";
+    bg.style.background = lookBackgroundCss(look);
+    var see = look.kind === "preset" || look.kind === "image";
+    if (see && look.blur) {
+      bg.style.filter = "blur(" + Math.round(look.blur / 2) + "px)";
+      bg.style.transform = "scale(1.08)";
+    }
+    hero.appendChild(bg);
+    if (see) {
+      var veil = document.createElement("div");
+      veil.className = "rc-look-hero-veil";
+      veil.style.opacity = String(veilAlpha(look));
+      veil.style.background = "rgb(" + veilRgb().join(" ") + ")";
+      hero.appendChild(veil);
+    }
+    var win = document.createElement("div");
+    win.className = "rc-look-hero-win";
+    var bar = document.createElement("div");
+    bar.className = "rc-look-hero-bar";
+    bar.innerHTML = "<i></i><i></i><i></i>";
+    var name = document.createElement("span");
+    name.textContent = "~ · zsh";
+    bar.appendChild(name);
+    win.appendChild(bar);
+    var lines = [
+      [[pal.green, "➜ "], [pal.cyan, "proyecto "], [pal.blue, "git:("], [pal.magenta, "main"], [pal.blue, ") "], [pal.foreground, "npm run dev"]],
+      [[pal.brightBlack, "> vite --host"]],
+      [[pal.green, "  ✓ "], [pal.foreground, "listo en "], [pal.yellow, "312 ms"]],
+      [[pal.foreground, "  ➜ Local:   "], [pal.cyan, "http://localhost:5173/"]],
+      [[pal.red, "  ✗ "], [pal.foreground, "1 advertencia en "], [pal.magenta, "src/app.tsx"]],
+    ];
+    var pre = document.createElement("div");
+    pre.className = "rc-look-hero-text";
+    lines.forEach(function (parts) {
+      var line = document.createElement("div");
+      parts.forEach(function (part) {
+        var span = document.createElement("span");
+        span.style.color = part[0];
+        span.textContent = part[1];
+        line.appendChild(span);
+      });
+      pre.appendChild(line);
+    });
+    var cursor = document.createElement("span");
+    cursor.className = "rc-look-hero-cursor";
+    cursor.style.background = pal.cursor;
+    pre.lastChild.appendChild(cursor);
+    win.appendChild(pre);
+    hero.appendChild(win);
+    var tag = document.createElement("span");
+    tag.className = "rc-look-hero-tag";
+    tag.textContent = look.kind === "default" ? "Tema" : look.kind === "color" ? "Color" : look.kind === "preset" ? "Degradado" : "Imagen";
+    hero.appendChild(tag);
+    return hero;
+  }
+
+  function lookCard(title, hint, icon) {
+    var sec = document.createElement("section");
+    sec.className = "rc-set-group";
+    var h = document.createElement("div");
+    h.className = "rc-set-group-head";
+    if (icon) {
+      var ic = document.createElement("span");
+      ic.className = "rc-set-group-icon";
+      ic.innerHTML = icon;
+      h.appendChild(ic);
+    }
+    var txt = document.createElement("div");
+    var t = document.createElement("div");
+    t.className = "rc-set-group-title";
+    t.textContent = title;
+    txt.appendChild(t);
+    if (hint) {
+      var p = document.createElement("div");
+      p.className = "rc-set-hint";
+      p.textContent = hint;
+      txt.appendChild(p);
+    }
+    h.appendChild(txt);
+    sec.appendChild(h);
+    return sec;
+  }
+
+  function swatch(label, on, paint, onPick) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "rc-look-swatch" + (on ? " is-on" : "");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.title = label;
+    var dot = document.createElement("span");
+    dot.className = "rc-look-dot";
+    paint(dot);
+    var mark = document.createElement("span");
+    mark.className = "rc-look-check";
+    mark.innerHTML = CHECK_ICON;
+    dot.appendChild(mark);
+    var name = document.createElement("span");
+    name.className = "rc-look-swatch-name";
+    name.textContent = label;
+    b.appendChild(dot);
+    b.appendChild(name);
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      onPick();
+    });
+    return b;
+  }
+
+  var ICON_SWATCH =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10.5" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="10.4" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+  var ICON_IMAGE =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="6" cy="6.6" r="1.2" fill="currentColor"/><path d="M2.6 12l3.6-3.4 2.6 2.4 1.8-1.6L13.4 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  var ICON_TUNE =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1M6.5 11.5h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="11" cy="4.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5" cy="11.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+  function renderThemesPane(box) {
+    var look = myLook();
+    var head = document.createElement("div");
+    head.className = "rc-set-head";
+    var t = document.createElement("div");
+    t.className = "rc-set-title";
+    t.textContent = "Fondo del terminal";
+    var sub = document.createElement("div");
+    sub.className = "rc-set-sub";
+    sub.appendChild(document.createTextNode("Se aplica al perfil "));
+    var who = document.createElement("strong");
+    who.textContent = profileLabel(myProfile());
+    sub.appendChild(who);
+    sub.appendChild(document.createTextNode(" y tiñe toda la interfaz."));
+    head.appendChild(t);
+    head.appendChild(sub);
+    box.appendChild(head);
+    box.appendChild(lookHero(look));
+
+    // Colors
+    var colors = lookCard("Colores", "Un color sólido de fondo", ICON_SWATCH);
+    var row = document.createElement("div");
+    row.className = "rc-look-swatches";
+    row.appendChild(
+      swatch("Tema", look.kind === "default", function (dot) {
+        dot.classList.add("is-default");
+      }, function () {
+        setLook({ kind: "default", value: "" });
+      })
+    );
+    LOOK_COLORS.forEach(function (c) {
+      row.appendChild(
+        swatch(c[1], look.kind === "color" && look.value === c[0], function (dot) {
+          var shown = colorFor(c[0]);
+          dot.style.background = shown;
+          if (hexLuma(shown) > 0.55) dot.classList.add("is-light");
+        }, function () {
+          setLook({ kind: "color", value: c[0] });
+        })
+      );
+    });
+    var custom = look.kind === "color" && !LOOK_COLORS.some(function (c) {
+      return c[0] === look.value;
+    });
+    var pick = swatch("Elegir…", custom, function (dot) {
+      dot.classList.add("is-custom");
+      if (custom) dot.style.background = colorFor(look.value);
+    }, function () {});
+    var input = document.createElement("input");
+    input.type = "color";
+    input.value = custom ? look.value : "#123456";
+    input.setAttribute("aria-label", "Color personalizado");
+    input.addEventListener("input", function () {
+      setLook({ kind: "color", value: input.value.toLowerCase() });
+    });
+    pick.appendChild(input);
+    row.appendChild(pick);
+    colors.appendChild(row);
+    box.appendChild(colors);
+
+    // Images
+    var images = lookCard("Imágenes", "Degradados incluidos y tus imágenes · PNG, JPG, WebP o GIF hasta 15 MB · se comparten entre perfiles", ICON_IMAGE);
+    var igrid = document.createElement("div");
+    igrid.className = "rc-look-grid is-images";
+    var up = document.createElement("label");
+    up.className = "rc-look-tile is-upload";
+    up.title = "Subir imagen";
+    up.innerHTML =
+      '<span class="rc-look-up-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3.5M4.8 6.4L8 3.2l3.2 3.2M3 12.8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Subir imagen</span><small>o arrástrala aquí</small>';
+    var file = document.createElement("input");
+    file.type = "file";
+    file.accept = "image/png,image/jpeg,image/webp,image/gif";
+    file.addEventListener("change", function () {
+      uploadBg(file.files && file.files[0]);
+      file.value = "";
+    });
+    up.appendChild(file);
+    igrid.appendChild(up);
+    bgImages.forEach(function (name) {
+      var tile = lookTile("is-image is-upload-img", "Imagen subida", look.kind === "image" && look.value === name, function () {
+        setLook({ kind: "image", value: name });
+      });
+      var art = document.createElement("span");
+      art.className = "rc-look-art";
+      art.style.background = 'url("/rc-bg/' + name + '") center / cover no-repeat';
+      tile.insertBefore(art, tile.firstChild);
+      var del = document.createElement("span");
+      del.className = "rc-look-del";
+      del.setAttribute("role", "button");
+      del.setAttribute("aria-label", "Borrar imagen");
+      del.title = "Borrar imagen";
+      del.innerHTML = WS_ICONS["🗑"];
+      del.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        deleteBg(name);
+      });
+      tile.appendChild(del);
+      igrid.appendChild(tile);
+    });
+    LOOK_PRESETS.forEach(function (p) {
+      var tile = lookTile("is-image", p[1], look.kind === "preset" && look.value === p[0], function () {
+        setLook({ kind: "preset", value: p[0] });
+      });
+      var art = document.createElement("span");
+      art.className = "rc-look-art";
+      art.style.background = presetCss(p[0]);
+      tile.insertBefore(art, tile.firstChild);
+      var name = document.createElement("span");
+      name.className = "rc-look-name";
+      var chip = document.createElement("i");
+      chip.style.background = p[4];
+      name.appendChild(chip);
+      name.appendChild(document.createTextNode(p[1]));
+      tile.appendChild(name);
+      igrid.appendChild(tile);
+    });
+    ["dragenter", "dragover"].forEach(function (type) {
+      images.addEventListener(type, function (ev) {
+        ev.preventDefault();
+        images.classList.add("is-drop");
+      });
+    });
+    images.addEventListener("dragleave", function (ev) {
+      if (!images.contains(ev.relatedTarget)) images.classList.remove("is-drop");
+    });
+    images.addEventListener("drop", function (ev) {
+      ev.preventDefault();
+      images.classList.remove("is-drop");
+      var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      uploadBg(f);
+    });
+    images.appendChild(igrid);
+    box.appendChild(images);
+
+    // Readability
+    var see = lookSeeThrough();
+    var tune = lookCard("Legibilidad", see ? "Ajusta la imagen para que el texto se lea bien" : "Disponible con un degradado o una imagen", ICON_TUNE);
+    tune.classList.toggle("is-off", !see);
+    [
+      ["dim", "Oscurecer", 0, 85, "%"],
+      ["blur", "Desenfocar", 0, 20, " px"],
+    ].forEach(function (cfg) {
+      var wrap = document.createElement("label");
+      wrap.className = "rc-set-range";
+      var label = document.createElement("span");
+      label.textContent = cfg[1];
+      var out = document.createElement("span");
+      out.className = "rc-set-range-val";
+      out.textContent = look[cfg[0]] + cfg[4];
+      var range = document.createElement("input");
+      range.type = "range";
+      range.min = String(cfg[2]);
+      range.max = String(cfg[3]);
+      range.value = String(look[cfg[0]]);
+      range.disabled = !see;
+      var fill = function () {
+        range.style.setProperty("--pct", ((range.value - cfg[2]) / (cfg[3] - cfg[2])) * 100 + "%");
+      };
+      fill();
+      range.addEventListener("input", function () {
+        out.textContent = range.value + cfg[4];
+        fill();
+        var next = {};
+        next[cfg[0]] = parseInt(range.value, 10) || 0;
+        setLook(next, false, true);
+        var hero = box.querySelector(".rc-look-hero");
+        if (hero) hero.replaceWith(lookHero(myLook()));
+      });
+      wrap.appendChild(label);
+      wrap.appendChild(range);
+      wrap.appendChild(out);
+      tune.appendChild(wrap);
+    });
+    box.appendChild(tune);
+  }
+
+  function paintSettings(force) {
+    var layer = document.getElementById("rc-settings");
+    if (!layer) return;
+    var main = layer.querySelector(".rc-set-body");
+    // Keep a slider being dragged alive: only the tiles' state is repainted then.
+    var active = document.activeElement;
+    if (!force && active && main.contains(active) && active.type === "range") return;
+    var keep = main.scrollTop;
+    main.innerHTML = "";
+    layer.querySelectorAll(".rc-set-tab").forEach(function (b) {
+      b.classList.toggle("is-on", b.dataset.tab === settingsTab);
+    });
+    if (settingsTab === "themes") renderThemesPane(main);
+    main.scrollTop = keep;
+  }
+
+  function openSettings(tab) {
+    closeSettings();
+    closeDrawer();
+    if (tab) settingsTab = tab;
+    var layer = document.createElement("div");
+    layer.id = "rc-settings";
+    layer.setAttribute("role", "dialog");
+    layer.setAttribute("aria-modal", "true");
+    layer.setAttribute("aria-label", "Ajustes");
+    var card = document.createElement("div");
+    card.className = "rc-set";
+    var side = document.createElement("aside");
+    side.className = "rc-set-side";
+    var brand = document.createElement("div");
+    brand.className = "rc-set-brand";
+    brand.textContent = "Ajustes";
+    side.appendChild(brand);
+    var tabs = document.createElement("nav");
+    tabs.className = "rc-set-tabs";
+    SETTINGS_TABS.forEach(function (tab) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "rc-set-tab";
+      b.dataset.tab = tab.id;
+      b.innerHTML = tab.icon;
+      b.appendChild(document.createElement("span")).textContent = tab.label;
+      b.addEventListener("click", function () {
+        settingsTab = tab.id;
+        paintSettings(true);
+      });
+      tabs.appendChild(b);
+    });
+    side.appendChild(tabs);
+    var me = document.createElement("div");
+    me.className = "rc-set-me";
+    var dot = document.createElement("span");
+    dot.className = "rc-ws-profile-dot";
+    dot.textContent = (profileLabel(myProfile()) || "?").charAt(0).toUpperCase();
+    var meText = document.createElement("div");
+    var meName = document.createElement("div");
+    meName.className = "rc-set-me-name";
+    meName.textContent = profileLabel(myProfile());
+    var meSub = document.createElement("div");
+    meSub.className = "rc-set-me-sub";
+    meSub.textContent = "Perfil activo";
+    meText.appendChild(meName);
+    meText.appendChild(meSub);
+    me.appendChild(dot);
+    me.appendChild(meText);
+    side.appendChild(me);
+    var main = document.createElement("section");
+    main.className = "rc-set-main";
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "rc-set-close";
+    close.setAttribute("aria-label", "Cerrar");
+    close.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    close.addEventListener("click", closeSettings);
+    var body = document.createElement("div");
+    body.className = "rc-set-body";
+    main.appendChild(close);
+    main.appendChild(body);
+    card.appendChild(side);
+    card.appendChild(main);
+    layer.appendChild(card);
+    layer.addEventListener("mousedown", function (ev) {
+      if (ev.target === layer) closeSettings();
+    });
+    layer.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        closeSettings();
+      }
+    });
+    (document.body || document.documentElement).appendChild(layer);
+    document.documentElement.classList.add("rc-settings-open");
+    paintSettings(true);
+    loadBgImages();
+    try {
+      close.focus({ preventScroll: true });
+    } catch (_) {}
   }
 
   function paintThemeSwitch() {

@@ -33,7 +33,8 @@ from remote_control.history import (
 from remote_control import files as fs
 from remote_control import profiles
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
-from remote_control.workspaces import change_workspaces, snapshot, workspaces_payload
+from remote_control import backgrounds
+from remote_control.workspaces import change_workspaces, delete_background, snapshot, workspaces_payload
 from remote_control.mobile import (
     load_manifest,
     manifest_for_client,
@@ -358,6 +359,9 @@ class Sidecar:
                 return
             if method == "POST" and path == "/rc-scroll":
                 self._serve_scroll(conn, parse_qs(parsed_url.query))
+                return
+            if path == "/rc-bg" or path.startswith("/rc-bg/"):
+                self._serve_backgrounds(conn, method, path[len("/rc-bg/") :] if path.startswith("/rc-bg/") else "", body)
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
@@ -774,6 +778,40 @@ class Sidecar:
             )
             return
         self._paste_ok(conn, path)
+
+    # --- terminal backgrounds ------------------------------------------------
+
+    def _serve_backgrounds(self, conn: socket.socket, method: str, name: str, body: bytes) -> None:
+        if not name and method == "GET":
+            self._json(conn, {"images": backgrounds.list_images()})
+            return
+        if not name and method in ("PUT", "POST"):
+            try:
+                saved = backgrounds.save(body)
+            except backgrounds.BackgroundError as exc:
+                self._json(conn, {"ok": False, "error": str(exc)}, "400 Bad Request")
+                return
+            except OSError:
+                self._json(conn, {"ok": False, "error": "No pude guardar la imagen"}, "500 Internal Server Error")
+                return
+            self._json(conn, {"ok": True, "name": saved, "images": backgrounds.list_images()})
+            return
+        if name and method == "DELETE":
+            ok = delete_background(name)
+            self._json(conn, {"ok": ok, "images": backgrounds.list_images()}, "200 OK" if ok else "404 Not Found")
+            return
+        if name and method in ("GET", "HEAD"):
+            path = backgrounds.path_of(name)
+            if path is None:
+                conn.sendall(_http_response("404 Not Found", b"not found", "text/plain"))
+                return
+            data = b"" if method == "HEAD" else path.read_bytes()
+            ctype = backgrounds.MIME[path.suffix[1:]]
+            # The name is a hash of the bytes: it never changes.
+            extra = [("Cache-Control", "private, max-age=31536000, immutable")]
+            conn.sendall(_http_response("200 OK", data, ctype, extra))
+            return
+        self._json(conn, {"ok": False, "error": "bad request"}, "400 Bad Request")
 
     # --- file explorer -------------------------------------------------------
 

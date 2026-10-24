@@ -1854,3 +1854,830 @@ html.rc-touch .rc-profile-chip-name {
 .rc-profile-pop-manage:hover {
   background: rgb(var(--rc-blue-rgb) / 0.08);
 }
+
+/* --- Terminal background per profile ---------------------------------------- */
+#rc-term-bg {
+  position: fixed;
+  z-index: -1;
+  top: var(--rc-bar-h);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: rgb(var(--rc-veil-rgb, 1 22 39));
+}
+
+#rc-term-bg[hidden] {
+  display: none;
+}
+
+.rc-term-bg-img {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+}
+
+/* Dark veil over the picture so the terminal text stays readable. */
+#rc-term-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgb(1 22 39 / var(--rc-bg-dim, 0.35));
+}
+
+/* Light mode: a pale veil, so the light palette's dark text reads on it. */
+html[data-rc-theme="light"] #rc-term-bg {
+  background: rgb(var(--rc-veil-rgb, 236 240 246));
+}
+
+html[data-rc-theme="light"] #rc-term-bg::after,
+#rc-term-bg::after {
+  background: rgb(var(--rc-veil-rgb, 1 22 39) / var(--rc-bg-dim, 0.35));
+}
+
+html[data-rc-theme="light"] .rc-look-hero-veil {
+  background: rgb(246 248 251);
+}
+
+html.rc-has-bg body,
+html.rc-has-bg #terminal-container,
+html.rc-has-bg .rc-pane,
+html.rc-has-bg .xterm-viewport {
+  background: transparent !important;
+}
+
+/* Gear next to "Perfil" */
+.rc-ws-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 4px;
+}
+
+.rc-ws-gear {
+  height: 26px;
+  min-width: 26px;
+  margin: -6px 0;
+  padding: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.rc-ws-gear svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  transition: transform 300ms ease;
+}
+
+.rc-ws-gear:hover svg {
+  transform: rotate(60deg);
+}
+
+/* --- Settings modal ------------------------------------------------------- */
+#rc-settings {
+  position: fixed;
+  z-index: 2147483009;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(var(--rc-shade) / 0.42);
+  animation: rc-set-fade 160ms ease;
+}
+
+@keyframes rc-set-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.rc-set {
+  display: flex;
+  width: 820px;
+  height: 580px;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 60% at 100% 0%, rgb(var(--rc-blue-rgb) / 0.1), transparent 60%),
+    rgb(var(--rc-surface-rgb) / 0.9);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
+  color: var(--rc-text);
+  font: 500 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.06) inset,
+    0 40px 90px -20px rgb(var(--rc-shade) / 0.85);
+  animation: rc-set-rise 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+@keyframes rc-set-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+}
+
+.rc-set-side {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 20px 12px 14px;
+  border-right: 1px solid rgb(var(--rc-text-rgb) / 0.07);
+  background: rgb(var(--rc-shade) / 0.22);
+}
+
+.rc-set-brand {
+  padding: 0 10px 14px;
+  color: var(--rc-text);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.rc-set-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rc-set-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.rc-set-tab svg {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+}
+
+.rc-set-tab:hover {
+  background: rgb(var(--rc-text-rgb) / 0.06);
+  color: var(--rc-text);
+}
+
+.rc-set-tab.is-on {
+  background: linear-gradient(90deg, rgb(var(--rc-blue-rgb) / 0.22), rgb(var(--rc-blue-rgb) / 0.08));
+  box-shadow: inset 0 0 0 1px rgb(var(--rc-blue-rgb) / 0.25);
+  color: var(--rc-text);
+}
+
+.rc-set-tab.is-on svg {
+  color: var(--rc-blue);
+}
+
+.rc-set-me {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+  padding: 10px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+  border-radius: 12px;
+  background: rgb(var(--rc-text-rgb) / 0.03);
+}
+
+.rc-set-me .rc-ws-profile-dot {
+  width: 30px;
+  height: 30px;
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+  font-size: 13px;
+}
+
+.rc-set-me-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rc-set-me-sub {
+  color: var(--rc-muted);
+  font-size: 11.5px;
+}
+
+.rc-set-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rc-set-close {
+  position: absolute;
+  z-index: 2;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+  border-radius: 10px;
+  background: rgb(var(--rc-surface-rgb) / 0.7);
+  color: var(--rc-muted);
+  cursor: pointer;
+}
+
+.rc-set-close:hover {
+  background: rgb(var(--rc-text-rgb) / 0.1);
+  color: var(--rc-text);
+}
+
+.rc-set-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rc-set-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 24px 26px;
+  scrollbar-width: thin;
+}
+
+.rc-set-head {
+  padding-right: 44px;
+  margin-bottom: 16px;
+}
+
+.rc-set-title {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.rc-set-sub {
+  margin-top: 4px;
+  color: var(--rc-muted);
+  font-size: 12.5px;
+}
+
+.rc-set-sub strong {
+  color: var(--rc-teal);
+  font-weight: 600;
+}
+
+/* Live preview */
+.rc-look-hero {
+  position: relative;
+  height: 170px;
+  margin-bottom: 16px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  border-radius: 16px;
+  isolation: isolate;
+  box-shadow: 0 14px 30px -18px rgb(var(--rc-shade) / 0.9);
+}
+
+.rc-look-hero-bg,
+.rc-look-hero-veil {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  transition: background 200ms ease;
+}
+
+.rc-look-hero-veil {
+  background: rgb(1 22 39);
+}
+
+.rc-look-hero-win {
+  position: absolute;
+  top: 18px;
+  left: 22px;
+  right: 22px;
+  bottom: -1px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
+  background: rgb(0 0 0 / 0.16);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+html[data-rc-theme="light"] .rc-look-hero-win {
+  border-color: rgb(0 0 0 / 0.08);
+  background: rgb(255 255 255 / 0.35);
+}
+
+html[data-rc-theme="light"] .rc-look-hero-bar {
+  border-bottom-color: rgb(0 0 0 / 0.06);
+}
+
+html[data-rc-theme="light"] .rc-look-hero-bar span {
+  color: rgb(0 0 0 / 0.45);
+}
+
+.rc-look-hero-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgb(255 255 255 / 0.07);
+}
+
+.rc-look-hero-bar i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ef5350;
+}
+
+.rc-look-hero-bar i:nth-child(2) {
+  background: #ffcb6b;
+}
+
+.rc-look-hero-bar i:nth-child(3) {
+  background: #22da6e;
+}
+
+.rc-look-hero-bar span {
+  margin-left: 8px;
+  color: rgb(255 255 255 / 0.55);
+  font-size: 11px;
+}
+
+.rc-look-hero-text {
+  padding: 10px 14px;
+  font: 12.5px/1.65 "FiraCode Nerd Font Mono", ui-monospace, monospace;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.rc-look-hero-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  animation: rc-blink 1s steps(1) infinite;
+}
+
+@keyframes rc-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.rc-look-hero-tag {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.4);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+/* Section cards */
+.rc-set-group {
+  padding: 14px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.07);
+  border-radius: 14px;
+  background: rgb(var(--rc-shade) / 0.16);
+}
+
+html[data-rc-theme="light"] .rc-set-group {
+  background: rgb(255 255 255 / 0.5);
+}
+
+.rc-set-group + .rc-set-group {
+  margin-top: 12px;
+}
+
+.rc-set-group-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.rc-set-group-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgb(var(--rc-blue-rgb) / 0.14);
+  color: var(--rc-blue);
+}
+
+.rc-set-group-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rc-set-group-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.rc-set-hint {
+  margin-top: 2px;
+  color: var(--rc-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.rc-set-group.is-drop {
+  outline: 2px dashed rgb(var(--rc-blue-rgb) / 0.7);
+  outline-offset: -2px;
+  background: rgb(var(--rc-blue-rgb) / 0.08);
+}
+
+/* Color swatches */
+.rc-look-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+  gap: 10px 6px;
+}
+
+.rc-look-swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rc-look-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.12),
+    0 4px 10px -4px rgb(var(--rc-shade) / 0.8);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.rc-look-swatch:hover .rc-look-dot {
+  transform: scale(1.08);
+}
+
+.rc-look-swatch.is-on .rc-look-dot {
+  box-shadow:
+    0 0 0 2px var(--rc-surface),
+    0 0 0 4px var(--rc-blue),
+    0 6px 14px -4px rgb(var(--rc-blue-rgb) / 0.6);
+}
+
+.rc-look-dot.is-light {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.15);
+}
+
+.rc-look-dot.is-default {
+  background: linear-gradient(135deg, #011627 50%, #fbfbfb 50%);
+}
+
+.rc-look-dot.is-custom {
+  background: conic-gradient(from 0deg, #ef5350, #ffcb6b, #22da6e, #21c7a8, #82aaff, #c792ea, #ef5350);
+}
+
+.rc-look-swatch-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-look-swatch.is-on .rc-look-swatch-name {
+  color: var(--rc-text);
+  font-weight: 600;
+}
+
+.rc-look-check {
+  position: absolute;
+  display: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--rc-blue);
+  color: var(--rc-on-accent);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+}
+
+.rc-look-check svg {
+  width: 11px;
+  height: 11px;
+}
+
+.rc-look-swatch.is-on .rc-look-check,
+.rc-look-tile.is-on .rc-look-check {
+  display: grid;
+}
+
+.rc-look-swatch input[type="color"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* Image tiles */
+.rc-look-grid.is-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 10px;
+}
+
+.rc-look-tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  border-radius: 12px;
+  background: var(--rc-raised);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  isolation: isolate;
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.rc-look-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  transition: transform 300ms ease;
+}
+
+.rc-look-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px -10px rgb(var(--rc-shade) / 0.9);
+}
+
+.rc-look-tile:hover .rc-look-art {
+  transform: scale(1.08);
+}
+
+.rc-look-tile.is-on {
+  border-color: transparent;
+  box-shadow:
+    0 0 0 2px var(--rc-surface),
+    0 0 0 4px var(--rc-blue),
+    0 10px 22px -8px rgb(var(--rc-blue-rgb) / 0.55);
+}
+
+.rc-look-tile .rc-look-check {
+  top: 6px;
+  right: 6px;
+}
+
+.rc-look-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 9px 7px;
+  background: linear-gradient(transparent, rgb(0 0 0 / 0.55));
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.rc-look-name i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.25);
+}
+
+.rc-look-tile.is-upload {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1.5px dashed rgb(var(--rc-blue-rgb) / 0.55);
+  background: rgb(var(--rc-blue-rgb) / 0.07);
+  color: var(--rc-blue);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.rc-look-tile.is-upload small {
+  color: var(--rc-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.rc-look-up-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  background: rgb(var(--rc-blue-rgb) / 0.16);
+}
+
+.rc-look-up-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rc-look-tile.is-upload:hover {
+  background: rgb(var(--rc-blue-rgb) / 0.14);
+}
+
+.rc-look-tile input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.rc-look-del {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 0.55);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.rc-look-del svg {
+  width: 14px;
+  height: 14px;
+}
+
+.rc-look-del:hover {
+  background: var(--rc-red);
+}
+
+.rc-look-tile:hover .rc-look-del,
+html.rc-touch .rc-look-del {
+  opacity: 1;
+}
+
+/* Sliders */
+.rc-set-range {
+  display: grid;
+  grid-template-columns: 92px 1fr 46px;
+  align-items: center;
+  gap: 12px;
+  height: 36px;
+  color: var(--rc-text);
+  font-size: 13px;
+}
+
+.rc-set-range input {
+  --pct: 0%;
+  width: 100%;
+  height: 6px;
+  margin: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--rc-blue) var(--pct), rgb(var(--rc-text-rgb) / 0.14) var(--pct));
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.rc-set-range input::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  border: 3px solid var(--rc-surface);
+  border-radius: 50%;
+  background: var(--rc-blue);
+  box-shadow: 0 0 0 1px rgb(var(--rc-blue-rgb) / 0.5), 0 2px 6px rgb(0 0 0 / 0.35);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.rc-set-range input::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 3px solid var(--rc-surface);
+  border-radius: 50%;
+  background: var(--rc-blue);
+}
+
+.rc-set-range-val {
+  justify-self: end;
+  padding: 2px 7px;
+  border-radius: 7px;
+  background: rgb(var(--rc-text-rgb) / 0.07);
+  color: var(--rc-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rc-set-group.is-off .rc-set-range {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Phone: full-screen sheet, the sidebar becomes a row of tabs on top. */
+html.rc-touch #rc-settings {
+  padding: 0;
+  place-items: stretch;
+}
+
+html.rc-touch .rc-set {
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+html.rc-touch .rc-set-side {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 56px 10px 12px;
+  border-right: 0;
+  border-bottom: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+}
+
+html.rc-touch .rc-set-brand {
+  padding: 0 8px 0 4px;
+}
+
+html.rc-touch .rc-set-tabs {
+  flex-direction: row;
+  overflow-x: auto;
+}
+
+html.rc-touch .rc-set-me {
+  display: none;
+}
+
+html.rc-touch .rc-set-close {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+}
+
+html.rc-touch .rc-set-body {
+  padding: 16px 14px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
+html.rc-touch .rc-look-hero {
+  height: 150px;
+}
+
+html.rc-touch .rc-look-grid.is-images {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+/* The floating mic / attach / files buttons sit at the top z-index; hide them
+   while the settings modal is open. */
+html.rc-settings-open #rc-pc-mic,
+html.rc-settings-open #rc-pc-file,
+html.rc-settings-open #rc-pc-files {
+  visibility: hidden;
+}

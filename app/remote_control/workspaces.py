@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import backgrounds
 from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, closed_tabs, list_sessions
 
 WS_RE = re.compile(r"^w[a-f0-9]{8}$")
@@ -32,6 +33,12 @@ DEVICES_MAX = 20
 RESUME_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 NAME_MAX = 40
 THEMES = ("system", "light", "dark")
+# Terminal background per profile ("" is the primary one). Presets are CSS
+# gradients drawn by the page; images are files from backgrounds.py.
+LOOK_KINDS = ("default", "color", "preset", "image")
+LOOK_PRESETS = ("aurora", "sunset", "ocean", "forest", "nebula", "graphite", "rose", "mint")
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+LOOKS_MAX = 40
 MIC_MIN, MIC_MAX = 28, 160
 SCREEN_LINES = 3000
 
@@ -82,6 +89,36 @@ def _find_group(state: dict, gid: str) -> dict | None:
         if group["id"] == gid:
             return group
     return None
+
+
+def _clean_look(raw) -> dict | None:
+    if not isinstance(raw, dict) or raw.get("kind") not in LOOK_KINDS:
+        return None
+    kind = raw["kind"]
+    value = str(raw.get("value") or "")
+    if kind == "color" and not HEX_RE.match(value):
+        return None
+    if kind == "preset" and value not in LOOK_PRESETS:
+        return None
+    if kind == "image" and not backgrounds.NAME_RE.match(value):
+        return None
+    if kind == "default":
+        value = ""
+
+    def num(key: str, low: int, high: int, fallback: int) -> int:
+        try:
+            return max(low, min(high, int(raw.get(key, fallback))))
+        except (TypeError, ValueError):
+            return fallback
+
+    return {"kind": kind, "value": value.lower() if kind == "color" else value, "dim": num("dim", 0, 85, 35), "blur": num("blur", 0, 20, 0)}
+
+
+def drop_image_looks(state: dict, name: str) -> None:
+    """A deleted image falls back to the default background wherever it was used."""
+    for pid, look in list((state.get("looks") or {}).items()):
+        if look.get("kind") == "image" and look.get("value") == name:
+            state["looks"][pid] = {"kind": "default", "value": "", "dim": look.get("dim", 35), "blur": look.get("blur", 0)}
 
 
 def load_state(base: Path | None = None) -> dict:
@@ -153,6 +190,13 @@ def load_state(base: Path | None = None) -> dict:
     file_pos = _clean_pos(data.get("filePos"))
     if file_pos:
         state["filePos"] = file_pos
+    looks = data.get("looks")
+    if isinstance(looks, dict):
+        state["looks"] = {
+            pid: clean
+            for pid, raw in list(looks.items())[-LOOKS_MAX:]
+            if isinstance(pid, str) and (pid == "" or PROFILE_RE.match(pid)) and (clean := _clean_look(raw))
+        }
     active = data.get("active")
     if any(ws["id"] == active for ws in state["workspaces"]):
         state["active"] = active
@@ -293,6 +337,17 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
         picks[device] = pid
         while len(picks) > DEVICES_MAX:
             picks.pop(next(iter(picks)))
+        return {"ok": True}
+    if kind == "look":
+        pid = str(op.get("profile") or "")
+        look = _clean_look(op.get("look"))
+        if not (pid == "" or PROFILE_RE.match(pid)) or not look:
+            return {"ok": False}
+        looks = state.setdefault("looks", {})
+        looks.pop(pid, None)
+        looks[pid] = look
+        while len(looks) > LOOKS_MAX:
+            looks.pop(next(iter(looks)))
         return {"ok": True}
     if kind == "fsPrefs":
         device = str(op.get("device") or "")
@@ -528,6 +583,7 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
         "filesPos": state.get("filesPos"),
         "fsPrefs": state.get("fsPrefs") or {},
         "profilePick": state.get("profilePick") or {},
+        "looks": state.get("looks") or {},
         "groups": [dict(g) for g in state["groups"]],
         "folded": state.get("folded") or {},
         "workspaces": [
@@ -538,6 +594,17 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
         "sessions": sessions,
         "closed": closed_tabs(),
     }
+
+
+def delete_background(name: str, base: Path | None = None) -> bool:
+    """Remove an uploaded image and reset the profiles that were using it."""
+    with _lock:
+        if not backgrounds.delete(name):
+            return False
+        state = load_state(base)
+        drop_image_looks(state, name)
+        save_state(state, base)
+        return True
 
 
 def workspaces_payload(socket: str = TMUX_SOCKET, base: Path | None = None) -> dict:
