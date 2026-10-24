@@ -1,4 +1,17 @@
-/* Night Owl — Remote Control */
+/* Remote Control — desktop window. Night Owl palette, same language as the web UI:
+   soft glass cards, pill chips, icon buttons, one accent. */
+
+@define-color rc_bg #011627;
+@define-color rc_surface #0b2942;
+@define-color rc_raised #1d3b53;
+@define-color rc_text #d6deeb;
+@define-color rc_muted #8a9bb3;
+@define-color rc_blue #82AAFF;
+@define-color rc_teal #7fdbca;
+@define-color rc_on #21C7A8;
+@define-color rc_green #22DA6E;
+@define-color rc_yellow #FFEB95;
+@define-color rc_red #EF5350;
 
 window.rc-window,
 .rc-window,
@@ -7,293 +20,375 @@ window.rc-window,
 .rc-window toolbarview > *,
 .rc-window toastoverlay,
 .rc-window toastoverlay > * {
-  background: #011627;
-  background-color: #011627;
-  color: #d6deeb;
+  background-color: @rc_bg;
+  color: @rc_text;
 }
 
-.rc-window headerbar {
-  background: #011627;
-  background-color: #011627;
-  color: #d6deeb;
+.rc-window toolbarview {
+  background-image:
+    radial-gradient(circle at 0% 0%, alpha(@rc_on, 0.16), transparent 55%),
+    radial-gradient(circle at 100% 100%, alpha(@rc_blue, 0.14), transparent 60%);
+}
+
+.rc-window toolbarview > *,
+.rc-window toastoverlay,
+.rc-window toastoverlay > *,
+.rc-canvas {
+  background: transparent;
+  background-color: transparent;
+}
+
+.rc-window headerbar,
+.rc-header {
+  background: transparent;
+  background-color: transparent;
+  color: @rc_text;
   box-shadow: none;
   border: none;
-  border-bottom: none;
 }
 
-.rc-window headerbar windowtitle {
-  color: #d6deeb;
-}
-
-.rc-window headerbar windowtitle subtitle {
-  color: #7B88A1;
-}
-
-.rc-canvas {
-  background: #011627;
-}
-
-.rc-kicker {
-  color: #21C7A8;
-  font-size: 11px;
+.rc-window headerbar windowtitle .title {
   font-weight: 700;
-  letter-spacing: 1.8px;
+  color: @rc_text;
 }
 
-.rc-title {
-  color: #d6deeb;
-  font-size: 26px;
+/* Cards */
+.rc-card {
+  padding: 16px;
+  border-radius: 18px;
+  background-color: alpha(@rc_surface, 0.78);
+  border: 1px solid alpha(@rc_text, 0.08);
+  box-shadow: 0 10px 28px alpha(black, 0.28);
+}
+
+.rc-card-title {
+  color: @rc_text;
+  font-size: 13.5px;
   font-weight: 700;
 }
 
-.rc-subtitle {
-  color: #7B88A1;
-  font-size: 13px;
+/* Hero */
+.rc-hero {
+  padding: 18px 16px 16px;
 }
 
-.rc-status {
-  background: alpha(#011627, 0.7);
+.rc-hero.on {
+  border-color: alpha(@rc_on, 0.45);
+  box-shadow:
+    0 0 0 1px alpha(@rc_on, 0.12),
+    0 12px 32px alpha(@rc_on, 0.16);
+}
+
+.rc-badge {
+  min-width: 46px;
+  min-height: 46px;
+  border-radius: 14px;
+  background-image: linear-gradient(140deg, @rc_on, @rc_blue);
+  color: @rc_bg;
+  box-shadow: 0 8px 18px alpha(@rc_on, 0.35);
+}
+
+.rc-hero.off .rc-badge {
+  background-image: linear-gradient(140deg, alpha(@rc_on, 0.55), alpha(@rc_blue, 0.55));
+  box-shadow: none;
+}
+
+.rc-hero-title {
+  color: @rc_text;
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.rc-hero-sub {
+  color: @rc_muted;
+  font-size: 12.5px;
+}
+
+.rc-switch {
+  background-color: alpha(@rc_text, 0.14);
   border-radius: 999px;
-  padding: 4px 10px;
-  border: 1px solid alpha(#82AAFF, 0.12);
 }
 
-.rc-status-label {
-  font-size: 13px;
+.rc-switch:checked {
+  background-color: @rc_on;
+}
+
+.rc-switch slider {
+  background-color: @rc_text;
+  border-radius: 999px;
+}
+
+.rc-switch:checked slider {
+  background-color: @rc_bg;
+}
+
+.rc-switch:focus-visible {
+  outline: 2px solid @rc_blue;
+  outline-offset: 2px;
+}
+
+/* Chips */
+.rc-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background-color: alpha(@rc_text, 0.06);
+  border: 1px solid alpha(@rc_text, 0.08);
+  color: @rc_muted;
+  font-size: 12px;
   font-weight: 600;
 }
 
+.rc-chip.warn {
+  background-color: alpha(@rc_yellow, 0.1);
+  border-color: alpha(@rc_yellow, 0.3);
+  color: @rc_yellow;
+}
+
+.rc-hero.on .rc-status {
+  background-color: alpha(@rc_green, 0.12);
+  border-color: alpha(@rc_green, 0.3);
+}
+
+.rc-hero.busy .rc-status {
+  background-color: alpha(@rc_blue, 0.12);
+  border-color: alpha(@rc_blue, 0.3);
+}
+
+.rc-status-label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .rc-status-label.on {
-  color: #22DA6E;
+  color: @rc_green;
 }
 
 .rc-status-label.off {
-  color: #7B88A1;
+  color: @rc_muted;
 }
 
 .rc-status-label.busy {
-  color: #82AAFF;
+  color: @rc_blue;
 }
 
 .rc-dot {
   min-width: 8px;
   min-height: 8px;
   border-radius: 99px;
-  background: #575656;
+  background-color: alpha(@rc_text, 0.35);
 }
 
 .rc-dot.on {
-  background: #22DA6E;
+  background-color: @rc_green;
+  box-shadow: 0 0 0 3px alpha(@rc_green, 0.22);
 }
 
 .rc-dot.busy {
-  background: #82AAFF;
+  background-color: @rc_blue;
+  box-shadow: 0 0 0 3px alpha(@rc_blue, 0.22);
 }
 
-.rc-pass-label {
-  color: #7B88A1;
-  font-size: 11px;
+/* Fields */
+.rc-field-label {
+  color: @rc_muted;
+  font-size: 11.5px;
   font-weight: 700;
-  letter-spacing: 1.2px;
 }
 
-.rc-panel,
-.rc-url-card {
-  background: #0b2942;
-  border: 1px solid alpha(#21C7A8, 0.28);
-  border-radius: 18px;
-  padding: 16px;
-}
-
-.rc-pass-entry {
-  background: #011627;
-  color: #d6deeb;
-  border: 1px solid alpha(#82AAFF, 0.22);
+.rc-field {
+  min-height: 40px;
+  padding: 0 12px;
   border-radius: 12px;
-  min-height: 38px;
-  padding: 8px 12px;
-  caret-color: #21C7A8;
-  font-size: 14px;
+  background-color: alpha(@rc_bg, 0.75);
+  border: 1px solid alpha(@rc_text, 0.1);
+  color: @rc_text;
+  caret-color: @rc_on;
+  box-shadow: none;
+  outline: none;
 }
 
-.rc-pass-entry:focus {
-  border-color: #21C7A8;
+.rc-field:focus-within {
+  border-color: alpha(@rc_blue, 0.65);
+  box-shadow: 0 0 0 3px alpha(@rc_blue, 0.16);
 }
 
-.rc-pass-entry selection {
-  background-color: #1d3b53;
-  color: #d6deeb;
+.rc-field:disabled {
+  color: alpha(@rc_text, 0.75);
 }
 
-.rc-strength {
-  font-size: 12px;
-  font-weight: 600;
+.rc-field selection {
+  background-color: @rc_raised;
+  color: @rc_text;
 }
 
-.rc-strength.none {
-  color: #7B88A1;
-}
-
-.rc-strength.weak {
-  color: #EF5350;
-}
-
-.rc-strength.ok {
-  color: #FFEB95;
-}
-
-.rc-strength.strong {
-  color: #22DA6E;
-}
-
-.rc-pass .rc-copy-btn {
-  min-height: 38px;
-  padding: 0 14px;
-}
-
-.rc-power {
-  padding: 6px 0 2px;
-}
-
-.rc-power switch:checked {
-  background: #21C7A8;
-}
-
-.rc-power switch:checked slider {
-  background: #011627;
-}
-
-.rc-power switch:focus-visible {
-  outline: 2px solid #82AAFF;
-  outline-offset: 2px;
-}
-
-.rc-url-card {
-  padding: 16px;
-}
-
-.rc-url-label {
-  color: #21C7A8;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1.2px;
-}
-
-.rc-url-entry {
-  background: #011627;
-  color: #d6deeb;
-  border: 1px solid alpha(#82AAFF, 0.18);
-  border-radius: 12px;
-  min-height: 38px;
-  padding: 8px 12px;
-  caret-color: #21C7A8;
+.rc-mono {
   font-family: "FiraCode Nerd Font Mono", "Fira Code", monospace;
   font-size: 12.5px;
 }
 
-.rc-url-entry:focus {
-  border-color: #21C7A8;
+.rc-field image {
+  color: @rc_muted;
 }
 
-.rc-url-entry selection {
-  background-color: #1d3b53;
-  color: #d6deeb;
+/* Icon buttons */
+.rc-icon-btn {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 12px;
+  background-color: alpha(@rc_text, 0.06);
+  border: 1px solid alpha(@rc_text, 0.1);
+  color: @rc_text;
+  box-shadow: none;
 }
 
-.rc-copy-btn,
-.rc-open-btn {
-  padding: 0 14px;
-  min-height: 36px;
-  border-radius: 10px;
-  font-weight: 600;
+.rc-icon-btn:hover {
+  background-color: alpha(@rc_blue, 0.16);
+  border-color: alpha(@rc_blue, 0.35);
+  color: @rc_blue;
 }
 
-.rc-copy-btn {
-  background: #21C7A8;
-  color: #011627;
+.rc-icon-btn.accent {
+  background-color: @rc_on;
+  border-color: transparent;
+  color: @rc_bg;
 }
 
-.rc-copy-btn:hover {
-  background: #7FDBCA;
+.rc-icon-btn.accent:hover {
+  background-color: @rc_teal;
+  color: @rc_bg;
 }
 
-.rc-copy-btn:focus-visible,
-.rc-open-btn:focus-visible,
-.rc-btn-stop:focus-visible,
-.rc-btn-cancel:focus-visible {
-  outline: 2px solid #82AAFF;
+.rc-icon-btn:disabled {
+  opacity: 0.4;
+}
+
+.rc-icon-btn:focus-visible {
+  outline: 2px solid @rc_blue;
   outline-offset: 2px;
 }
 
-.rc-open-btn {
-  background: alpha(#82AAFF, 0.16);
-  color: #82AAFF;
-  border: 1px solid alpha(#82AAFF, 0.22);
+/* Password strength */
+.rc-strength {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
 }
 
-.rc-open-btn:hover {
-  background: alpha(#82AAFF, 0.26);
+.rc-strength.none {
+  color: @rc_yellow;
+  background-color: alpha(@rc_yellow, 0.1);
 }
 
-.rc-hint {
-  color: #575656;
+.rc-strength.weak {
+  color: @rc_red;
+  background-color: alpha(@rc_red, 0.12);
+}
+
+.rc-strength.ok {
+  color: @rc_yellow;
+  background-color: alpha(@rc_yellow, 0.12);
+}
+
+.rc-strength.strong {
+  color: @rc_green;
+  background-color: alpha(@rc_green, 0.12);
+}
+
+.rc-meter-bar {
+  min-height: 4px;
+  border-radius: 99px;
+  background-color: alpha(@rc_text, 0.1);
+}
+
+.rc-meter-bar.weak {
+  background-color: @rc_red;
+}
+
+.rc-meter-bar.ok {
+  background-color: @rc_yellow;
+}
+
+.rc-meter-bar.strong {
+  background-color: @rc_green;
+}
+
+.rc-hint-text {
+  color: @rc_muted;
+  font-size: 11.5px;
+}
+
+.rc-hint-text.warn {
+  color: @rc_yellow;
+}
+
+.rc-footer {
+  color: alpha(@rc_muted, 0.75);
   font-size: 11px;
 }
 
 .rc-error {
-  background: alpha(#EF5350, 0.10);
-  border: 1px solid alpha(#EF5350, 0.28);
+  background-color: alpha(@rc_red, 0.1);
+  border: 1px solid alpha(@rc_red, 0.3);
   border-radius: 12px;
   padding: 10px 12px;
-  color: #EF5350;
+  color: @rc_red;
   font-size: 12.5px;
 }
 
 /* Shutdown dialog */
 .rc-dialog {
-  background: #011627;
-  border: 1px solid alpha(#EF5350, 0.28);
+  background-color: @rc_surface;
+  border: 1px solid alpha(@rc_red, 0.3);
   border-radius: 22px;
   padding: 26px 24px 22px;
 }
 
 .rc-dialog-title {
-  color: #d6deeb;
+  color: @rc_text;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .rc-dialog-body {
-  color: #9fb3c8;
+  color: @rc_muted;
   font-size: 13.5px;
 }
 
 .rc-btn-cancel {
-  background: alpha(#1d3b53, 0.85);
-  color: #d6deeb;
+  background-color: alpha(@rc_text, 0.08);
+  color: @rc_text;
   border-radius: 12px;
   min-height: 40px;
   font-weight: 600;
 }
 
 .rc-btn-cancel:hover {
-  background: #1d3b53;
+  background-color: alpha(@rc_text, 0.14);
 }
 
 .rc-btn-stop {
-  background: #EF5350;
-  color: #011627;
+  background-color: @rc_red;
+  color: @rc_bg;
   border-radius: 12px;
   min-height: 40px;
   font-weight: 700;
 }
 
 .rc-btn-stop:hover {
-  background: #ff6b68;
+  background-color: #ff6b68;
+}
+
+.rc-btn-cancel:focus-visible,
+.rc-btn-stop:focus-visible {
+  outline: 2px solid @rc_blue;
+  outline-offset: 2px;
 }
 
 toast {
-  background: #0b2942;
-  color: #d6deeb;
-  border: 1px solid alpha(#21C7A8, 0.25);
+  background-color: @rc_surface;
+  color: @rc_text;
+  border: 1px solid alpha(@rc_on, 0.3);
+  border-radius: 12px;
 }

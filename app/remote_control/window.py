@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from remote_control.gate import (
     STRENGTH_LABEL,
+    generate_password,
     password_strength,
     read_password,
     without_spaces,
@@ -29,7 +30,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Remote Control")
-        self.set_default_size(360, 540)
+        self.set_default_size(380, 640)
         self.set_resizable(False)
         self.add_css_class("rc-window")
 
@@ -61,26 +62,25 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _build(self) -> None:
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(
-            Adw.WindowTitle(title="Remote Control", subtitle="Túnel de terminal")
-        )
+        header.add_css_class("rc-header")
+        header.set_title_widget(Adw.WindowTitle(title="Remote Control", subtitle=""))
         toolbar.add_top_bar(header)
 
         self.toasts = Adw.ToastOverlay()
         toolbar.set_content(self.toasts)
 
-        canvas = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        canvas = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         canvas.add_css_class("rc-canvas")
         canvas.set_hexpand(True)
         canvas.set_vexpand(True)
-        canvas.set_margin_top(8)
+        canvas.set_margin_top(4)
         canvas.set_margin_bottom(14)
-        canvas.set_margin_start(18)
-        canvas.set_margin_end(18)
+        canvas.set_margin_start(16)
+        canvas.set_margin_end(16)
         self.toasts.set_child(canvas)
 
-        canvas.append(self._build_heading())
-        canvas.append(self._build_panel())
+        canvas.append(self._build_hero())
+        canvas.append(self._build_password())
         canvas.append(self._build_url_card())
         canvas.append(self._build_error())
         spacer = Gtk.Box()
@@ -90,72 +90,98 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
         self.set_content(toolbar)
 
-    def _build_heading(self) -> Gtk.Widget:
-        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        head.add_css_class("rc-heading")
+    # --- hero: what this does, its state and the power switch ---------------
 
-        kicker = Gtk.Label(label="ACCESO REMOTO")
-        kicker.add_css_class("rc-kicker")
-        kicker.set_halign(Gtk.Align.CENTER)
-        head.append(kicker)
+    def _build_hero(self) -> Gtk.Widget:
+        self.hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.hero.add_css_class("rc-card")
+        self.hero.add_css_class("rc-hero")
 
-        title = Gtk.Label(label="Túnel web")
-        title.add_css_class("rc-title")
-        title.set_halign(Gtk.Align.CENTER)
-        head.append(title)
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        badge = Gtk.Box()
+        badge.add_css_class("rc-badge")
+        badge.set_valign(Gtk.Align.CENTER)
+        icon = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
+        icon.set_pixel_size(22)
+        icon.set_hexpand(True)
+        icon.set_halign(Gtk.Align.CENTER)
+        badge.append(icon)
+        top.append(badge)
 
-        subtitle = Gtk.Label(
-            label="Enciende el switch para publicar tu terminal\nen una URL temporal.",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        subtitle.add_css_class("rc-subtitle")
-        head.append(subtitle)
-        return head
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        texts.set_hexpand(True)
+        texts.set_valign(Gtk.Align.CENTER)
+        title = Gtk.Label(label="Túnel web", xalign=0)
+        title.add_css_class("rc-hero-title")
+        texts.append(title)
+        self.hero_sub = Gtk.Label(label="Publica tu terminal en una URL temporal", xalign=0, wrap=True)
+        self.hero_sub.add_css_class("rc-hero-sub")
+        texts.append(self.hero_sub)
+        top.append(texts)
 
-    def _build_panel(self) -> Gtk.Widget:
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        panel.add_css_class("rc-panel")
-        panel.append(self._build_password())
-        panel.append(self._build_switch())
-        panel.append(self._build_status())
-        return panel
+        self.switch = Gtk.Switch()
+        self.switch.add_css_class("rc-switch")
+        self.switch.set_valign(Gtk.Align.CENTER)
+        self.switch.connect("state-set", self._on_switch_state_set)
+        top.append(self.switch)
+        self.hero.append(top)
 
-    def _build_status(self) -> Gtk.Widget:
-        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        status.add_css_class("rc-chip")
         status.add_css_class("rc-status")
-        status.set_halign(Gtk.Align.CENTER)
-
         self.status_dot = Gtk.Box()
         self.status_dot.add_css_class("rc-dot")
         self.status_dot.set_valign(Gtk.Align.CENTER)
         status.append(self.status_dot)
-
         self.status_label = Gtk.Label(label="Apagado", xalign=0)
         self.status_label.add_css_class("rc-status-label")
         self.status_label.add_css_class("off")
         status.append(self.status_label)
-        return status
+        chips.append(status)
+
+        self.lock_chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.lock_chip.add_css_class("rc-chip")
+        lock_icon = Gtk.Image.new_from_icon_name("system-lock-screen-symbolic")
+        lock_icon.set_pixel_size(12)
+        self.lock_chip.append(lock_icon)
+        self.lock_label = Gtk.Label(label="Con contraseña")
+        self.lock_chip.append(self.lock_label)
+        chips.append(self.lock_chip)
+        self.hero.append(chips)
+        return self.hero
+
+    # --- password ------------------------------------------------------------
 
     def _build_password(self) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.add_css_class("rc-pass")
-        label = Gtk.Label(label="CONTRASEÑA", xalign=0)
-        label.add_css_class("rc-pass-label")
-        box.append(label)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.add_css_class("rc-card")
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        label = Gtk.Label(label="Contraseña", xalign=0)
+        label.add_css_class("rc-card-title")
+        label.set_hexpand(True)
+        head.append(label)
+        self.strength_label = Gtk.Label(xalign=1)
+        self.strength_label.add_css_class("rc-strength")
+        head.append(self.strength_label)
+        box.append(head)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.password_entry = Gtk.Entry()
         self.password_entry.set_visibility(False)
-        self.password_entry.set_placeholder_text("Opcional")
+        self.password_entry.set_placeholder_text("Sin contraseña")
         self.password_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
         self.password_entry.set_hexpand(True)
-        self.password_entry.add_css_class("rc-pass-entry")
-        self.password_entry.set_icon_from_icon_name(
-            Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic"
-        )
+        self.password_entry.add_css_class("rc-field")
+        self.password_entry.add_css_class("rc-mono")
+        self.password_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
+        self.password_entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Mostrar")
         saved = read_password()
         clean = without_spaces(saved)
+        if not clean:
+            # First run (or an emptied file): start with a strong random one.
+            clean = generate_password()
         if clean != saved:
             try:
                 write_password(clean)
@@ -166,71 +192,118 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.password_entry.connect("changed", self._on_password_changed)
         row.append(self.password_entry)
 
-        self.copy_password_btn = Gtk.Button(label="Copiar")
-        self.copy_password_btn.add_css_class("rc-copy-btn")
-        self.copy_password_btn.set_valign(Gtk.Align.CENTER)
+        self.regen_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        self.regen_btn.set_tooltip_text("Generar otra contraseña")
+        self.regen_btn.add_css_class("rc-icon-btn")
+        self.regen_btn.connect("clicked", self._on_regen_password)
+        row.append(self.regen_btn)
+
+        self.copy_password_btn = Gtk.Button(icon_name="edit-copy-symbolic")
+        self.copy_password_btn.set_tooltip_text("Copiar contraseña")
+        self.copy_password_btn.add_css_class("rc-icon-btn")
+        self.copy_password_btn.add_css_class("accent")
         self.copy_password_btn.connect("clicked", self._on_copy_password)
         row.append(self.copy_password_btn)
         box.append(row)
 
-        self.strength_label = Gtk.Label(xalign=0)
-        self.strength_label.add_css_class("rc-strength")
-        self.strength_label.set_halign(Gtk.Align.START)
-        box.append(self.strength_label)
+        meter = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        meter.add_css_class("rc-meter")
+        self.meter_bars = []
+        for _ in range(4):
+            bar = Gtk.Box()
+            bar.add_css_class("rc-meter-bar")
+            bar.set_hexpand(True)
+            meter.append(bar)
+            self.meter_bars.append(bar)
+        box.append(meter)
+
+        self.pass_hint = Gtk.Label(xalign=0, wrap=True)
+        self.pass_hint.add_css_class("rc-hint-text")
+        box.append(self.pass_hint)
         self._refresh_strength()
         return box
 
-    def _build_switch(self) -> Gtk.Widget:
-        row = Gtk.Box(halign=Gtk.Align.CENTER)
-        row.add_css_class("rc-power")
-        self.switch = Gtk.Switch()
-        self.switch.set_valign(Gtk.Align.CENTER)
-        self.switch.set_halign(Gtk.Align.CENTER)
-        self.switch.connect("state-set", self._on_switch_state_set)
-        row.append(self.switch)
-        return row
+    def _on_regen_password(self, *_args) -> None:
+        self.password_entry.set_text(generate_password())
+        self._toast("Nueva contraseña generada")
 
     def _build_hint(self) -> Gtk.Widget:
-        hint = Gtk.Label(
-            label="Cloudflare Quick Tunnel  ·  ttyd Night Owl",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        hint.add_css_class("rc-hint")
-        hint.set_margin_top(4)
+        hint = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        hint.set_halign(Gtk.Align.CENTER)
+        hint.add_css_class("rc-footer")
+        icon = Gtk.Image.new_from_icon_name("network-wireless-encrypted-symbolic")
+        icon.set_pixel_size(12)
+        hint.append(icon)
+        hint.append(Gtk.Label(label="Cloudflare Quick Tunnel · ttyd"))
         return hint
 
+    # --- URLs (shown while the tunnel is up) ---------------------------------
+
+    def _url_row(self, title: str, entry: Gtk.Entry, actions: list[tuple[str, str, object]]) -> Gtk.Widget:
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        label = Gtk.Label(label=title, xalign=0)
+        label.add_css_class("rc-field-label")
+        wrap.append(label)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        entry.set_editable(False)
+        entry.set_hexpand(True)
+        entry.add_css_class("rc-field")
+        entry.add_css_class("rc-mono")
+        row.append(entry)
+        for icon, tip, handler in actions:
+            btn = Gtk.Button(icon_name=icon)
+            btn.set_tooltip_text(tip)
+            btn.add_css_class("rc-icon-btn")
+            btn.connect("clicked", handler)
+            row.append(btn)
+        wrap.append(row)
+        return wrap
+
     def _build_url_card(self) -> Gtk.Widget:
-        self.url_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.url_card.add_css_class("rc-url-card")
+        self.url_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.url_card.add_css_class("rc-card")
         self.url_card.set_visible(False)
 
-        label = Gtk.Label(label="URL PÚBLICA", xalign=0)
-        label.add_css_class("rc-url-label")
-        self.url_card.append(label)
+        head = Gtk.Label(label="Compartir", xalign=0)
+        head.add_css_class("rc-card-title")
+        self.url_card.append(head)
 
         self.url_entry = Gtk.Entry()
-        self.url_entry.set_editable(False)
-        self.url_entry.set_hexpand(True)
-        self.url_entry.add_css_class("rc-url-entry")
         self.url_entry.set_placeholder_text("https://….trycloudflare.com")
-        self.url_card.append(self.url_entry)
+        self.url_card.append(
+            self._url_row(
+                "URL pública",
+                self.url_entry,
+                [("edit-copy-symbolic", "Copiar URL pública", self._on_copy), ("web-browser-symbolic", "Abrir", self._on_open)],
+            )
+        )
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        actions.set_homogeneous(True)
-
-        copy_btn = Gtk.Button(label="Copiar")
-        copy_btn.add_css_class("rc-copy-btn")
-        copy_btn.connect("clicked", self._on_copy)
-        actions.append(copy_btn)
-
-        open_btn = Gtk.Button(label="Abrir")
-        open_btn.add_css_class("rc-open-btn")
-        open_btn.connect("clicked", self._on_open)
-        actions.append(open_btn)
-
-        self.url_card.append(actions)
+        # The address this PC serves (what the tunnel publishes), to tell apart
+        # several running copies or open it without going through Cloudflare.
+        self.local_entry = Gtk.Entry()
+        self.local_entry.set_text(self._local_url())
+        self.url_card.append(
+            self._url_row(
+                "URL local",
+                self.local_entry,
+                [("edit-copy-symbolic", "Copiar URL local", self._on_copy_local), ("web-browser-symbolic", "Abrir URL local", self._on_open_local)],
+            )
+        )
         return self.url_card
+
+    def _local_url(self) -> str:
+        return f"http://localhost:{self.tunnel.port}/"
+
+    def _on_copy_local(self, *_args) -> None:
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        display.get_clipboard().set(self._local_url())
+        self.local_entry.select_region(0, -1)
+        self._toast("URL local copiada")
+
+    def _on_open_local(self, *_args) -> None:
+        Gio.AppInfo.launch_default_for_uri(self._local_url(), None)
 
     def _build_error(self) -> Gtk.Widget:
         self.error_label = Gtk.Label(wrap=True, xalign=0)
@@ -453,10 +526,26 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         text = self.password_entry.get_text()
         kind = password_strength(text)
         self.strength_label.set_label(STRENGTH_LABEL[kind])
+        filled = {"none": 0, "weak": 1, "ok": 2, "strong": 4}[kind]
         for cls in ("none", "weak", "ok", "strong"):
             self.strength_label.remove_css_class(cls)
+            for bar in self.meter_bars:
+                bar.remove_css_class(cls)
         self.strength_label.add_css_class(kind)
+        for i, bar in enumerate(self.meter_bars):
+            if i < filled:
+                bar.add_css_class(kind)
         self.copy_password_btn.set_sensitive(bool(text))
+        self.pass_hint.set_label(
+            "Cualquiera con la URL podrá usar tu terminal." if not text else "Se pide al abrir la URL; se recuerda 30 días por dispositivo."
+        )
+        self.pass_hint.remove_css_class("warn")
+        if not text:
+            self.pass_hint.add_css_class("warn")
+        self.lock_label.set_label("Con contraseña" if text else "Sin contraseña")
+        self.lock_chip.remove_css_class("warn")
+        if not text:
+            self.lock_chip.add_css_class("warn")
 
     def _on_copy_password(self, *_args) -> None:
         text = self.password_entry.get_text()
@@ -478,6 +567,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _set_password_locked(self, locked: bool) -> None:
         self.password_entry.set_sensitive(not locked)
+        self.regen_btn.set_sensitive(not locked)
 
     def _set_switch(self, active: bool) -> None:
         self._syncing_switch = True
@@ -487,6 +577,16 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _set_status(self, kind: str, text: str) -> None:
         self.status_label.set_label(text)
+        self.hero_sub.set_label(
+            {
+                "on": "Tu terminal está publicada",
+                "busy": "Un momento…",
+                "off": "Publica tu terminal en una URL temporal",
+            }.get(kind, "")
+        )
+        for cls in ("on", "off", "busy"):
+            self.hero.remove_css_class(cls)
+        self.hero.add_css_class(kind)
         for cls in ("on", "off", "busy"):
             self.status_label.remove_css_class(cls)
             self.status_dot.remove_css_class(cls)

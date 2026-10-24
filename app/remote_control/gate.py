@@ -323,6 +323,20 @@ def password_strength(password: str) -> str:
     return "ok"
 
 
+_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+
+
+def generate_password(length: int = 16) -> str:
+    """Random alphanumeric password with upper, lower and digits (always "strong").
+
+    Look-alike characters (0/O, 1/l/I) are left out so it can be typed from a phone.
+    """
+    while True:
+        text = "".join(secrets.choice(_ALPHABET) for _ in range(length))
+        if any(c.islower() for c in text) and any(c.isupper() for c in text) and any(c.isdigit() for c in text):
+            return text
+
+
 STRENGTH_LABEL = {
     "none": "Sin contraseña",
     "weak": "Débil",
