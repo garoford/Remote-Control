@@ -346,6 +346,20 @@
     root.setAttribute("aria-modal", "true");
     root.setAttribute("aria-label", "Archivos");
     root.tabIndex = -1;
+    // The tap that opened the window (pointerup on the files button) is
+    // followed by its click; it must not land on whatever is now under it.
+    ["click", "mousedown", "mouseup", "dblclick", "contextmenu"].forEach(function (type) {
+      root.addEventListener(
+        type,
+        function (ev) {
+          if (Date.now() < openGuardUntil) {
+            ev.preventDefault();
+            ev.stopPropagation();
+          }
+        },
+        true
+      );
+    });
     root.addEventListener("mousedown", function (ev) {
       if (ev.target === root) close();
     });
@@ -502,8 +516,11 @@
 
   // --- open / close -------------------------------------------------------------------
 
+  var openGuardUntil = 0;
+
   function open(path) {
     if (!root) build();
+    if (!openNow) openGuardUntil = Date.now() + 450;
     if (!prefsLoaded) {
       readLocalPrefs();
       var mine = host().prefs ? host().prefs() : null;

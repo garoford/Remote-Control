@@ -385,6 +385,18 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
             return {"ok": False}
         ws["group"] = group["id"]
         return {"ok": True}
+    if kind == "order":
+        # Tab strip drag: the new order of this workspace's tabs.
+        wanted = op.get("tabs")
+        if not ws or not isinstance(wanted, list):
+            return {"ok": False}
+        mine = set(ws["tabs"])
+        ordered = []
+        for tab in wanted:
+            if isinstance(tab, str) and tab in mine and tab not in ordered:
+                ordered.append(tab)
+        ws["tabs"] = ordered + [t for t in ws["tabs"] if t not in ordered]
+        return {"ok": True}
     if kind == "rename":
         name = _clean_name(op.get("name"))
         if not ws or not name:

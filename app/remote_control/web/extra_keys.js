@@ -544,6 +544,26 @@
     term.write(bytes);
   }
 
+  // The browser tab title is the active tab's name. ttyd and the terminal
+  // (OSC title) keep trying to set it; those writes are dropped.
+  var nativeTitle = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  if (nativeTitle && nativeTitle.set) {
+    try {
+      Object.defineProperty(document, "title", {
+        configurable: true,
+        get: function () {
+          return nativeTitle.get.call(document);
+        },
+        set: function () {},
+      });
+    } catch (_) {}
+  }
+
+  function setPageTitle(text) {
+    if (!nativeTitle || !nativeTitle.set || !text) return;
+    if (nativeTitle.get.call(document) !== text) nativeTitle.set.call(document, text);
+  }
+
   function writePane(pane, data) {
     var bytes = null;
     if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
@@ -554,12 +574,8 @@
       writeOutput(pane, bytes.subarray(1));
       return;
     }
-    if (cmd === 49 && pane.id === tabId()) {
-      try {
-        document.title = new TextDecoder().decode(bytes.subarray(1));
-      } catch (_) {}
-      return;
-    }
+    if (cmd === 49) return; // window title: the browser tab shows our tab name
+
     if (cmd !== 50 || !pane.term || !pane.term.options) return;
     try {
       var prefs = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
@@ -3864,7 +3880,17 @@
         created: Date.now() / 1000,
       });
     }
+    // The workspace keeps the order (drag to reorder); tabs it does not list
+    // yet go last, oldest first.
+    var ws = typeof currentWs === "function" ? currentWs() : null;
+    var rank = {};
+    ((ws && ws.tabs) || []).forEach(function (id, i) {
+      rank[id] = i;
+    });
     items.sort(function (a, b) {
+      var ra = a.id in rank ? rank[a.id] : Infinity;
+      var rb = b.id in rank ? rank[b.id] : Infinity;
+      if (ra !== rb) return ra < rb ? -1 : 1;
       var delta = (a.created || 0) - (b.created || 0);
       if (delta) return delta;
       return String(a.id).localeCompare(String(b.id));
@@ -3968,6 +3994,204 @@
     if (close) close.setAttribute("aria-label", "Cerrar " + label);
   }
 
+  // --- drag to reorder ----------------------------------------------------------
+  // Mouse: press and move. Touch: hold ~300ms first, so a swipe still scrolls
+  // the strip. The new order goes to the workspace on the server.
+  var tabDrag = null;
+
+  function slideSiblings(host, moved, before) {
+    host.querySelectorAll(".rc-tab").forEach(function (tab) {
+      if (tab === moved || !(tab.dataset.id in before)) return;
+      var dx = before[tab.dataset.id] - tab.offsetLeft;
+      if (!dx) return;
+      tab.style.transition = "none";
+      tab.style.transform = "translateX(" + dx + "px)";
+      requestAnimationFrame(function () {
+        tab.style.transition = "transform 160ms ease";
+        tab.style.transform = "";
+      });
+    });
+  }
+
+  function dragMove(x) {
+    var d = tabDrag;
+    var host = d.host;
+    var hr = host.getBoundingClientRect();
+    if (x < hr.left + 32) host.scrollLeft -= 10;
+    else if (x > hr.right - 32) host.scrollLeft += 10;
+    var tabs = Array.prototype.slice.call(host.querySelectorAll(".rc-tab"));
+    var me = d.el;
+    var idx = tabs.indexOf(me);
+    var target = null;
+    var after = false;
+    tabs.forEach(function (tab, i) {
+      if (tab === me || target) return;
+      var r = tab.getBoundingClientRect();
+      var mid = r.left + r.width / 2;
+      if (i < idx && x < mid) target = tab;
+      else if (i > idx && x > mid) {
+        target = tab;
+        after = true;
+      }
+    });
+    if (target) {
+      var before = {};
+      tabs.forEach(function (tab) {
+        before[tab.dataset.id] = tab.offsetLeft;
+      });
+      if (after) host.insertBefore(me, target.nextSibling);
+      else host.insertBefore(me, target);
+      slideSiblings(host, me, before);
+    }
+    // Screen coordinates on both sides: where the tab sits without the
+    // transform, and where the pointer wants it (clamped to the strip).
+    var natural = me.getBoundingClientRect().left - (d.tx || 0);
+    var want = x - d.grab;
+    want = Math.max(hr.left, Math.min(hr.right - me.offsetWidth, want));
+    d.tx = Math.round(want - natural);
+    me.style.transform = "translateX(" + d.tx + "px)";
+  }
+
+  function dragEnd(commit) {
+    var d = tabDrag;
+    if (!d) return;
+    clearTimeout(d.hold);
+    tabDrag = null;
+    document.documentElement.classList.remove("rc-tab-dragging");
+    var me = d.el;
+    me.classList.remove("is-dragging");
+    if (!d.active) {
+      me.style.transform = "";
+      return;
+    }
+    me.__rcDragged = true;
+    setTimeout(function () {
+      me.__rcDragged = false;
+    }, 400);
+    me.style.transition = "transform 140ms ease";
+    me.style.transform = "";
+    setTimeout(function () {
+      me.style.transition = "";
+    }, 160);
+    var order = Array.prototype.map.call(d.host.querySelectorAll(".rc-tab"), function (tab) {
+      return tab.dataset.id;
+    });
+    if (!commit || order.join() === d.start.join()) {
+      setTimeout(function () {
+        paintSessions(sessionCache);
+      }, 170);
+      return;
+    }
+    var ws = currentWs();
+    if (!ws) return;
+    var rest = ws.tabs.filter(function (id) {
+      return order.indexOf(id) === -1;
+    });
+    ws.tabs = order
+      .filter(function (id) {
+        return ws.tabs.indexOf(id) !== -1;
+      })
+      .concat(rest);
+    wsPost({ op: "order", id: ws.id, tabs: ws.tabs });
+  }
+
+  function dragPointerMove(ev) {
+    var d = tabDrag;
+    if (!d) return;
+    // The button came up where we could not hear it (outside the window).
+    if (!d.touch && ev.pointerType === "mouse" && !(ev.buttons & 1)) {
+      dragEnd(d.active);
+      return;
+    }
+    if (ev.pointerId !== d.id) return;
+    var dx = ev.clientX - d.x0;
+    var dy = ev.clientY - d.y0;
+    if (!d.active) {
+      if (d.touch) {
+        // moved before the hold: it is a scroll, not a drag
+        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) dragEnd(false);
+        return;
+      }
+      if (Math.abs(dx) < 5) return;
+      d.begin();
+    }
+    ev.preventDefault();
+    dragMove(ev.clientX);
+  }
+
+  function dragPointerUp(ev) {
+    if (tabDrag && ev.pointerId === tabDrag.id) dragEnd(ev.type === "pointerup" || tabDrag.active);
+  }
+
+  // Listened on the window: moving the tab in the DOM drops pointer capture.
+  window.addEventListener("pointermove", dragPointerMove, true);
+  window.addEventListener("pointerup", dragPointerUp, true);
+  window.addEventListener("pointercancel", dragPointerUp, true);
+  window.addEventListener(
+    "mouseup",
+    function () {
+      if (tabDrag && !tabDrag.touch) dragEnd(tabDrag.active);
+    },
+    true
+  );
+  window.addEventListener("blur", function () {
+    if (tabDrag) dragEnd(tabDrag.active);
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && tabDrag) dragEnd(tabDrag.active);
+  });
+
+  function armTabDrag(el) {
+    el.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0 || tabDrag) return;
+      if (ev.target && ev.target.closest && ev.target.closest(".rc-tab-close")) return;
+      var host = el.parentNode;
+      if (!host) return;
+      var r = el.getBoundingClientRect();
+      var touch = ev.pointerType !== "mouse";
+      var d = {
+        el: el,
+        host: host,
+        id: ev.pointerId,
+        x0: ev.clientX,
+        y0: ev.clientY,
+        grab: ev.clientX - r.left,
+        active: false,
+        touch: touch,
+        hold: 0,
+        start: Array.prototype.map.call(host.querySelectorAll(".rc-tab"), function (tab) {
+          return tab.dataset.id;
+        }),
+      };
+      d.begin = function () {
+        if (tabDrag !== d) return;
+        d.active = true;
+        el.classList.add("is-dragging");
+        document.documentElement.classList.add("rc-tab-dragging");
+        if (touch && navigator.vibrate) {
+          try {
+            navigator.vibrate(12);
+          } catch (_) {}
+        }
+      };
+      tabDrag = d;
+      if (touch) d.hold = setTimeout(d.begin, 300);
+    });
+    el.addEventListener("contextmenu", function (ev) {
+      // long-press menu on phones would fight the hold-to-drag
+      if (tabDrag && tabDrag.touch) ev.preventDefault();
+    });
+  }
+
+  // Once a held tab is being dragged, the finger must not scroll the strip.
+  document.addEventListener(
+    "touchmove",
+    function (ev) {
+      if (tabDrag && tabDrag.active) ev.preventDefault();
+    },
+    { passive: false }
+  );
+
   function makeTab() {
     var el = document.createElement("div");
     el.className = "rc-tab";
@@ -3985,9 +4209,14 @@
       closeSession(el.dataset.id, ev);
     });
     el.addEventListener("click", function (ev) {
+      if (el.__rcDragged) {
+        el.__rcDragged = false;
+        return;
+      }
       if (ev.target && ev.target.closest && ev.target.closest(".rc-tab-close")) return;
       openSession(el.dataset.id);
     });
+    armTabDrag(el);
     el.addEventListener("auxclick", function (ev) {
       if (ev.button !== 1) return;
       closeSession(el.dataset.id, ev);
@@ -4005,7 +4234,7 @@
   function paintSessions(list) {
     if (Array.isArray(list)) sessionCache = list;
     var host = document.getElementById("rc-session-tabs");
-    if (!host) return;
+    if (!host || (tabDrag && tabDrag.active)) return;
     var current = tabId();
     var items = orderedSessions(
       inWorkspace(sessionCache).filter(function (item) {
@@ -4037,6 +4266,9 @@
         if (nodes[index]) fillTab(nodes[index], item, counts, current);
       });
     }
+    items.forEach(function (item) {
+      if (item.id === current) setPageTitle(sessionLabel(item, counts));
+    });
     if (host.dataset.active !== current) {
       host.dataset.active = current;
       var active = host.querySelector(".is-active");
