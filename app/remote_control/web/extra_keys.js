@@ -742,6 +742,52 @@
     });
   }
 
+  // ttyd loads WebGL only for its own terminal; ours would fall back to the DOM
+  // renderer, which draws block characters (QR codes, ASCII art) from the font
+  // and leaves thin seams between cells. Reuse ttyd's addon class instead.
+  function gpuAddonClass() {
+    try {
+      var addons = (window.term && window.term._addonManager && window.term._addonManager._addons) || [];
+      for (var i = 0; i < addons.length; i++) {
+        var inst = addons[i] && addons[i].instance;
+        if (inst && typeof inst.clearTextureAtlas === "function") return inst.constructor;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function loadGpu(term) {
+    var Gpu = gpuAddonClass();
+    if (!Gpu) return;
+    try {
+      var addon = new Gpu();
+      term.loadAddon(addon);
+      if (typeof addon.onContextLoss === "function") {
+        addon.onContextLoss(function () {
+          try {
+            addon.dispose();
+          } catch (_) {}
+        });
+      }
+    } catch (_) {}
+  }
+
+  // ttyd switches its own terminal to Unicode 11 widths. A pane left on the
+  // default (Unicode 6) counts emoji like 🔒 or ⚠ as one column while the app
+  // printing them counts two, so the rest of that line slides over (TUI borders,
+  // QR codes, prompts). Give every pane the primary's width tables.
+  function matchUnicode(term) {
+    try {
+      var src = window.term && window.term._core && window.term._core.unicodeService;
+      var dst = term._core && term._core.unicodeService;
+      var version = window.term.unicode.activeVersion;
+      if (!src || !dst || !version || term.unicode.activeVersion === version) return;
+      var provider = src._providers && src._providers[version];
+      if (provider && !(dst._providers && dst._providers[version])) dst.register(provider);
+      term.unicode.activeVersion = version;
+    } catch (_) {}
+  }
+
   function buildPane(id) {
     var proto = window.term;
     var Term = proto && proto.constructor;
@@ -756,7 +802,10 @@
     try {
       term = new Term(termOptions(proto.options));
       term.open(host);
+      matchUnicode(term);
       lockTheme(term);
+      loadGpu(term);
+      host.__rcTerm = term;
       hookOsc52(term);
     } catch (_) {
       host.remove();
@@ -5570,19 +5619,6 @@
     return themeMode() === "light" || lookSeeThrough() ? 4.5 : 1;
   }
 
-  // The WebGL renderer smooths glyph edges against one fixed color, which
-  // leaves halos over a picture. With a see-through look the terminal falls
-  // back to the DOM renderer (real text, real transparency).
-  function dropGpuRenderer(term) {
-    try {
-      var addons = (term._addonManager && term._addonManager._addons) || [];
-      addons.slice().forEach(function (entry) {
-        var inst = entry && entry.instance;
-        if (inst && typeof inst.clearTextureAtlas === "function") inst.dispose();
-      });
-    } catch (_) {}
-  }
-
   function termPalette() {
     var look = myLook();
     if (look.kind === "color") {
@@ -5614,12 +5650,6 @@
           get: desc.get,
           set: function () {
             desc.set.call(opts, termPalette());
-            // ttyd reapplies its preferences (renderer included) on reconnect.
-            if (lookSeeThrough()) {
-              setTimeout(function () {
-                dropGpuRenderer(term);
-              }, 50);
-            }
           },
         });
       } catch (_) {}
@@ -5661,7 +5691,6 @@
           term.options.theme = termPalette();
         } catch (_) {}
       }
-      if (clear) dropGpuRenderer(term);
     });
     paintLookLayer();
     paintThemeSwitch();

@@ -22,6 +22,7 @@ from remote_control.gate import (
     without_spaces,
     write_password,
 )
+from remote_control import control
 from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
@@ -30,7 +31,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Remote Control")
-        self.set_default_size(380, 640)
+        self.set_default_size(400, 890)
         self.set_resizable(False)
         self.add_css_class("rc-window")
 
@@ -77,11 +78,16 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         canvas.set_margin_bottom(14)
         canvas.set_margin_start(16)
         canvas.set_margin_end(16)
-        self.toasts.set_child(canvas)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_child(canvas)
+        self.toasts.set_child(scroll)
 
         canvas.append(self._build_hero())
         canvas.append(self._build_password())
         canvas.append(self._build_url_card())
+        canvas.append(self._build_qr_card())
         canvas.append(self._build_error())
         spacer = Gtk.Box()
         spacer.set_vexpand(True)
@@ -278,6 +284,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             )
         )
 
+
         # The address this PC serves (what the tunnel publishes), to tell apart
         # several running copies or open it without going through Cloudflare.
         self.local_entry = Gtk.Entry()
@@ -290,6 +297,47 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             )
         )
         return self.url_card
+
+    # --- QR of the public URL (only that one: the local URL is useless elsewhere)
+
+    def _build_qr_card(self) -> Gtk.Widget:
+        self.qr_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.qr_card.add_css_class("rc-card")
+        self.qr_card.set_visible(False)
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Label(label="Abrir en el celular", xalign=0)
+        title.add_css_class("rc-card-title")
+        title.set_hexpand(True)
+        head.append(title)
+        hint = Gtk.Label(label="Escanea la URL pública", xalign=1)
+        hint.add_css_class("rc-hint-text")
+        head.append(hint)
+        self.qr_card.append(head)
+        frame = Gtk.Box()
+        frame.add_css_class("rc-qr")
+        frame.set_halign(Gtk.Align.CENTER)
+        self.qr_picture = Gtk.Picture()
+        self.qr_picture.set_size_request(190, 190)
+        self.qr_picture.set_can_shrink(True)
+        frame.append(self.qr_picture)
+        self.qr_card.append(frame)
+        self._qr_for = ""
+        return self.qr_card
+
+    def _paint_qr(self) -> None:
+        """Show the QR card while the tunnel is up (and segno is installed)."""
+        url = self._current_url
+        if not url:
+            self.qr_card.set_visible(False)
+            return
+        if self._qr_for != url:
+            png = control.qr_png(url, scale=8)
+            if png is None:
+                self.qr_card.set_visible(False)
+                return
+            self.qr_picture.set_paintable(Gdk.Texture.new_from_bytes(GLib.Bytes.new(png)))
+            self._qr_for = url
+        self.qr_card.set_visible(True)
 
     def _local_url(self) -> str:
         return f"http://localhost:{self.tunnel.port}/"
@@ -318,6 +366,9 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._start_async()
             return True
         if self.tunnel.status().running or self._current_url:
+            if control.inside_tunnel():
+                self._toast("Estás dentro del túnel: apágalo desde la PC")
+                return True
             self._show_stop_dialog()
             return True
         return False
@@ -351,6 +402,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.url_entry.set_text(url)
         self.url_entry.select_region(0, -1)
         self.url_card.set_visible(True)
+        self._paint_qr()
         self._set_switch(True)
         if self._local_dns_ok(url):
             self._set_status("on", "En línea")
@@ -364,6 +416,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.switch.set_sensitive(True)
         self._current_url = None
         self.url_card.set_visible(False)
+        self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
         self._set_password_locked(False)
@@ -434,6 +487,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._current_url = None
         self.url_entry.set_text("")
         self.url_card.set_visible(False)
+        self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
         self._set_password_locked(False)
@@ -484,6 +538,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._current_url = status.url
             self.url_entry.set_text(status.url)
             self.url_card.set_visible(True)
+            self._paint_qr()
             if self._local_dns_ok(status.url):
                 self._set_status("on", "En línea")
             else:
@@ -495,6 +550,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             return
         self._current_url = None
         self.url_card.set_visible(False)
+        self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
         self._set_password_locked(False)

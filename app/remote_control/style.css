@@ -392,3 +392,11 @@ toast {
   border: 1px solid alpha(@rc_on, 0.3);
   border-radius: 12px;
 }
+
+/* QR of the public URL */
+.rc-qr {
+  padding: 12px;
+  border-radius: 16px;
+  background-color: #ffffff;
+  box-shadow: 0 8px 22px alpha(black, 0.3);
+}

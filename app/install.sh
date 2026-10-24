@@ -17,6 +17,13 @@ mkdir -p "$ICON_BASE/256x256/apps" "$ICON_BASE/128x128/apps" "$ICON_BASE/64x64/a
 rsync -a --delete "$ROOT/remote_control/" "$APP_SHARE/remote_control/"
 install -m 755 "$ROOT/update.sh" "$APP_SHARE/update.sh"
 
+# `remote-control cli` (Textual) and the QR code (segno, also used by the window).
+# User-level, no sudo; the app still runs without them, minus those features.
+if ! python3 -c "import textual, segno" >/dev/null 2>&1; then
+  python3 -m pip install --user --quiet textual segno \
+    || printf '%s\n' "Aviso: no pude instalar textual/segno; 'remote-control cli' y el QR no estarán."
+fi
+
 cat > "$BIN/remote-control" <<'EOF'
 #!/usr/bin/env python3
 import sys
