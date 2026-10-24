@@ -3950,7 +3950,9 @@
   // Throttled per connection: switching tabs must claim the new tab at once
   // even if the old one was just claimed by the same tap.
   function claimSize() {
-    if (document.hidden) return;
+    // herdr gives each device its own view (no size to claim), and a focus
+    // report makes herdr re-ask the terminal's colors, repainting the others.
+    if (document.hidden || onHerdrTab()) return;
     var ws = window.__rcTermSocket;
     if (!ws || ws.readyState !== 1) return;
     var now = Date.now();

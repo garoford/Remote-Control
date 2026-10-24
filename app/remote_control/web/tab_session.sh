@@ -110,7 +110,10 @@ if [[ -n "$dev" ]]; then
       while sleep 1; do
         kill -0 "$shell_pid" 2>/dev/null || exit 0
         tmux "${args[@]}" has-session -t "=$name" 2>/dev/null || exit 0
-        where="$(tmux "${args[@]}" display-message -p -c "$me" '#{client_session}' 2>/dev/null || true)"
+        # display-message -c ignores the client for formats (it answers for
+        # the most recently active one), so look this client up by name.
+        where="$(tmux "${args[@]}" list-clients -F '#{client_name} #{client_session}' 2>/dev/null \
+          | awk -v me="$me" '$1 == me { print $2 }' || true)"
         if [[ "$where" == "$name" && "$(pane_cmd)" == "herdr" ]] && make_view; then
           tmux "${args[@]}" refresh-client -t "$me" -f '!ignore-size' 2>/dev/null || true
           tmux "${args[@]}" switch-client -c "$me" -t "=$view" 2>/dev/null || true
