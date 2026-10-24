@@ -12,6 +12,7 @@ TAB_RE = re.compile(r"^rc[a-z0-9]{10,32}$")
 MAX_RETURN_LINES = 20000
 TMUX_SOCKET = "cf-remote"
 CLOSED_KEEP_S = 7 * 24 * 3600
+BUSY_S = 8
 
 
 def closed_dir() -> Path:
@@ -362,9 +363,10 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_activity}\t#{pane_current_path}\t"
-        "#{pane_current_command}\t#{session_attached}\t#{session_created}",
+        "#{pane_current_command}\t#{session_attached}\t#{session_created}\t#{window_activity}",
         text=True,
     )
+    now = time.time()
     if result.returncode != 0 or not result.stdout.strip():
         return []
     sessions: list[dict] = []
@@ -389,6 +391,12 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
                 created = int(parts[5])
             except ValueError:
                 created = 0
+        # Output in the last few seconds (window_activity moves on output):
+        # the tab strip shows it as a live dot.
+        try:
+            busy = len(parts) > 6 and now - int(parts[6]) < BUSY_S
+        except ValueError:
+            busy = False
         path = parts[2]
         home = str(Path.home())
         if path == home:
@@ -403,6 +411,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
                 "command": parts[3],
                 "attached": attached,
                 "created": created,
+                "busy": busy,
             }
         )
     sessions.sort(key=lambda item: item["activity"], reverse=True)

@@ -3986,6 +3986,7 @@
     var label = sessionLabel(item, counts);
     el.dataset.id = item.id;
     el.classList.toggle("is-active", item.id === current);
+    el.classList.toggle("is-busy", !!item.busy);
     el.setAttribute("aria-selected", item.id === current ? "true" : "false");
     el.title = item.path || label;
     var text = el.querySelector(".rc-tab-label");
@@ -5723,7 +5724,7 @@
   function pastel(hex) {
     var hsl = rgbHsl(hexRgb(hex));
     if (hsl[1] < 0.08) return rgbHex(hslRgb(hsl[0], 0.05, 0.87));
-    return rgbHex(hslRgb(hsl[0], Math.max(0.38, Math.min(hsl[1], 0.62)), 0.85));
+    return rgbHex(hslRgb(hsl[0], Math.max(0.5, Math.min(hsl[1], 0.75)), 0.79));
   }
 
   function colorFor(hex, mode) {
@@ -5866,7 +5867,7 @@
     return { tint: raw.tint, accent: raw.accent, accent2: raw.accent2 || "", light: light, kind: look.kind };
   }
 
-  var UI_TINT_KEYS = ["--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb", "--rc-blue", "--rc-blue-rgb", "--rc-teal", "--rc-teal-rgb", "--rc-on", "--rc-on-rgb"];
+  var UI_TINT_KEYS = ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb", "--rc-blue", "--rc-blue-rgb", "--rc-teal", "--rc-teal-rgb", "--rc-on", "--rc-on-rgb"];
 
   // Surfaces take the hue of the background; the accent replaces blue/teal.
   function paintUiTint() {
@@ -5887,8 +5888,10 @@
     var accent;
     var accent2;
     if (t.light) {
-      var ls = sat < 0.08 ? 0.05 : Math.max(0.3, Math.min(sat, 0.5));
-      surf = [hslRgb(hue, ls, 0.88), hslRgb(hue, ls, 0.91), hslRgb(hue, ls, 0.82)];
+      // Same pastel family as the light veil (s 0.5-0.75), so the bars and
+      // panels carry real color instead of near-white.
+      var ls = sat < 0.08 ? 0.08 : Math.max(0.6, Math.min(sat, 0.85));
+      surf = [hslRgb(hue, ls, 0.76), hslRgb(hue, ls, 0.8), hslRgb(hue, ls, 0.7)];
       var as = acc[1] < 0.12 ? 0 : Math.max(0.5, acc[1]);
       accent = as ? hslRgb(acc[0], as, 0.42) : [47, 127, 208];
       accent2 = as ? hslRgb(acc2Hue, as, 0.36) : [42, 162, 152];
@@ -5904,6 +5907,22 @@
     };
     // A solid color is the terminal itself: the area around it must match exactly.
     set("--rc-bg", t.kind === "color" ? t.tint : rgbHex(surf[0]));
+    // Backdrops and shadows (modal, drawer, cards) darken with the look's own
+    // hue instead of Night Owl navy.
+    var shade = t.light ? hslRgb(hue, Math.min(sat, 0.35), 0.3) : hslRgb(hue, sat < 0.08 ? 0.06 : Math.max(0.3, Math.min(sat, 0.6)), 0.05);
+    set("--rc-shade", shade.join(" "));
+    // Light mode text: deep shades of the same hue, so labels read clearly on
+    // the pastel instead of a washed-out blue-grey.
+    if (t.light) {
+      var ink = hslRgb(hue, Math.min(sat, 0.5), 0.14);
+      set("--rc-text", rgbHex(ink));
+      set("--rc-text-rgb", ink.join(" "));
+      set("--rc-muted", rgbHex(hslRgb(hue, Math.min(sat, 0.4), 0.3)));
+    } else {
+      style.removeProperty("--rc-text");
+      style.removeProperty("--rc-text-rgb");
+      style.removeProperty("--rc-muted");
+    }
     set("--rc-surface", rgbHex(surf[1]));
     set("--rc-raised", rgbHex(surf[2]));
     set("--rc-surface-rgb", surf[1].join(" "));
@@ -5935,7 +5954,12 @@
   // look's own hue in light mode.
   function veilRgb() {
     var t = lookTint();
-    if (themeMode() === "light") return t ? hexRgb(pastel(t.tint)) : [236, 240, 246];
+    if (themeMode() === "light") {
+      if (!t) return [236, 240, 246];
+      // Light mode: a pastel with real color, not near-white.
+      var lh = rgbHsl(hexRgb(t.tint));
+      return hslRgb(lh[0], lh[1] < 0.08 ? 0.08 : Math.max(0.6, Math.min(lh[1], 0.85)), 0.74);
+    }
     if (!t) return [1, 22, 39];
     // Dark mode: a near-black of the look's own hue, not Night Owl navy.
     var hsl = rgbHsl(hexRgb(t.tint));
