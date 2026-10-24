@@ -73,7 +73,9 @@ class RemoteControlTUI(App):
     CSS = """
     /* A compact panel, centred both ways; it scrolls only when the terminal
        is shorter than the panel. */
-    Screen { background: #011627; color: #d6deeb; align: center middle; }
+    /* ansi_default: the terminal's own background shows through (the
+       picture or color chosen in Remote Control, any terminal theme). */
+    Screen { background: ansi_default; color: #d6deeb; align: center middle; }
     #body { width: auto; height: auto; max-height: 100%; padding: 0 1; scrollbar-size-vertical: 1; }
     /* Wide terminal: controls on the left, QR on the right (like btop's panes).
        Narrow (phone, split pane): one column. */
@@ -87,7 +89,7 @@ class RemoteControlTUI(App):
     #cols.off #right { display: none; }
     .card {
         height: auto; margin: 0 0 1 0; padding: 0 2;
-        background: #011627; border: round #1d3b53;
+        background: ansi_default; border: round #1d3b53;
         border-title-color: #d6deeb; border-title-style: bold;
         border-subtitle-color: #8a9bb3;
     }
@@ -140,7 +142,7 @@ class RemoteControlTUI(App):
     #confirm-buttons Button { margin-left: 1; }
     #yes { background: #ef5350; color: #011627; text-style: bold; }
     ModalScreen { align: center middle; background: #011627 70%; }
-    Footer { background: #0b2942; }
+    Footer { background: ansi_default; }
     """
 
     BINDINGS = [
@@ -153,7 +155,9 @@ class RemoteControlTUI(App):
     ]
 
     def __init__(self) -> None:
-        super().__init__()
+        # ansi_color keeps "ansi_default" as the terminal's own background
+        # instead of turning it into a fixed color.
+        super().__init__(ansi_color=True)
         self.tunnel = TunnelService()
         self.inside = control.inside_tunnel()
         self.busy = False
