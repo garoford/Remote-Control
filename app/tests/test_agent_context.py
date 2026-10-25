@@ -56,6 +56,7 @@ class AgentContextTests(unittest.TestCase):
         self.assertIn("**You are `Rosa Diaz` (profile `rosa-diaz`).**", rosa)
         self.assertIn(f"HOME `{self.rosa}`, launch with `RC_PROFILE=rosa-diaz`  ← you", rosa)
         self.assertNotIn("← you", shared)
+        self.assertIn("yes: use `rc`", mine)
         self.assertIn("cannot say", shared)
 
     def test_sync_twice_keeps_one_block_and_updates_it(self) -> None:

@@ -33,6 +33,7 @@ TARGETS = (
     (".qwen/QWEN.md", ".qwen", ("qwen",)),
     (".config/opencode/AGENTS.md", ".config/opencode", ("opencode",)),
     (".copilot/copilot-instructions.md", ".copilot", ("copilot",)),
+    (".pi/agent/AGENTS.md", ".pi", ("pi",)),
 )
 # Cursor Agent has no global rules file: it reads AGENTS.md in every folder
 # from the project up to /, so the primary HOME's one reaches projects there.
@@ -66,6 +67,7 @@ def render(me: str | None) -> str:
         mark = "  ← you" if pid == me else ""
         users.append(f"- {_who(pid, label)}: HOME `{home}`, launch with `RC_PROFILE={pid}`{mark}")
     primary_home = homes[0][2]
+    rc = primary_home / ".local" / "share" / "remote-control" / "bin" / "rc"
     if me is None:
         you = [
             "**Who you are:** this file is shared by every user, so it cannot say. In Cursor Agent",
@@ -87,6 +89,20 @@ def render(me: str | None) -> str:
             "",
             *you,
             "",
+            "### Other agents: yes, you can see them",
+            "",
+            "Other AI agents run here at the same time, yours and other users', in herdr panes and in",
+            "plain Remote Control tabs. When asked whether you can see or reach other agents, the",
+            f"answer is yes: use `rc` (`{rc}` if it is not on PATH).",
+            "",
+            "- `rc agents`: every agent with its id, CLI, owner (which user), status and folder.",
+            "- `rc agents --here`: the other agents working in your project (same git repo). Run it",
+            "  before editing a shared project and coordinate if someone else is in it.",
+            "- `rc read <id>`: that agent's screen. `rc prompt <id> \"text\"`: write to it. For an",
+            "  agent of another user, ask your user first; its owner is notified. Always use",
+            "  `rc prompt`, not `herdr agent prompt`, so they know who wrote.",
+            "- `rc whoami`: your profile and pane. Full herdr control: `herdr --skill`.",
+            "",
             "Several people use this machine at the same time through Remote Control, each with",
             "their own AI CLI logins. They all are the same Linux user: a profile is just another",
             "HOME, and its CLI logins and tokens (`.claude`, `.codex`, `.cursor`, `.gemini`,",
@@ -100,13 +116,9 @@ def render(me: str | None) -> str:
             "- Launch an agent as a given user: `RC_PROFILE=<id> claude` (`RC_PROFILE= claude` for",
             "  the primary). Without it a CLI takes the profile of whichever device typed last in",
             "  Remote Control, which may be someone else.",
-            "- herdr belongs to the primary user: one server for everyone, so `herdr agent list`",
-            "  shows every user's agents. Open a pane for a user's agent with",
-            "  `herdr pane split --current --direction right --cwd \"$PWD\" --no-focus --env RC_PROFILE=<id>`",
+            "- herdr belongs to the primary user: one server for everyone. Open a pane for a user's",
+            "  agent with `herdr pane split --current --direction right --cwd \"$PWD\" --no-focus --env RC_PROFILE=<id>`",
             "  and then `herdr agent start <name> --kind <kind> --pane <new-pane-id>`.",
-            "- Whose an agent is: `herdr pane process-info --pane <pane-id>` gives its pid, then",
-            "  `tr '\\0' '\\n' < /proc/<pid>/environ | grep -E '^(HOME|RC_PROFILE)='`. Ask your user",
-            "  before prompting an agent that belongs to someone else.",
             "- herdr integrations live in each HOME: `HOME=<home> herdr integration install <kind>`.",
             END,
             "",

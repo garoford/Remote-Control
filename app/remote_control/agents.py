@@ -1,0 +1,406 @@
+"""Every AI agent on the machine, whoever's it is: the `rc` command.
+
+Agents run in two places: herdr panes (one herdr server, the primary user's,
+for everyone) and plain Remote Control tabs (tmux socket cf-remote), which
+herdr does not see. Each runs with the account of a profile (profiles.py), so
+the owner of an agent is the RC_PROFILE its CLI was started with.
+
+An agent of a profile has that profile's HOME, where herdr finds no server:
+everything here talks to the primary HOME's herdr socket explicitly.
+
+Writing to another user's agent goes through `rc prompt`, which says who it
+comes from and leaves a note the owner's devices show (workspaces payload).
+All users are the same Linux user, so this is courtesy, not a lock.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from . import profiles
+from .history import TMUX_SOCKET
+from .workspaces import PROFILE_CLIS, PROFILE_RE, _children, _cmdline
+
+AGENT_CLIS = PROFILE_CLIS | {"pi"}
+NOTES_KEEP = 200
+NOTES_FRESH = 15 * 60
+PREVIEW_MAX = 200
+
+
+def primary_home() -> Path:
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return Path.home()
+
+
+def herdr_socket() -> str:
+    return str(primary_home() / ".config" / "herdr" / "herdr.sock")
+
+
+def notes_file() -> Path:
+    return primary_home() / ".local" / "share" / "remote-control" / "agent-messages.jsonl"
+
+
+def _run(cmd: list[str], timeout: float = 5) -> subprocess.CompletedProcess | None:
+    env = {**os.environ, "HOME": str(primary_home()), "HERDR_SOCKET_PATH": herdr_socket()}
+    try:
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _herdr(*args: str) -> dict | None:
+    out = _run(["herdr", *args])
+    if not out or out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return None
+    return data.get("result") if isinstance(data, dict) else None
+
+
+def _tmux(*args: str, socket: str = TMUX_SOCKET) -> str:
+    out = _run(["tmux", "-L", socket, *args])
+    return out.stdout if out and out.returncode == 0 else ""
+
+
+def label_of(pid: str) -> str:
+    if not pid:
+        return profiles.primary_name()
+    for p in profiles.list_profiles():
+        if p["id"] == pid:
+            return p["label"]
+    return pid
+
+
+def _profile_of_home(home: str) -> str:
+    base = str(primary_home() / ".local" / "share" / "remote-control" / "profiles") + "/"
+    if not home.startswith(base):
+        return ""
+    name = home[len(base) :].split("/")[0]
+    return name if PROFILE_RE.match(name) else ""
+
+
+def owner_of(pid: int) -> str:
+    """The profile an agent process runs with: its RC_PROFILE, else its HOME.
+
+    Read from the CLI itself, never from what runs below it: an agent may
+    launch another one with a different RC_PROFILE.
+    """
+    try:
+        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return ""
+    values = dict(item.split(b"=", 1) for item in env if b"=" in item)
+    prof = values.get(b"RC_PROFILE")
+    if prof is not None:
+        prof_s = prof.decode("ascii", "replace")
+        return prof_s if PROFILE_RE.match(prof_s) else ""
+    return _profile_of_home(values.get(b"HOME", b"").decode("utf-8", "replace"))
+
+
+def git_root(path: str) -> str:
+    """The repository a folder belongs to, or the folder itself."""
+    p = Path(path)
+    for d in (p, *p.parents):
+        if (d / ".git").exists():
+            return str(d)
+    return str(p)
+
+
+def rc_command(home: Path | None = None) -> Path:
+    return (home or primary_home()) / ".local" / "share" / "remote-control" / "bin" / "rc"
+
+
+def write_rc_command(home: Path | None = None) -> None:
+    """Install `rc` where profiles.zsh and tab shells put it on PATH."""
+    path = rc_command(home)
+    package_root = Path(__file__).resolve().parent.parent
+    text = f'#!/bin/sh\nPYTHONPATH="{package_root}" exec python3 -m remote_control.agents "$@"\n'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    tmp = path.with_name(".rc.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.chmod(0o755)
+    os.replace(tmp, path)
+
+
+# --- who is asking ----------------------------------------------------------
+
+
+def caller() -> dict:
+    """Profile and pane of whoever runs `rc` (read before HOME is touched)."""
+    prof = os.environ.get("RC_PROFILE")
+    if prof is None or (prof and not PROFILE_RE.match(prof)):
+        prof = _profile_of_home(os.environ.get("HOME", ""))
+    pane = ""
+    if os.environ.get("HERDR_PANE_ID"):
+        pane = os.environ["HERDR_PANE_ID"]
+    elif os.environ.get("TMUX_PANE") and f"/{TMUX_SOCKET}," in os.environ.get("TMUX", ""):
+        session = _tmux("display-message", "-p", "-t", os.environ["TMUX_PANE"], "#{session_name}").strip()
+        pane = f"rc:{session}" if session else ""
+    return {"profile": prof, "pane": pane}
+
+
+# --- finding agents ---------------------------------------------------------
+
+
+def _cli_name(argv: list[str]) -> str:
+    for part in argv[:2]:
+        name = os.path.basename(part)
+        if name in AGENT_CLIS:
+            return name
+    return ""
+
+
+def find_cli(pane_pid: int) -> tuple[str, int]:
+    """(name, pid) of the AI CLI running in a pane (or under its shell), or ("", 0)."""
+    queue = [pane_pid]
+    seen = 0
+    while queue and seen < 32:
+        pid = queue.pop(0)
+        seen += 1
+        name = _cli_name(_cmdline(pid))
+        if name:
+            return name, pid
+        queue.extend(_children(pid))
+    return "", 0
+
+
+def herdr_agents() -> list[dict]:
+    result = _herdr("agent", "list") or {}
+    out = []
+    for a in result.get("agents") or []:
+        if not isinstance(a, dict) or not a.get("pane_id"):
+            continue
+        info = (_herdr("pane", "process-info", "--pane", a["pane_id"]) or {}).get("process_info") or {}
+        shell = info.get("shell_pid")
+        cli_pid = find_cli(shell)[1] if isinstance(shell, int) else 0
+        owner = owner_of(cli_pid) if cli_pid else ""
+        out.append(
+            {
+                "id": a["pane_id"],
+                "where": "herdr",
+                "cli": str(a.get("agent") or ""),
+                "name": str(a.get("name") or a.get("terminal_title_stripped") or ""),
+                "owner": owner,
+                "cwd": str(a.get("foreground_cwd") or a.get("cwd") or ""),
+                "status": str(a.get("agent_status") or ""),
+            }
+        )
+    return out
+
+
+def tab_agents(socket: str = TMUX_SOCKET) -> list[dict]:
+    """Agents in plain Remote Control tabs (herdr's own views are skipped)."""
+    out = []
+    raw = _tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}\t#{pane_current_path}", socket=socket)
+    for line in raw.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or parts[0].startswith("hv-") or not parts[1].isdigit():
+            continue
+        cli, pid = find_cli(int(parts[1]))
+        if not cli:
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = parts[2]
+        out.append(
+            {
+                "id": f"rc:{parts[0]}",
+                "where": "tab",
+                "cli": cli,
+                "name": "",
+                "owner": owner_of(pid),
+                "cwd": cwd,
+                "status": "",
+            }
+        )
+    return out
+
+
+def list_agents(me: dict | None = None) -> list[dict]:
+    me = me or {"profile": "", "pane": ""}
+    agents = herdr_agents() + tab_agents()
+    for a in agents:
+        a["owner_label"] = label_of(a["owner"])
+        a["root"] = git_root(a["cwd"]) if a["cwd"] else ""
+        a["you"] = bool(me["pane"]) and a["id"] == me["pane"]
+    return agents
+
+
+def same_project(agents: list[dict], path: str) -> list[dict]:
+    root = git_root(path)
+    return [a for a in agents if not a["you"] and a["root"] == root]
+
+
+# --- notes for the owner's devices ------------------------------------------
+
+
+def add_note(note: dict) -> None:
+    path = notes_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    lines = (lines + [json.dumps(note, ensure_ascii=False)])[-NOTES_KEEP:]
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def recent_notes(now: float | None = None) -> list[dict]:
+    """Notes of the last minutes, for workspaces_payload."""
+    now = time.time() if now is None else now
+    try:
+        lines = notes_file().read_text(encoding="utf-8").splitlines()[-40:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            note = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(note, dict) and isinstance(note.get("t"), (int, float)) and now - note["t"] < NOTES_FRESH:
+            out.append(note)
+    return out
+
+
+# --- talking to an agent ----------------------------------------------------
+
+
+def _find(agent_id: str, me: dict) -> dict | None:
+    return next((a for a in list_agents(me) if a["id"] == agent_id), None)
+
+
+def read_screen(agent: dict, lines: int) -> str:
+    if agent["where"] == "herdr":
+        out = _run(["herdr", "agent", "read", agent["id"], "--lines", str(lines)])
+        return out.stdout if out and out.returncode == 0 else ""
+    return _tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={agent['id'][3:]}:")
+
+
+def prompt(agent: dict, text: str, me: dict) -> str:
+    """Send text to an agent; a note for its owner if it is someone else's."""
+    foreign = agent["owner"] != me["profile"]
+    if foreign:
+        text = f"[Mensaje del agente de {label_of(me['profile'])}] {text}"
+    if agent["where"] == "herdr":
+        out = _run(["herdr", "agent", "prompt", agent["id"], text], timeout=15)
+        if not out or out.returncode != 0:
+            return "error"
+    else:
+        target = f"={agent['id'][3:]}:"
+        _tmux("send-keys", "-t", target, "-l", text)
+        time.sleep(0.3)
+        _tmux("send-keys", "-t", target, "Enter")
+    if foreign:
+        add_note(
+            {
+                "t": time.time(),
+                "from": me["profile"],
+                "fromLabel": label_of(me["profile"]),
+                "fromPane": me["pane"],
+                "to": agent["owner"],
+                "toLabel": agent["owner_label"],
+                "target": agent["id"],
+                "cli": agent["cli"],
+                "text": text[:PREVIEW_MAX],
+            }
+        )
+        if agent["where"] == "herdr":
+            _run(
+                [
+                    "herdr", "notification", "show", f"Agente de {label_of(me['profile'])} → {agent['owner_label']}",
+                    "--body", f"Le escribió a {agent['cli']} en {agent['id']}", "--sound", "request",
+                ]
+            )
+    return "foreign" if foreign else "ok"
+
+
+# --- command line -----------------------------------------------------------
+
+
+def _table(agents: list[dict]) -> str:
+    if not agents:
+        return "(no agents)"
+    rows = [("ID", "CLI", "OWNER", "STATUS", "FOLDER")]
+    for a in agents:
+        cli = a["cli"] + (f" ({a['name']})" if a["name"] else "")
+        rows.append((a["id"], cli, a["owner_label"], a["status"] or "-", a["cwd"] + ("  ← you" if a["you"] else "")))
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    return "\n".join("  ".join(r[i].ljust(widths[i]) for i in range(4)) + "  " + r[4] for r in rows)
+
+
+def main(argv: list[str] | None = None) -> int:
+    me = caller()
+    # From here on paths are the primary user's: profiles and herdr live there.
+    os.environ["HOME"] = str(primary_home())
+    parser = argparse.ArgumentParser(prog="rc", description="Agents running on this Remote Control machine")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_list = sub.add_parser("agents", help="list every agent (herdr and plain tabs) with its owner")
+    p_list.add_argument("--here", nargs="?", const=os.getcwd(), default=None, metavar="PATH",
+                        help="only the other agents in the same project (git repo) as PATH (default: here)")
+    p_list.add_argument("--json", action="store_true")
+    p_read = sub.add_parser("read", help="show an agent's screen")
+    p_read.add_argument("id")
+    p_read.add_argument("--lines", type=int, default=60)
+    p_prompt = sub.add_parser("prompt", help="send a prompt to an agent")
+    p_prompt.add_argument("id")
+    p_prompt.add_argument("text")
+    sub.add_parser("whoami", help="your profile and pane")
+    args = parser.parse_args(argv)
+
+    if args.cmd == "whoami":
+        print(json.dumps({**me, "label": label_of(me["profile"]), "home": str(profiles.home_of(me["profile"]) or primary_home())}))
+        return 0
+    if args.cmd == "agents":
+        agents = list_agents(me)
+        if args.here is not None:
+            agents = same_project(agents, args.here)
+        if args.json:
+            print(json.dumps(agents, ensure_ascii=False, indent=1))
+        else:
+            print(_table(agents))
+            if args.here is not None:
+                print(f"\n{len(agents)} other agent(s) in {git_root(args.here)}")
+        return 0
+    agent = _find(args.id, me)
+    if not agent:
+        print(f"rc: no agent {args.id} (see `rc agents`)", file=sys.stderr)
+        return 1
+    if args.cmd == "read":
+        sys.stdout.write(read_screen(agent, max(1, min(args.lines, 2000))))
+        return 0
+    if agent["you"]:
+        print("rc: that is you", file=sys.stderr)
+        return 1
+    result = prompt(agent, args.text, me)
+    if result == "error":
+        print(f"rc: could not send to {args.id}", file=sys.stderr)
+        return 1
+    if result == "foreign":
+        print(f"Sent. {agent['owner_label']} owns that agent and was notified.")
+    else:
+        print("Sent.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

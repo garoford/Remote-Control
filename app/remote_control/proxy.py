@@ -32,6 +32,7 @@ from remote_control.history import (
 )
 from remote_control import files as fs
 from remote_control import agent_context, profiles
+from remote_control.agents import write_rc_command
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control import backgrounds
 from remote_control.workspaces import change_workspaces, delete_background, snapshot, workspaces_payload
@@ -1182,6 +1183,12 @@ def main(argv: list[str] | None = None) -> int:
     if gate_path is not None and not gate_path.is_file():
         print(f"error: no está el archivo de contraseña: {gate_path}", file=sys.stderr)
         return 1
+    # A restarted proxy brings the agents' context and `rc` up to date.
+    try:
+        agent_context.sync()
+        write_rc_command()
+    except Exception:
+        pass
     sidecar = Sidecar(
         listen_host,
         listen_port,

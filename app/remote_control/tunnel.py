@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from remote_control import __version__, agent_context
+from remote_control.agents import write_rc_command
 from remote_control.gate import write_runtime_gate
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
 from remote_control.workspaces import restore as restore_workspaces
@@ -330,7 +331,9 @@ class TunnelService:
             "COLORTERM": "truecolor",
             "LANG": lang,
             "LC_ALL": lang,
-            "PATH": f"{self.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "PATH": f"{self.home}/.local/share/remote-control/bin:{self.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            # herdr is the primary user's; agents of a profile have another HOME.
+            "HERDR_SOCKET_PATH": f"{self.home}/.config/herdr/herdr.sock",
         }
         runtime = Path(f"/run/user/{os.getuid()}")
         if runtime.is_dir():
@@ -710,6 +713,7 @@ class TunnelService:
             prof = self.home / ".local" / "share" / "remote-control" / "profiles.zsh"
             prof.parent.mkdir(parents=True, exist_ok=True)
             prof.write_text(prof_src.read_text(encoding="utf-8"), encoding="utf-8")
+        write_rc_command(self.home)
         zdot_src = root / "zdot"
         if zdot_src.is_dir():
             zdot = self.run_dir / "zdot"

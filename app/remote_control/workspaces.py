@@ -619,7 +619,11 @@ def workspaces_payload(socket: str = TMUX_SOCKET, base: Path | None = None) -> d
         sessions = list_sessions(socket=socket)
         state = reconcile(load_state(base), [s["id"] for s in sessions])
         save_state(state, base)
-        return public_view(state, sessions)
+        # An agent wrote to another user's agent (`rc prompt`): the owner's
+        # devices show it.
+        from .agents import recent_notes
+
+        return {**public_view(state, sessions), "agentNotes": recent_notes()}
 
 
 def change_workspaces(op: dict, socket: str = TMUX_SOCKET, base: Path | None = None) -> dict:

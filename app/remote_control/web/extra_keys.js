@@ -4909,6 +4909,7 @@
     if (payload.filesPos) setFilesPos(payload.filesPos, true);
     renderProfiles();
     refreshLook();
+    takeAgentNotes(payload.agentNotes);
     var emptySub = document.querySelector("#rc-empty .rc-empty-sub");
     var emptyWs = emptySub && currentWs();
     if (emptyWs) emptySub.textContent = "Workspace " + emptyWs.name;
@@ -4920,6 +4921,21 @@
     }
     renderDrawer();
     return payload;
+  }
+
+  // `rc prompt` from an agent of another user to one of this profile's agents
+  // (agents.py). Notes older than this page are only marked as seen.
+  var agentNoteSeen = Date.now() / 1000;
+
+  function takeAgentNotes(notes) {
+    if (!Array.isArray(notes)) return;
+    var me = myProfile();
+    notes.forEach(function (note) {
+      if (!note || typeof note.t !== "number" || note.t <= agentNoteSeen) return;
+      agentNoteSeen = note.t;
+      if (note.to !== me) return;
+      showToast("El agente de " + (note.fromLabel || "otro usuario") + " le escribió a tu " + (note.cli || "agente") + " (" + note.target + ")");
+    });
   }
 
   function findWs(id) {

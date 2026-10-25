@@ -13,6 +13,11 @@ _RC_PROFILES_LOADED=1
 _RC_BASE="$HOME/.local/share/remote-control"
 _RC_ACTIVE="$_RC_BASE/profile-active"
 
+# `rc agents` and friends (agents.py). herdr belongs to the primary user: its
+# socket stays reachable from a CLI that runs with a profile's HOME.
+[[ -d "$_RC_BASE/bin" ]] && path=("$_RC_BASE/bin" $path)
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
 _rc_cli() {
   local cli="$1"
   shift
