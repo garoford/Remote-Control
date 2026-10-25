@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from remote_control import __version__
+from remote_control import __version__, agent_context
 from remote_control.gate import write_runtime_gate
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
 from remote_control.workspaces import restore as restore_workspaces
@@ -256,6 +256,11 @@ class TunnelService:
         self.ttyd_port = self._pick_internal_port()
         self.ttyd_port_file.write_text(str(self.ttyd_port), encoding="utf-8")
         self._prepare_tab_session()
+        # AI CLIs learn that the machine is shared (agent_context.py).
+        try:
+            agent_context.sync()
+        except Exception:
+            pass
         try:
             restore_workspaces(
                 "cf-remote",
@@ -306,6 +311,10 @@ class TunnelService:
         self._gate_path = None
         if not silent:
             self.log_file.unlink(missing_ok=True)
+            try:
+                agent_context.clear()
+            except Exception:
+                pass
 
     def _session_env(self) -> dict[str, str]:
         """Environment tab shells get, whether ttyd or a restore starts tmux."""

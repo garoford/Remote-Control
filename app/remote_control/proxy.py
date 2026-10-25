@@ -31,7 +31,7 @@ from remote_control.history import (
     scrollback_state,
 )
 from remote_control import files as fs
-from remote_control import profiles
+from remote_control import agent_context, profiles
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control import backgrounds
 from remote_control.workspaces import change_workspaces, delete_background, snapshot, workspaces_payload
@@ -879,6 +879,12 @@ class Sidecar:
             result = profiles.delete(str(req.get("id") or ""))
         else:
             result = {"ok": False, "error": "Operación desconocida"}
+        if result.get("ok"):
+            # Every CLI's context lists the users (agent_context.py).
+            try:
+                agent_context.sync()
+            except Exception:
+                pass
         self._json(conn, {**profiles.public(), **result})
 
     def _serve_fs(

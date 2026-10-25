@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ttyd forks each connection with the pty masters of its other connections
+# still open (no CLOEXEC), and tmux clients started here would keep them.
+# A browser tab that closes then leaves a terminal nobody reads: the tmux
+# server blocks writing to it and every tab, on every device, freezes.
+# Keep only stdio (255 is bash reading this script).
+for fd in /proc/$$/fd/*; do
+  fd="${fd##*/}"
+  if (( fd > 2 && fd != 255 )); then
+    eval "exec ${fd}>&-" 2>/dev/null || true
+  fi
+done
+
 # ttyd --url-arg passes ?arg= from the tab. Only accept our token shape.
 name="${1:-}"
 if [[ ! "$name" =~ ^rc[a-z0-9]{10,32}$ ]]; then

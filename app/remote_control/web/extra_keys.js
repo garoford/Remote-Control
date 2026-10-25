@@ -776,6 +776,10 @@
       item.host.setAttribute("aria-hidden", on ? "false" : "true");
     });
     window.term = pane.term;
+    Object.keys(panes).forEach(function (key) {
+      if (panes[key] && panes[key] !== pane && panes[key].term) dropGpu(panes[key].term);
+    });
+    syncRenderer(pane.term);
     if (pane.ws && pane.ws.readyState !== NativeWS.CLOSED) window.__rcTermSocket = pane.ws;
     resetMirror();
     tmuxScroll.offset = 0;
@@ -907,16 +911,59 @@
   function dropGpu(term) {
     var inst = gpuOf(term);
     if (!inst) return;
-    gpuAddonClass();
+    if (!GpuClass) GpuClass = inst.constructor;
     try {
       inst.__rcDisposed = true;
       inst.dispose();
     } catch (_) {}
   }
 
-  // Every terminal draws with WebGL (solid blocks, speed).
+  // The terminal on screen draws with WebGL (solid blocks, speed). Hidden ones
+  // give their context back: Chrome keeps about 16 per process and silently
+  // drops the oldest, and a terminal whose context was dropped stays blank
+  // (just the cursor) though its text is all there. With two browser tabs and
+  // a pane per visited tab, that limit came quickly.
   function syncRenderer(term) {
-    if (term) loadGpu(term);
+    if (!term) return;
+    if (term === window.term) loadGpu(term);
+    else dropGpu(term);
+  }
+
+  function gpuLost(term) {
+    try {
+      var gl = gpuOf(term)._renderer._gl;
+      return !!gl && gl.isContextLost();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function repaint(term) {
+    try {
+      term.refresh(0, Math.max(0, (term.rows || 1) - 1));
+    } catch (_) {}
+  }
+
+  // A context lost anyway: draw without WebGL now, try WebGL again shortly.
+  // Coming back to the browser tab repaints too.
+  function bootGpuWatch() {
+    setInterval(function () {
+      var term = xterm();
+      if (document.hidden || !term || !gpuLost(term)) return;
+      dropGpu(term);
+      repaint(term);
+      setTimeout(function () {
+        if (term !== window.term) return;
+        loadGpu(term);
+        repaint(term);
+      }, 1500);
+    }, 3000);
+    document.addEventListener("visibilitychange", function () {
+      var term = xterm();
+      if (document.hidden || !term) return;
+      syncRenderer(term);
+      repaint(term);
+    });
   }
 
   // ttyd switches its own terminal to Unicode 11 widths. A pane left on the
@@ -7565,6 +7612,7 @@
     bootSizeClaim();
     bootPaneMarks();
     bootGuestSize();
+    bootGpuWatch();
     bootLinks();
     bootPinScroll();
     window.addEventListener("resize", function () {

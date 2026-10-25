@@ -16,8 +16,11 @@ _RC_ACTIVE="$_RC_BASE/profile-active"
 _rc_cli() {
   local cli="$1"
   shift
+  # An explicit RC_PROFILE wins, empty included (the primary user): an agent
+  # launching another one picks its account (agent_context.py), and a CLI's
+  # own shells keep the account it runs with.
   local id="${RC_PROFILE-}" home=""
-  if [[ -z "$id" && -r "$_RC_ACTIVE" ]]; then
+  if (( ! ${+RC_PROFILE} )) && [[ -r "$_RC_ACTIVE" ]]; then
     IFS=$'\t' read -r id home < "$_RC_ACTIVE"
   fi
   if [[ -n "$id" ]]; then
@@ -31,7 +34,7 @@ _rc_cli() {
     pre=(python3 "$RC_KEEPHISTORY")
   fi
   if [[ -z "$id" ]]; then
-    ARGV0="$cli" command "${pre[@]}" "$cli" "$@"
+    RC_PROFILE="" ARGV0="$cli" command "${pre[@]}" "$cli" "$@"
     return
   fi
   HOME="$home" \
