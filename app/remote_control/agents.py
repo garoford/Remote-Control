@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import pwd
+import re
 import subprocess
 import sys
 import time
@@ -204,13 +205,42 @@ def herdr_agents() -> list[dict]:
     return out
 
 
+# A plain tab has no herdr state. tmux stamps every window with the time of
+# its last output (window_activity), and a working CLI keeps redrawing its
+# spinner and timer: output in the last ACTIVE_S seconds means working. A
+# quiet one that shows a question waits for its user.
+ACTIVE_S = 3
+BLOCKED_RE = re.compile(
+    r"Do you want to (proceed|make this edit|create|run|allow)|Allow (this|command|once|always)|"
+    r"Would you like to (run|allow|proceed)|Yes, and don't ask again|Approve\b|\(y/n\)|\[y/N\]|\[Y/n\]",
+    re.I,
+)
+
+
+def _status_from(activity: int, target: str, now: float | None = None, socket: str = TMUX_SOCKET) -> str:
+    now = time.time() if now is None else now
+    if now - activity < ACTIVE_S:
+        return "working"
+    screen = _tmux("capture-pane", "-p", "-t", target, socket=socket)
+    tail = "\n".join(screen.rstrip().splitlines()[-15:])
+    return "blocked" if BLOCKED_RE.search(tail) else "idle"
+
+
+def tab_state(agent: dict) -> tuple[str, int]:
+    """(status, time of its last output) of a plain tab agent."""
+    target = f"={agent['id'][3:]}:"
+    raw = _tmux("display-message", "-p", "-t", target, "#{window_activity}").strip()
+    activity = int(raw) if raw.isdigit() else 0
+    return _status_from(activity, target), activity
+
+
 def tab_agents(socket: str = TMUX_SOCKET) -> list[dict]:
     """Agents in plain Remote Control tabs (herdr's own views are skipped)."""
     out = []
-    raw = _tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}\t#{pane_current_path}", socket=socket)
+    raw = _tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}\t#{pane_current_path}\t#{window_activity}", socket=socket)
     for line in raw.splitlines():
         parts = line.split("\t")
-        if len(parts) != 3 or parts[0].startswith("hv-") or not parts[1].isdigit():
+        if len(parts) != 4 or parts[0].startswith("hv-") or not parts[1].isdigit():
             continue
         cli, pid = find_cli(int(parts[1]))
         if not cli:
@@ -227,7 +257,7 @@ def tab_agents(socket: str = TMUX_SOCKET) -> list[dict]:
                 "name": "",
                 "owner": owner_of(pid),
                 "cwd": cwd,
-                "status": "",
+                "status": _status_from(int(parts[3]) if parts[3].isdigit() else 0, f"={parts[0]}:", socket=socket),
             }
         )
     return out
@@ -293,20 +323,93 @@ def read_screen(agent: dict, lines: int) -> str:
     if agent["where"] == "herdr":
         out = _run(["herdr", "agent", "read", agent["id"], "--lines", str(lines)])
         return out.stdout if out and out.returncode == 0 else ""
-    return _tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={agent['id'][3:]}:")
+    raw = _tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={agent['id'][3:]}:")
+    # The empty rows under the prompt are not output.
+    tail = raw.rstrip().splitlines()[-lines:]
+    return "\n".join(tail) + "\n" if tail else ""
 
 
-def prompt(agent: dict, text: str, me: dict) -> str:
-    """Send text to an agent; a note for its owner if it is someone else's."""
+# How long `--wait` waits by default: under the 10 minutes a Claude Code
+# command may run. 0 waits forever (for a command run in the background).
+WAIT_DEFAULT = 540
+# herdr states that end a wait. blocked: it asks for input or a permission.
+FINISHED = ("idle", "done", "blocked")
+# A prompt a plain tab agent has not reacted to in this time never started.
+START_S = 10
+
+
+def _until(timeout: int) -> list[str]:
+    args = [x for state in FINISHED for x in ("--until", state)]
+    return args + (["--timeout", str(timeout * 1000)] if timeout else [])
+
+
+def _herdr_status(out: subprocess.CompletedProcess | None) -> str:
+    """The state herdr reports after a wait, or "error:<code>"."""
+    if out is None:
+        return "error:timeout"
+    try:
+        data = json.loads(out.stdout or out.stderr)
+    except ValueError:
+        return "error:unknown" if out.returncode else "idle"
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        return f"error:{data['error'].get('code') or 'unknown'}"
+    agent = ((data.get("result") or {}).get("agent") or {}) if isinstance(data, dict) else {}
+    return str(agent.get("agent_status") or ("error:unknown" if out.returncode else "idle"))
+
+
+def _wait_tab(agent: dict, timeout: int, sent_at: int | None = None) -> str:
+    """Until a tab agent is idle or blocked. ``sent_at``: when a prompt was
+    typed; the turn it starts counts only once it reacted after that."""
+    start = time.monotonic()
+    while True:
+        status, activity = tab_state(agent)
+        waited = time.monotonic() - start
+        if sent_at is not None and activity < sent_at:
+            if waited >= START_S:
+                return "error:agent_prompt_stalled"
+        elif status != "working" and (sent_at is None or time.time() - sent_at > ACTIVE_S):
+            return status
+        if timeout and waited >= timeout:
+            return "error:timeout"
+        time.sleep(1)
+
+
+def wait_for(agent: dict, timeout: int = WAIT_DEFAULT) -> str:
+    """Block until the agent finishes its turn: idle, done, blocked or error:*."""
+    if agent["where"] == "herdr":
+        out = _run(["herdr", "agent", "wait", agent["id"], *_until(timeout)], timeout=timeout + 15 if timeout else None)
+        return _herdr_status(out)
+    return _wait_tab(agent, timeout)
+
+
+def prompt(agent: dict, text: str, me: dict, wait: int | None = None) -> dict:
+    """Send text to an agent; a note for its owner if it is someone else's.
+
+    With ``wait`` (seconds, 0 = no limit) it also waits for the turn that
+    text starts to end. Returns {"sent", "foreign", "status"}.
+    """
     foreign = agent["owner"] != me["profile"]
     if foreign:
         text = f"[Mensaje del agente de {label_of(me['profile'])}] {text}"
+    status = ""
     if agent["where"] == "herdr":
-        out = _run(["herdr", "agent", "prompt", agent["id"], text], timeout=15)
-        if not out or out.returncode != 0:
-            return "error"
+        cmd = ["herdr", "agent", "prompt", agent["id"], text]
+        limit: float | None = 15
+        if wait is not None:
+            # herdr waits for a working state first, so the old turn never counts.
+            cmd += ["--wait", *_until(wait)]
+            limit = wait + 15 if wait else None
+        out = _run(cmd, timeout=limit)
+        if wait is not None:
+            status = _herdr_status(out)
+            # Rejected before anything was typed.
+            if status in ("error:agent_blocked", "error:agent_not_found"):
+                return {"sent": False, "foreign": foreign, "status": status}
+        elif not out or out.returncode != 0:
+            return {"sent": False, "foreign": foreign, "status": "error:send"}
     else:
         target = f"={agent['id'][3:]}:"
+        sent_at = int(time.time())
         _tmux("send-keys", "-t", target, "-l", text)
         time.sleep(0.3)
         _tmux("send-keys", "-t", target, "Enter")
@@ -331,7 +434,32 @@ def prompt(agent: dict, text: str, me: dict) -> str:
                     "--body", f"Le escribió a {agent['cli']} en {agent['id']}", "--sound", "request",
                 ]
             )
-    return "foreign" if foreign else "ok"
+    if wait is not None and agent["where"] != "herdr":
+        status = _wait_tab(agent, wait, sent_at)
+    return {"sent": True, "foreign": foreign, "status": status}
+
+
+def report(agent: dict, status: str, lines: int, waited: int) -> int:
+    """What a wait ended with, the agent's screen and the exit code."""
+    if status in ("idle", "done"):
+        print(f"{agent['id']} finished: {status}. Last lines of its screen:\n")
+        sys.stdout.write(read_screen(agent, lines))
+        return 0
+    if status == "blocked":
+        print(f"{agent['id']} is blocked: it waits for input or a permission. Its screen:\n")
+        sys.stdout.write(read_screen(agent, lines))
+        return 2
+    if status == "error:timeout":
+        print(f"{agent['id']} is still working after {waited}s. Keep waiting with `rc wait {agent['id']}`.")
+        return 3
+    if status == "error:agent_blocked":
+        print(f"rc: {agent['id']} is blocked (input or a permission pending); nothing was sent.", file=sys.stderr)
+        return 2
+    if status == "error:agent_prompt_stalled":
+        print(f"rc: {agent['id']} did not start working; check it with `rc read {agent['id']}`.", file=sys.stderr)
+        return 1
+    print(f"rc: waiting for {agent['id']} failed ({status})", file=sys.stderr)
+    return 1
 
 
 # --- command line -----------------------------------------------------------
@@ -364,6 +492,13 @@ def main(argv: list[str] | None = None) -> int:
     p_prompt = sub.add_parser("prompt", help="send a prompt to an agent")
     p_prompt.add_argument("id")
     p_prompt.add_argument("text")
+    p_prompt.add_argument("--wait", nargs="?", type=int, const=WAIT_DEFAULT, default=None, metavar="SECONDS",
+                          help=f"wait until it finishes and print its screen (default {WAIT_DEFAULT}s, 0 = no limit)")
+    p_prompt.add_argument("--lines", type=int, default=40, help="screen lines printed after --wait")
+    p_wait = sub.add_parser("wait", help="wait until an agent finishes its turn, then print its screen")
+    p_wait.add_argument("id")
+    p_wait.add_argument("--timeout", type=int, default=WAIT_DEFAULT, help=f"seconds (default {WAIT_DEFAULT}, 0 = no limit)")
+    p_wait.add_argument("--lines", type=int, default=40)
     sub.add_parser("whoami", help="your profile and pane")
     args = parser.parse_args(argv)
 
@@ -391,16 +526,24 @@ def main(argv: list[str] | None = None) -> int:
     if agent["you"]:
         print("rc: that is you", file=sys.stderr)
         return 1
-    result = prompt(agent, args.text, me)
-    if result == "error":
-        print(f"rc: could not send to {args.id}", file=sys.stderr)
+    lines = max(1, min(args.lines, 2000))
+    if args.cmd == "wait":
+        timeout = max(0, args.timeout)
+        return report(agent, wait_for(agent, timeout), lines, timeout)
+    wait = None if args.wait is None else max(0, args.wait)
+    result = prompt(agent, args.text, me, wait=wait)
+    if not result["sent"]:
+        if result["status"] == "error:agent_blocked":
+            return report(agent, result["status"], lines, 0)
+        print(f"rc: could not send to {args.id} ({result['status']})", file=sys.stderr)
         return 1
-    if result == "foreign":
+    if result["foreign"]:
         print(f"Sent. {agent['owner_label']} owns that agent and was notified.")
     else:
         print("Sent.")
-    return 0
-
+    if wait is None:
+        return 0
+    return report(agent, result["status"], lines, wait)
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

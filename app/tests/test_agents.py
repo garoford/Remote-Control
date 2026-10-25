@@ -38,7 +38,7 @@ class AgentsTests(unittest.TestCase):
         if cmd[:3] == ["herdr", "pane", "process-info"]:
             return done(json.dumps({"result": {"process_info": {"shell_pid": 100 if cmd[-1] == "w1:p1" else 200}}}))
         if cmd[:2] == ["tmux", "-L"] and "list-panes" in cmd:
-            return done("hv-dx-rcabc\t300\t/x\nrcabcdef0123456789\t400\t/tmp\n")
+            return done(f"hv-dx-rcabc\t300\t/x\t0\nrcabcdef0123456789\t400\t/tmp\t{int(__import__('time').time())}\n")
         return done("")
 
     def listed(self, me=None):
@@ -55,6 +55,7 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(found["w1:p2"]["root"], str(self.repo))
         self.assertTrue(found["w1:p1"]["you"])
         self.assertEqual(found["rc:rcabcdef0123456789"]["cli"], "codex")
+        self.assertEqual(found["rc:rcabcdef0123456789"]["status"], "working")
 
     def test_here_shows_the_others_in_the_same_repo(self) -> None:
         others = agents.same_project(self.listed({"profile": "", "pane": "w1:p1"}), str(self.repo / "web"))
@@ -74,7 +75,7 @@ class AgentsTests(unittest.TestCase):
             return done("")
 
         with mock.patch.object(agents, "_run", run), mock.patch.object(agents, "label_of", lambda pid: pid or "main"):
-            self.assertEqual(agents.prompt(target, "hola", {"profile": "", "pane": "w1:p1"}), "foreign")
+            self.assertEqual(agents.prompt(target, "hola", {"profile": "", "pane": "w1:p1"})["foreign"], True)
         self.assertEqual(sent[0], ["herdr", "agent", "prompt", "w1:p2", "[Mensaje del agente de main] hola"])
         notes = agents.recent_notes()
         self.assertEqual((notes[0]["to"], notes[0]["from"], notes[0]["target"]), ("rosa", "", "w1:p2"))
@@ -84,9 +85,68 @@ class AgentsTests(unittest.TestCase):
         sent = []
         target = {"id": "w1:p1", "where": "herdr", "cli": "claude", "owner": "", "owner_label": "main"}
         with mock.patch.object(agents, "_run", lambda cmd, timeout=5: sent.append(cmd) or done("")):
-            self.assertEqual(agents.prompt(target, "hola", {"profile": "", "pane": "w1:p2"}), "ok")
+            self.assertEqual(agents.prompt(target, "hola", {"profile": "", "pane": "w1:p2"}), {"sent": True, "foreign": False, "status": ""})
         self.assertEqual(sent, [["herdr", "agent", "prompt", "w1:p1", "hola"]])
         self.assertEqual(agents.recent_notes(), [])
+
+    def test_herdr_status_after_a_wait(self) -> None:
+        ok = done(json.dumps({"result": {"agent": {"agent_status": "done"}}}))
+        late = done(json.dumps({"error": {"code": "timeout"}}), code=1)
+        self.assertEqual(agents._herdr_status(ok), "done")
+        self.assertEqual(agents._herdr_status(late), "error:timeout")
+        self.assertEqual(agents._herdr_status(None), "error:timeout")
+
+    def test_prompt_wait_on_herdr_waits_in_the_same_call(self) -> None:
+        sent = []
+        target = {"id": "w1:p1", "where": "herdr", "cli": "claude", "owner": "", "owner_label": "main"}
+
+        def run(cmd, timeout=5):
+            sent.append((cmd, timeout))
+            return done(json.dumps({"result": {"agent": {"agent_status": "idle"}}}))
+
+        with mock.patch.object(agents, "_run", run):
+            result = agents.prompt(target, "task", {"profile": "", "pane": "w1:p2"}, wait=30)
+        self.assertEqual(result, {"sent": True, "foreign": False, "status": "idle"})
+        cmd, timeout = sent[0]
+        self.assertEqual(cmd[:6], ["herdr", "agent", "prompt", "w1:p1", "task", "--wait"])
+        self.assertIn("blocked", cmd)
+        self.assertEqual(cmd[-2:], ["--timeout", "30000"])
+        self.assertEqual(timeout, 45)
+
+    def test_blocked_agent_gets_nothing_and_no_note(self) -> None:
+        target = {"id": "w1:p2", "where": "herdr", "cli": "pi", "owner": "rosa", "owner_label": "Rosa"}
+        blocked = done(json.dumps({"error": {"code": "agent_blocked"}}), code=1)
+        with mock.patch.object(agents, "_run", lambda cmd, timeout=5: blocked), \
+             mock.patch.object(agents, "label_of", lambda pid: pid or "main"):
+            result = agents.prompt(target, "task", {"profile": "", "pane": ""}, wait=10)
+        self.assertFalse(result["sent"])
+        self.assertEqual(agents.recent_notes(), [])
+
+    def test_tab_status_from_last_output(self) -> None:
+        with mock.patch.object(agents, "_tmux", lambda *a, **k: "Edit file?\n Do you want to make this edit to x.py?\n > 1. Yes\n\n"):
+            self.assertEqual(agents._status_from(100, "=rcabc:", now=101), "working")
+            self.assertEqual(agents._status_from(100, "=rcabc:", now=110), "blocked")
+        with mock.patch.object(agents, "_tmux", lambda *a, **k: "done.\n> "):
+            self.assertEqual(agents._status_from(100, "=rcabc:", now=110), "idle")
+
+    def wait_tab(self, states, sent_at):
+        states = iter(states)
+        with mock.patch.object(agents, "tab_state", lambda agent: next(states)), \
+             mock.patch.object(agents.time, "sleep", lambda s: None), \
+             mock.patch.object(agents.time, "time", lambda: 1000), \
+             mock.patch.object(agents.time, "monotonic", iter(range(1000)).__next__):
+            return agents._wait_tab({"id": "rc:rcabc", "where": "tab"}, 120, sent_at)
+
+    def test_tab_wait_ends_when_the_turn_after_the_prompt_ends(self) -> None:
+        # Idle from before the prompt, then working, then idle again.
+        states = [("idle", 900)] * 2 + [("working", 996)] * 3 + [("idle", 996)]
+        self.assertEqual(self.wait_tab(states, sent_at=995), "idle")
+
+    def test_tab_wait_reports_a_permission_question(self) -> None:
+        self.assertEqual(self.wait_tab([("working", 996), ("blocked", 996)], sent_at=990), "blocked")
+
+    def test_tab_agent_that_never_reacts_stalls(self) -> None:
+        self.assertEqual(self.wait_tab([("idle", 900)] * 30, sent_at=995), "error:agent_prompt_stalled")
 
     def test_rc_command_points_at_this_package(self) -> None:
         agents.write_rc_command(self.home)
