@@ -471,10 +471,47 @@
     term.options.fontSize = BASE_FONT;
   }
 
+  // Whose herdr tab this is: the profile owning most of the panes on screen
+  // (ties: the top-left pane). Every device sees the same panes, so they all
+  // agree; the others size their view to that profile's (history.herdr_size).
+  // Kept a few seconds while the marks reload after a resize.
+  var herdrAuth = { id: null, at: 0 };
+
+  function herdrAuthority() {
+    var count = {};
+    var first = null;
+    var firstAt = Infinity;
+    paneMarks.marks.forEach(function (mark) {
+      var box = paneMarks.boxes[mark.box];
+      if (!box || typeof mark.owner !== "string") return;
+      count[mark.owner] = (count[mark.owner] || 0) + 1;
+      if (box.y * 10000 + box.x < firstAt) {
+        firstAt = box.y * 10000 + box.x;
+        first = mark.owner;
+      }
+    });
+    var best = null;
+    var bestN = 0;
+    Object.keys(count).forEach(function (owner) {
+      if (count[owner] > bestN || (count[owner] === bestN && owner === first)) {
+        best = owner;
+        bestN = count[owner];
+      }
+    });
+    if (best !== null) herdrAuth = { id: best, at: Date.now() };
+    else if (Date.now() - herdrAuth.at > 6000) herdrAuth = { id: null, at: 0 };
+    return herdrAuth.id;
+  }
+
   function pollGuestSize() {
     var id = tabId();
     if (!id || document.hidden || window.__rcEmpty) return;
-    fetch("/rc-tab-size?tab=" + encodeURIComponent(id) + "&prof=" + encodeURIComponent(profileArg()), { cache: "no-store" })
+    var extra = "";
+    if (onHerdrTab()) {
+      var auth = herdrAuthority();
+      extra = "&dev=" + encodeURIComponent(deviceId()) + "&auth=" + (auth === null ? "" : encodeURIComponent("p" + auth));
+    }
+    fetch("/rc-tab-size?tab=" + encodeURIComponent(id) + "&prof=" + encodeURIComponent(profileArg()) + extra, { cache: "no-store" })
       .then(function (resp) {
         return resp.ok ? resp.json() : null;
       })
@@ -4270,6 +4307,30 @@
     text.appendChild(cmd);
   }
 
+  // Who opened the tab: their avatar leads the pill (herdr tabs mark each
+  // pane instead). While the tab prints, the avatar carries the live pulse.
+  function paintTabOwner(el, item) {
+    var owner = item.command !== "herdr" && typeof item.owner === "string" ? item.owner : null;
+    var dot = el.querySelector(".rc-tab-owner");
+    el.classList.toggle("has-owner", owner !== null);
+    if (owner === null) {
+      if (dot) dot.remove();
+      return;
+    }
+    if (!dot) {
+      dot = document.createElement("span");
+      dot.className = "rc-tab-owner";
+      dot.setAttribute("aria-hidden", "true");
+      el.insertBefore(dot, el.firstChild);
+    }
+    var name = profileLabel(owner) || "?";
+    dot.textContent = name.charAt(0).toUpperCase();
+    var a = profileAccent(owner);
+    dot.style.background = a ? a.dot : "";
+    dot.style.color = a ? (themeMode() === "light" ? "#fff" : "#111214") : "";
+    el.title = "Abierta por " + name + (item.path ? " · " + item.path : "");
+  }
+
   function fillTab(el, item, counts, current) {
     var label = sessionLabel(item, counts);
     el.dataset.id = item.id;
@@ -4279,6 +4340,7 @@
     el.title = item.path || label;
     var text = el.querySelector(".rc-tab-label");
     if (text && text.dataset.label !== label) paintTabLabel(text, label);
+    paintTabOwner(el, item);
     var close = el.querySelector(".rc-tab-close");
     if (close) close.setAttribute("aria-label", "Cerrar " + label);
   }
@@ -6119,7 +6181,63 @@
   }
 
   // ttyd re-sends its own (dark) theme on every connect; keep ours.
+  // Apps ask the terminal for its colors (OSC 10/11/4) and whether it is
+  // dark (CSI ? 996 n). herdr asks on every resize or focus and keeps ONE
+  // palette for all its clients, so a light device and a dark one answering
+  // in turns repainted everyone's inverse cells (nano's bars) back and forth.
+  // Every device answers the same: the dark palette.
+  var REPORT_ORDER = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
+
+  function reportColor(hex) {
+    var h = String(hex || "#000000").replace("#", "");
+    return "rgb:" + [0, 2, 4].map(function (i) {
+      var byte = h.substr(i, 2);
+      return byte + byte;
+    }).join("/");
+  }
+
+  function lockColorReports(term) {
+    var parser = term && term.parser;
+    if (!parser || term.__rcColorReports || typeof parser.registerOscHandler !== "function") return;
+    term.__rcColorReports = true;
+    var dark = TERM_THEMES.dark;
+    function reply(text) {
+      try {
+        if (typeof term.input === "function") term.input(text, false);
+        else term._core.coreService.triggerDataEvent(text, false);
+      } catch (_) {}
+    }
+    function fixed(code, hex) {
+      parser.registerOscHandler(code, function (data) {
+        if (data !== "?") return false;
+        reply("\x1b]" + code + ";" + reportColor(hex) + "\x1b\\");
+        return true;
+      });
+    }
+    fixed(10, dark.foreground);
+    fixed(11, dark.background);
+    fixed(12, dark.cursor);
+    parser.registerOscHandler(4, function (data) {
+      var parts = String(data).split(";");
+      if (parts.indexOf("?") === -1) return false;
+      for (var i = 0; i + 1 < parts.length; i += 2) {
+        var n = parseInt(parts[i], 10);
+        if (parts[i + 1] !== "?" || !(n >= 0 && n < 16)) continue;
+        reply("\x1b]4;" + n + ";" + reportColor(dark[REPORT_ORDER[n]]) + "\x1b\\");
+      }
+      return true;
+    });
+    if (typeof parser.registerCsiHandler === "function") {
+      parser.registerCsiHandler({ prefix: "?", final: "n" }, function (params) {
+        if (params[0] !== 996) return false;
+        reply("\x1b[?997;1n");
+        return true;
+      });
+    }
+  }
+
   function lockTheme(term) {
+    lockColorReports(term);
     if (!term || !term.options || term.__rcTheme) return;
     term.__rcTheme = true;
     var opts = term.options;
@@ -7176,6 +7294,48 @@
     return wrap;
   }
 
+  // Signs this browser out (the server expires its cookie); other devices
+  // stay in. First tap arms it, the second one leaves.
+  var LOGOUT_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 2.5H4A1.5 1.5 0 0 0 2.5 4v8A1.5 1.5 0 0 0 4 13.5h2.5M10.5 11 13.5 8l-3-3M13.5 8H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  function buildLogout() {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "rc-ws-logout";
+    var armed = 0;
+    function paint(text) {
+      b.innerHTML = LOGOUT_ICON;
+      var span = document.createElement("span");
+      span.textContent = text;
+      b.appendChild(span);
+    }
+    paint("Cerrar sesión");
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!armed) {
+        b.classList.add("is-armed");
+        paint("Toca otra vez para salir");
+        armed = setTimeout(function () {
+          armed = 0;
+          b.classList.remove("is-armed");
+          paint("Cerrar sesión");
+        }, 3000);
+        return;
+      }
+      clearTimeout(armed);
+      b.disabled = true;
+      paint("Saliendo…");
+      fetch("/rc-logout", { method: "POST", cache: "no-store" })
+        .catch(function () {})
+        .then(function () {
+          location.reload();
+        });
+    });
+    return b;
+  }
+
   function bootTheme() {
     applyTheme();
     if (!lightQuery) return;
@@ -7253,6 +7413,7 @@
     drawer.appendChild(add);
     drawer.appendChild(buildProfileBox());
     drawer.appendChild(buildThemeSwitch());
+    drawer.appendChild(buildLogout());
     var root = document.body || document.documentElement;
     root.appendChild(backdrop);
     root.appendChild(drawer);

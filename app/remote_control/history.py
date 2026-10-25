@@ -363,7 +363,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_activity}\t#{pane_current_path}\t"
-        "#{pane_current_command}\t#{session_attached}\t#{session_created}\t#{window_activity}",
+        "#{pane_current_command}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@rc_prof}",
         text=True,
     )
     now = time.time()
@@ -397,6 +397,9 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
             busy = len(parts) > 6 and now - int(parts[6]) < BUSY_S
         except ValueError:
             busy = False
+        # Profile that opened the tab ("p" + id, tab_session.sh); the tab strip
+        # shows its avatar. None until a current page has connected.
+        prof = parts[7].strip() if len(parts) > 7 else ""
         path = parts[2]
         home = str(Path.home())
         if path == home:
@@ -412,6 +415,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
                 "attached": attached,
                 "created": created,
                 "busy": busy,
+                "owner": prof[1:] if prof.startswith("p") else None,
             }
         )
     sessions.sort(key=lambda item: item["activity"], reverse=True)
@@ -421,12 +425,15 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
 PROF_RE = re.compile(r"^p([a-z0-9][a-z0-9_-]{0,31})?$")
 
 
-def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET) -> dict:
+DEVICE_RE = re.compile(r"^d[a-z0-9]{8,32}$")
+
+
+def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "", authority: str = "") -> dict:
     """The tab's size, and whether this profile only watches it.
 
     The profile that opened a tab owns its size (tab_session.sh); another
     profile's page scales the owner's columns and rows to fit its screen.
-    Tabs running herdr are exempt.
+    Tabs running herdr follow herdr_size instead.
     """
     if not TAB_RE.match(tab or "") or not PROF_RE.match(prof or ""):
         return {"guest": False}
@@ -434,10 +441,66 @@ def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET) -> dict:
         socket, "display-message", "-p", "-t", f"={tab}:", "#{window_width}\t#{window_height}\t#{@rc_prof}\t#{pane_current_command}", text=True
     )
     parts = result.stdout.strip().split("\t") if result.returncode == 0 else []
-    # herdr is exempt: every device has its own herdr view at its own size.
-    if len(parts) < 4 or not parts[2] or parts[2] == prof or parts[3] == "herdr":
+    if len(parts) >= 4 and parts[3] == "herdr":
+        return herdr_size(tab, prof, dev, authority, socket=socket)
+    if len(parts) < 4 or not parts[2] or parts[2] == prof:
         return {"guest": False}
     try:
         return {"guest": True, "cols": int(parts[0]), "rows": int(parts[1])}
     except ValueError:
         return {"guest": False}
+
+
+def herdr_size(tab: str, prof: str, dev: str, authority: str, socket: str = TMUX_SOCKET) -> dict:
+    """Size of this device's herdr view.
+
+    herdr gives a pane the size of the last client that touched it. When the
+    herdr tab on screen holds another profile's panes (the page passes that
+    profile as ``authority``), this device's view takes the size of that
+    profile's latest herdr view, so touching those panes keeps their owner's
+    size; the page scales it to fit. Otherwise the view follows this screen.
+    """
+    if not DEVICE_RE.match(dev or ""):
+        return {"guest": False}
+    view = f"hv-{dev}-{tab}"
+    listing = _tmux(
+        socket,
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{@rc_vprof}\t#{@rc_dev}\t#{window_width}\t#{window_height}\t#{session_attached}\t#{session_activity}",
+        text=True,
+    )
+    sessions = {}
+    for raw in listing.stdout.splitlines() if listing.returncode == 0 else []:
+        cols = raw.split("\t")
+        if len(cols) < 7 or not (cols[0] == tab or (cols[0].startswith("hv-") and cols[0].endswith("-" + tab))):
+            continue
+        try:
+            sessions[cols[0]] = {"prof": cols[1], "dev": cols[2], "w": int(cols[3]), "h": int(cols[4]), "attached": int(cols[5]), "activity": int(cols[6])}
+        except ValueError:
+            continue
+    mine = view if view in sessions else (tab if tab in sessions and sessions[tab]["dev"] == dev else "")
+    if not mine:
+        return {"guest": False}
+    clients = []
+    for raw in (_tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_width}\t#{client_height}\t#{client_flags}", text=True).stdout or "").splitlines():
+        cols = raw.split("\t")
+        if len(cols) >= 5 and cols[1] == mine:
+            clients.append(cols)
+    refs = []
+    if authority and authority != prof and PROF_RE.match(authority):
+        refs = [s for name, s in sessions.items() if name != mine and s["prof"] == authority and s["attached"] > 0]
+    if not refs:
+        # Back to this screen's own size.
+        for name, _session, width, height, flags in clients:
+            if "ignore-size" in flags.split(","):
+                _tmux(socket, "refresh-client", "-t", name, "-f", "!ignore-size")
+                _tmux(socket, "resize-window", "-t", f"={mine}:", "-x", width, "-y", height)
+        return {"guest": False}
+    ref = max(refs, key=lambda s: s["activity"])
+    for name, _session, _w, _h, flags in clients:
+        if "ignore-size" not in flags.split(","):
+            _tmux(socket, "refresh-client", "-t", name, "-f", "ignore-size")
+    if (sessions[mine]["w"], sessions[mine]["h"]) != (ref["w"], ref["h"]):
+        _tmux(socket, "resize-window", "-t", f"={mine}:", "-x", str(ref["w"]), "-y", str(ref["h"]))
+    return {"guest": True, "cols": ref["w"], "rows": ref["h"]}

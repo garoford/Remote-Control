@@ -477,6 +477,14 @@ def _loopback_host(host: str) -> bool:
     return name in {"localhost", "127.0.0.1", "::1"}
 
 
+def clear_cookie(host: str) -> str:
+    """Logout: the same cookie, already expired. The browser drops it."""
+    parts = [f"{COOKIE_NAME}=", "HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=0"]
+    if not _loopback_host(host):
+        parts.insert(2, "Secure")
+    return "; ".join(parts)
+
+
 def set_cookie(token: str, host: str) -> str:
     parts = [
         f"{COOKIE_NAME}={token}",

@@ -3105,3 +3105,84 @@ html.rc-is-empty #rc-net-badge {
     0 2px 6px rgb(var(--rc-shade) / 0.3);
   animation: rc-empty-in 220ms ease both;
 }
+
+/* "Cerrar sesión" at the foot of the drawer */
+.rc-ws-logout {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.rc-ws-logout svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.rc-ws-logout:hover,
+.rc-ws-logout.is-armed {
+  background: rgb(239 83 80 / 0.12);
+  color: #ef5350;
+}
+
+.rc-ws-logout:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Avatar of the profile that opened the tab, leading the pill. It replaces
+   the status dot: the pulse moves onto it while the session prints. */
+.rc-tab.has-owner,
+.rc-tab.has-owner:not(.is-active) {
+  padding-left: 5px;
+}
+
+.rc-tab.has-owner::after {
+  display: none;
+}
+
+.rc-tab-owner {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--rc-teal);
+  color: var(--rc-on-accent);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.rc-tab.has-owner:not(.is-active) .rc-tab-owner {
+  opacity: 0.75;
+}
+
+.rc-tab.has-owner.is-busy:not(.is-active) .rc-tab-owner {
+  opacity: 1;
+  animation: rc-tab-busy 1.6s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rc-tab.has-owner.is-busy .rc-tab-owner {
+    animation: none;
+  }
+}

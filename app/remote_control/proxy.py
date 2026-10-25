@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.gate import LOGIN_PAGE, Gate, load_gate, set_cookie
+from remote_control.gate import LOGIN_PAGE, Gate, clear_cookie, load_gate, set_cookie
 from remote_control.history import (
     cancel_copy_mode,
     close_session,
@@ -328,6 +328,18 @@ class Sidecar:
             if method == "OPTIONS" and path.startswith("/rc-"):
                 self._serve_options(conn)
                 return
+            if method == "POST" and path == "/rc-logout":
+                # Only this browser signs out: its cookie expires, and the next
+                # load shows the password page again.
+                conn.sendall(
+                    _http_response(
+                        "200 OK",
+                        b'{"ok":true}',
+                        "application/json; charset=utf-8",
+                        [("Cache-Control", "no-store"), ("Set-Cookie", clear_cookie(headers.get("host", "")))],
+                    )
+                )
+                return
             if method in {"GET", "HEAD"} and path.startswith("/rc-assets/"):
                 self._serve_asset(
                     conn,
@@ -349,7 +361,16 @@ class Sidecar:
                 from remote_control.history import tab_size
 
                 query = parse_qs(parsed_url.query)
-                self._json(conn, tab_size((query.get("tab") or [""])[0], (query.get("prof") or [""])[0], socket=self.tmux_socket))
+                self._json(
+                    conn,
+                    tab_size(
+                        (query.get("tab") or [""])[0],
+                        (query.get("prof") or [""])[0],
+                        socket=self.tmux_socket,
+                        dev=(query.get("dev") or [""])[0],
+                        authority=(query.get("auth") or [""])[0],
+                    ),
+                )
                 return
             if method == "GET" and path.rstrip("/").endswith("/rc-hist-size"):
                 self._serve_hist_size(conn, parse_qs(parsed_url.query))

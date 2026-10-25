@@ -83,13 +83,16 @@ herdr_bin="$(command -v herdr || echo "$HOME/.local/bin/herdr")"
 
 # This device's own herdr client. herdr is exempt from the owner's size:
 # each device's view takes its own screen size, whatever its profile.
+# @rc_vprof: the profile looking through this view (history.herdr_size).
 make_view() {
   local w h
-  tmux "${args[@]}" has-session -t "=$view" 2>/dev/null && return 0
-  read -r w h <<<"$(size_of "$name")"
-  tmux "${args[@]}" new-session -d -s "$view" -x "${w:-80}" -y "${h:-24}" -- env -u HERDR_ENV \
-    -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH "$herdr_bin" \
-    2>/dev/null
+  if ! tmux "${args[@]}" has-session -t "=$view" 2>/dev/null; then
+    read -r w h <<<"$(size_of "$name")"
+    tmux "${args[@]}" new-session -d -s "$view" -x "${w:-80}" -y "${h:-24}" -- env -u HERDR_ENV \
+      -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH "$herdr_bin" \
+      2>/dev/null || return 1
+  fi
+  [[ -z "$prof" ]] || tmux "${args[@]}" set-option -t "=$view:" @rc_vprof "$prof" 2>/dev/null || true
 }
 
 if [[ -n "$dev" ]]; then
@@ -142,5 +145,6 @@ fi
 
 # herdr is exempt from the owner's size: the device that runs it sizes it.
 [[ "$(pane_cmd)" == "herdr" ]] && attach_flags=()
+[[ -z "$prof" ]] || tmux "${args[@]}" set-option -t "=$name:" @rc_vprof "$prof" 2>/dev/null || true
 
 exec tmux "${args[@]}" attach-session "${attach_flags[@]}" -t "=$name"
