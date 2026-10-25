@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from remote_control import agent_context, profiles
+from remote_control import agent_context, profiles, workspaces
 
 PROFILES_ZSH = Path(__file__).resolve().parents[1] / "remote_control" / "web" / "profiles.zsh"
 
@@ -46,6 +46,17 @@ class AgentContextTests(unittest.TestCase):
         # Cursor only reads AGENTS.md up the folder tree: the primary HOME's.
         self.assertTrue((self.home / "AGENTS.md").is_file())
         self.assertFalse((self.rosa / "AGENTS.md").exists())
+
+    def test_each_home_says_who_it_is(self) -> None:
+        agent_context.sync()
+        mine = (self.home / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        rosa = (self.rosa / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        shared = (self.home / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn(f"**You are `{profiles.primary_name()}` (primary user).**", mine)
+        self.assertIn("**You are `Rosa Diaz` (profile `rosa-diaz`).**", rosa)
+        self.assertIn(f"HOME `{self.rosa}`, launch with `RC_PROFILE=rosa-diaz`  ← you", rosa)
+        self.assertNotIn("← you", shared)
+        self.assertIn("cannot say", shared)
 
     def test_sync_twice_keeps_one_block_and_updates_it(self) -> None:
         agent_context.sync()
@@ -90,3 +101,21 @@ class WrapperProfileTests(unittest.TestCase):
 
     def test_empty_rc_profile_forces_the_primary(self) -> None:
         self.assertEqual(self.home_seen("").split("\n")[:2], [str(self.home), ""])
+
+
+class RerunProfileTests(unittest.TestCase):
+    def test_primary_cli_is_pinned_to_the_primary(self) -> None:
+        self.assertEqual(workspaces._rerun({"cli": "agent", "resume": "abc12345-def"}), "RC_PROFILE= agent --resume abc12345-def")
+        with mock.patch.object(workspaces.shutil, "which", lambda n: f"/usr/bin/{n}"):
+            self.assertEqual(workspaces._rerun({"argv": ["/usr/bin/codex"]}), "RC_PROFILE= codex")
+
+    def test_other_commands_stay_as_they_were(self) -> None:
+        with mock.patch.object(workspaces.shutil, "which", lambda n: f"/usr/bin/{n}"):
+            self.assertEqual(workspaces._rerun({"argv": ["/usr/bin/htop"]}), "htop")
+
+    def test_profile_cli_keeps_its_profile(self) -> None:
+        with mock.patch.object(workspaces, "_profile_home", lambda p: Path("/tmp") if p == "rosa" else None):
+            self.assertEqual(
+                workspaces._rerun({"cli": "agent", "resume": "abc12345-def", "profile": "rosa"}),
+                "RC_PROFILE=rosa agent --resume abc12345-def",
+            )

@@ -657,9 +657,10 @@ def cli_profile(pane_pid: int) -> str:
             env = b""
         for item in env.split(b"\0"):
             if item.startswith(b"RC_PROFILE="):
+                # The CLI closest to the shell decides; empty is the primary
+                # user, whatever profile an agent it launched runs with.
                 value = item[len(b"RC_PROFILE=") :].decode("ascii", "replace")
-                if PROFILE_RE.match(value):
-                    return value
+                return value if PROFILE_RE.match(value) else ""
         queue.extend(_children(pid))
     return ""
 
@@ -903,19 +904,30 @@ def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
     return f"{cli} {RESUME_FLAG[cli]} {resume}"
 
 
+# CLIs the shell wrapper (web/profiles.zsh) runs with a profile's account.
+PROFILE_CLIS = frozenset(
+    ("claude", "agent", "cursor-agent", "codex", "gemini", "agy", "aider", "opencode", "crush", "goose", "qwen", "amp", "copilot")
+)
+
+
 def _rerun(info: dict) -> str:
     profile = str(info.get("profile") or "")
     home = _profile_home(profile)
-    # The shell wrapper (web/profiles.zsh) honours an explicit RC_PROFILE.
-    prefix = f"RC_PROFILE={profile} " if home else ""
     line = resume_command(str(info.get("cli") or ""), str(info.get("resume") or ""), home=home)
-    if line:
-        return prefix + line
-    argv = info.get("argv")
-    if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-        line = rerun_line(argv)
-        return prefix + line if line else ""
-    return ""
+    if not line:
+        argv = info.get("argv")
+        if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
+            line = rerun_line(argv)
+    if not line:
+        return ""
+    # The wrapper honours an explicit RC_PROFILE, empty for the primary user.
+    # Without it a primary CLI would come back with the account of whichever
+    # device typed last.
+    if home:
+        return f"RC_PROFILE={profile} {line}"
+    if line.split(" ", 1)[0] in PROFILE_CLIS:
+        return f"RC_PROFILE= {line}"
+    return line
 
 
 def restore_plan(state: dict, base: Path, shell: str) -> list[dict]:

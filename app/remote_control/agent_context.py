@@ -49,17 +49,43 @@ def _homes() -> list[tuple[str, str, Path]]:
     return out
 
 
-def render() -> str:
+def _who(pid: str, label: str) -> str:
+    return f"`{label}` (primary user)" if not pid else f"`{label}` (profile `{pid}`)"
+
+
+def render(me: str | None) -> str:
+    """The block for the HOME of profile ``me`` ("" is the primary user).
+
+    Each HOME has its own file, so the CLI reading it runs as that user: the
+    block says so outright. None is the one file every user's Cursor Agent
+    reads (CURSOR_TARGET), which cannot tell them apart.
+    """
     homes = _homes()
     users = []
     for pid, label, home in homes:
-        who = f"`{label}` (primary user)" if not pid else f"`{label}` (profile `{pid}`)"
-        users.append(f"- {who}: HOME `{home}`, launch with `RC_PROFILE={pid}`")
+        mark = "  ← you" if pid == me else ""
+        users.append(f"- {_who(pid, label)}: HOME `{home}`, launch with `RC_PROFILE={pid}`{mark}")
     primary_home = homes[0][2]
+    if me is None:
+        you = [
+            "**Who you are:** this file is shared by every user, so it cannot say. In Cursor Agent",
+            "you are the primary user unless `RC_PROFILE` is set in your environment (then you are",
+            "that profile). Other CLIs get their own file that says it directly.",
+        ]
+    else:
+        mine = next(((pid, label, home) for pid, label, home in homes if pid == me), homes[0])
+        you = [
+            f"**You are {_who(mine[0], mine[1])}.** Your HOME is `{mine[2]}` and your",
+            f"`RC_PROFILE` is {f'`{mine[0]}`' if mine[0] else 'empty'}. This is certain: this file lives in that HOME and",
+            "only a CLI started with it reads it, so do not check it again. Your logins and",
+            "tokens are the ones in that HOME.",
+        ]
     return "\n".join(
         [
             BEGIN,
             "## Remote Control: this machine is shared",
+            "",
+            *you,
             "",
             "Several people use this machine at the same time through Remote Control, each with",
             "their own AI CLI logins. They all are the same Linux user: a profile is just another",
@@ -69,7 +95,6 @@ def render() -> str:
             "Users right now:",
             *users,
             "",
-            "- Who you are: `$HOME` and `$RC_PROFILE` (empty or unset means the primary user).",
             "- Projects are shared and keep their absolute paths. `~` is your own HOME, not",
             f"  `{primary_home}`; use absolute paths for shared files.",
             "- Launch an agent as a given user: `RC_PROFILE=<id> claude` (`RC_PROFILE= claude` for",
@@ -93,14 +118,15 @@ def _in_use(home: Path, marker: str, bins: tuple[str, ...]) -> bool:
     return (home / marker).is_dir() or any(shutil.which(b) for b in bins)
 
 
-def _targets() -> list[Path]:
-    paths = []
+def _targets() -> list[tuple[Path, str | None]]:
+    """Every file to write, with whose block it gets (render)."""
+    paths: list[tuple[Path, str | None]] = []
     for pid, _label, home in _homes():
         for rel, marker, bins in TARGETS:
             if _in_use(home, marker, bins):
-                paths.append(home / rel)
+                paths.append((home / rel, pid))
         if not pid and _in_use(home, CURSOR_TARGET[1], CURSOR_TARGET[2]):
-            paths.append(home / CURSOR_TARGET[0])
+            paths.append((home / CURSOR_TARGET[0], None))
     return paths
 
 
@@ -140,10 +166,9 @@ def _drop_block(path: Path) -> None:
 
 def sync() -> None:
     """Write the current context everywhere (tunnel start, profiles change)."""
-    block = render()
-    for path in _targets():
+    for path, me in _targets():
         try:
-            _put_block(path, block)
+            _put_block(path, render(me))
         except OSError:
             pass
 
