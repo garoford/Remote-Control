@@ -30,7 +30,7 @@ from . import profiles
 from .history import TMUX_SOCKET, close_session
 from .workspaces import PROFILE_CLIS, PROFILE_RE, _children, _cmdline, change_workspaces, open_tab_beside
 
-AGENT_CLIS = PROFILE_CLIS | {"pi"}
+AGENT_CLIS = PROFILE_CLIS
 NOTES_KEEP = 200
 NOTES_FRESH = 15 * 60
 PREVIEW_MAX = 200

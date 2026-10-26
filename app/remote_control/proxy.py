@@ -403,6 +403,17 @@ class Sidecar:
                     req = {}
                 self._json(conn, pane_marks(req.get("boxes") if isinstance(req, dict) else None))
                 return
+            if path == "/rc-herdr-owner" and method == "POST":
+                from remote_control.herdr import set_pane_owner
+
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, ValueError):
+                    req = {}
+                if not isinstance(req, dict):
+                    req = {}
+                self._json(conn, set_pane_owner(req.get("pane"), req.get("profile")))
+                return
             if path == "/rc-profile-ping" and method == "POST":
                 try:
                     req = json.loads(body.decode("utf-8") or "{}")

@@ -3159,7 +3159,8 @@ html.rc-is-empty #rc-net-badge {
 }
 
 /* Who opened each herdr pane: a mark on the pane frame's top-right corner
-   (extra_keys.js finds the frames). Clicks and selection pass through. */
+   (extra_keys.js finds the frames). Clicks and selection pass through,
+   except on the mark itself: it opens the menu to change the pane's user. */
 #rc-pane-marks {
   position: fixed;
   z-index: 2147482997;
@@ -3184,6 +3185,15 @@ html.rc-is-empty #rc-net-badge {
     0 0 0 2px rgb(var(--rc-surface-rgb) / 0.9),
     0 2px 6px rgb(var(--rc-shade) / 0.3);
   animation: rc-empty-in 220ms ease both;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+#rc-pane-marks .rc-ws-profile-dot:hover,
+#rc-pane-marks .rc-ws-profile-dot:focus-visible {
+  opacity: 1;
+  transform: scale(1.08);
 }
 
 /* "Cerrar sesión" at the foot of the drawer */

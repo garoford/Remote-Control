@@ -26,8 +26,12 @@ _rc_cli() {
   # An explicit RC_PROFILE wins, empty included (the primary user): an agent
   # launching another one picks its account (agent_context.py), and a CLI's
   # own shells keep the account it runs with.
+  # Next, a herdr pane someone gave to a profile (its mark's menu, herdr.py).
   local id="${RC_PROFILE-}" home=""
-  if (( ! ${+RC_PROFILE} )) && [[ -r "$_RC_ACTIVE" ]]; then
+  local pin="$_RC_BASE/pane-profile/${HERDR_PANE_ID-}"
+  if (( ! ${+RC_PROFILE} )) && [[ -n "${HERDR_PANE_ID-}" && -r "$pin" ]]; then
+    IFS= read -r id < "$pin"
+  elif (( ! ${+RC_PROFILE} )) && [[ -r "$_RC_ACTIVE" ]]; then
     IFS=$'\t' read -r id home < "$_RC_ACTIVE"
   fi
   if [[ -n "$id" ]]; then
@@ -60,7 +64,7 @@ _rc_cli() {
     command "${pre[@]}" "$cli" "$@"
 }
 
-for _rc_name in claude agent cursor-agent codex gemini agy aider opencode crush goose qwen amp copilot; do
+for _rc_name in claude agent cursor-agent codex gemini agy aider opencode crush goose qwen amp copilot pi; do
   (( $+commands[$_rc_name] )) || continue
   eval "function $_rc_name { _rc_cli $_rc_name \"\$@\" }"
 done

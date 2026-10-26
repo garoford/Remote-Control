@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from .workspaces import AUTO_RESUME, _profile_home, cli_profile, detect_cli, foreground_argv, rerun_line, resume_command
@@ -249,6 +253,7 @@ def pane_marks(raw_boxes: object) -> dict:
         for pid in live - fresh.keys():
             fresh[pid] = active
         _save_owners(fresh)
+        _drop_dead_pins(live)
     candidates = []
     for layout in snap.get("layouts") or []:
         if isinstance(layout, dict) and (ids := _shape_match(boxes, _layout_panes(layout))):
@@ -270,3 +275,117 @@ def pane_marks(raw_boxes: object) -> dict:
         return {"ok": True, "marks": []}
     _, ids = candidates[0]
     return {"ok": True, "marks": [{"box": i, "pane": pid, "owner": fresh.get(pid, "")} for i, pid in enumerate(ids)]}
+
+
+# --- changing whose a pane is ----------------------------------------------------
+# Clicking a pane's mark picks another profile for it. The pick is pinned in
+# pane-profile/<pane id>, which the shell wrapper (web/profiles.zsh) reads
+# through HERDR_PANE_ID: every CLI started in that pane then runs with that
+# profile's account, whichever device typed last. A Claude waiting for input
+# in the pane comes back right away with the new account, in the same chat
+# (rc_sharechats.py links it into every profile).
+
+PANE_RE = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
+RESTART_WAIT_S = 6.0
+
+
+def _pins_dir() -> Path:
+    from .profiles import base_dir
+
+    return base_dir() / "pane-profile"
+
+
+def _drop_dead_pins(live: set[str]) -> None:
+    try:
+        pins = list(_pins_dir().iterdir())
+    except OSError:
+        return
+    for pin in pins:
+        if pin.name not in live:
+            try:
+                pin.unlink()
+            except OSError:
+                pass
+
+
+def _foreground_pgid(shell_pid: int) -> int | None:
+    """Process group of the job in front of the pane's shell, None at a prompt."""
+    try:
+        stat = Path(f"/proc/{shell_pid}/stat").read_text()
+    except OSError:
+        return None
+    fields = stat[stat.rindex(")") + 2 :].split()
+    try:
+        pgrp, tpgid = int(fields[2]), int(fields[5])
+    except (IndexError, ValueError):
+        return None
+    return tpgid if tpgid > 0 and tpgid != pgrp else None
+
+
+def _share_chats() -> None:
+    from .profiles import base_dir
+
+    script = Path(__file__).with_name("web") / "rc_sharechats.py"
+    try:
+        subprocess.run([sys.executable, "-I", str(script), str(base_dir())], timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _move_cli(pane: str, prof: str, status: str) -> dict:
+    """Bring a waiting Claude back with the pane's new account, same chat."""
+    proc = (_api("pane", "process-info", "--pane", pane) or {}).get("process_info") or {}
+    shell_pid = proc.get("shell_pid")
+    if not isinstance(shell_pid, int) or shell_pid <= 0:
+        return {"restarted": False}
+    fg = _foreground_pgid(shell_pid)
+    if fg is None:
+        return {"restarted": False}
+    current = cli_profile(shell_pid)
+    cli, sid = detect_cli(shell_pid, home=_profile_home(current))
+    if not cli or current == prof:
+        return {"restarted": False}
+    if cli != "claude" or not sid:
+        return {"restarted": False, "note": f"{cli} sigue con la cuenta anterior hasta que lo cierres"}
+    if status == "working":
+        return {"restarted": False, "note": "Claude está trabajando: el cambio aplica cuando lo vuelvas a abrir"}
+    _share_chats()
+    try:
+        os.killpg(fg, signal.SIGTERM)
+    except OSError:
+        return {"restarted": False, "note": "No se pudo cerrar Claude"}
+    deadline = time.monotonic() + RESTART_WAIT_S
+    while _foreground_pgid(shell_pid) is not None:
+        if time.monotonic() > deadline:
+            return {"restarted": False, "note": "Claude no se cerró: ciérralo y ábrelo de nuevo"}
+        time.sleep(0.2)
+    line = resume_command("claude", sid, home=_profile_home(prof)) or "claude"
+    try:
+        subprocess.run([_herdr_bin(), "pane", "run", pane, f" RC_PROFILE={prof} {line}"], capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return {"restarted": False, "note": "Claude se cerró: ábrelo de nuevo"}
+    return {"restarted": True}
+
+
+def set_pane_owner(pane: object, prof: object) -> dict:
+    """Make a herdr pane another profile's: its mark, and the account its CLIs use."""
+    from .profiles import home_of
+
+    if not isinstance(pane, str) or not PANE_RE.match(pane):
+        return {"ok": False, "error": "Panel no válido"}
+    prof = str(prof or "")
+    if prof and home_of(prof) is None:
+        return {"ok": False, "error": "Ese perfil no existe"}
+    panes = (_api("pane", "list") or {}).get("panes") or []
+    info = next((p for p in panes if isinstance(p, dict) and p.get("pane_id") == pane), None)
+    if info is None:
+        return {"ok": False, "error": "Ese panel ya no existe"}
+    owners = _load_owners()
+    owners[pane] = prof
+    _save_owners(owners)
+    try:
+        _pins_dir().mkdir(parents=True, exist_ok=True)
+        (_pins_dir() / pane).write_text(prof + "\n", encoding="utf-8")
+    except OSError:
+        return {"ok": False, "error": "No se pudo guardar"}
+    return {"ok": True, **_move_cli(pane, prof, str(info.get("agent_status") or ""))}

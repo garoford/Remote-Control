@@ -980,7 +980,7 @@ def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
 
 # CLIs the shell wrapper (web/profiles.zsh) runs with a profile's account.
 PROFILE_CLIS = frozenset(
-    ("claude", "agent", "cursor-agent", "codex", "gemini", "agy", "aider", "opencode", "crush", "goose", "qwen", "amp", "copilot")
+    ("claude", "agent", "cursor-agent", "codex", "gemini", "agy", "aider", "opencode", "crush", "goose", "qwen", "amp", "copilot", "pi")
 )
 
 

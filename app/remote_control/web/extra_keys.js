@@ -4633,7 +4633,7 @@
   // its top-right corner, the avatar of the profile that opened it. Each
   // device has its own herdr view, so the page finds the pane frames on its
   // own screen and the server says whose each pane is (herdr.pane_marks).
-  // Marks only: clicks, taps and selection go through to the terminal.
+  // Only the marks take clicks; everything else goes through to the terminal.
   var FRAME_TL = "┌┏╔╭";
   var FRAME_TR = "┐┓╗╮";
   var FRAME_V = "│┃║";
@@ -4745,7 +4745,20 @@
     if (!host) {
       host = document.createElement("div");
       host.id = "rc-pane-marks";
-      host.setAttribute("aria-hidden", "true");
+      // The marks take clicks (who the pane is); the rest passes through.
+      host.addEventListener("pointerdown", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+      host.addEventListener("click", function (ev) {
+        var dot = ev.target && ev.target.closest && ev.target.closest(".rc-pane-mark");
+        if (!dot) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        var pop = document.getElementById("rc-profile-pop");
+        if (pop && pop.dataset.pane === dot.dataset.pane) closeProfilePop();
+        else openPaneOwnerPop(dot);
+      });
       (document.body || document.documentElement).appendChild(host);
     }
     var rect = screen.getBoundingClientRect();
@@ -4760,8 +4773,13 @@
       if (!box || typeof mark.owner !== "string") return;
       var dot = dots[n] || host.appendChild(document.createElement("span"));
       n++;
-      dot.className = "rc-ws-profile-dot";
+      dot.className = "rc-ws-profile-dot rc-pane-mark";
       dot.textContent = (profileLabel(mark.owner) || "?").charAt(0).toUpperCase();
+      dot.dataset.pane = mark.pane || "";
+      dot.dataset.owner = mark.owner;
+      dot.setAttribute("role", "button");
+      dot.title = "Panel de " + profileLabel(mark.owner) + " · clic para cambiar de usuario";
+      dot.setAttribute("aria-label", dot.title);
       var a = profileAccent(mark.owner);
       dot.style.background = a ? a.dot : "";
       dot.style.color = a ? (light ? "#fff" : "#111214") : "";
@@ -4822,6 +4840,83 @@
       })
       .catch(function () {
         paneMarks.busy = false;
+      });
+  }
+
+  // A pane's mark opens this menu: picking a profile gives it the pane, so
+  // the CLIs there run with that account (herdr.set_pane_owner). A Claude
+  // waiting in the pane comes back with the new account, same chat.
+  function openPaneOwnerPop(dot) {
+    var pane = dot.dataset.pane;
+    if (!pane) return;
+    var owner = dot.dataset.owner || "";
+    closeProfilePop();
+    var pop = document.createElement("div");
+    pop.id = "rc-profile-pop";
+    pop.dataset.pane = pane;
+    pop.setAttribute("role", "menu");
+    var title = document.createElement("div");
+    title.className = "rc-profile-pop-title";
+    title.textContent = "Usuario de este panel";
+    pop.appendChild(title);
+    [{ id: "", label: profState.primary || "Principal" }].concat(profState.profiles).forEach(function (p) {
+      var b = wsButton("", "rc-profile-pop-item" + (p.id === owner ? " is-on" : ""), "Usar la cuenta de " + p.label + " en este panel", function () {
+        closeProfilePop();
+        if (p.id !== owner) setPaneOwner(pane, p.id);
+      });
+      b.setAttribute("role", "menuitemradio");
+      b.setAttribute("aria-checked", p.id === owner ? "true" : "false");
+      var mark = document.createElement("span");
+      mark.className = "rc-ws-profile-dot";
+      mark.textContent = (p.label || "?").charAt(0).toUpperCase();
+      var name = document.createElement("span");
+      name.className = "rc-ws-profile-name";
+      name.textContent = p.label;
+      paintProfileLabel(mark, name, p.id);
+      b.appendChild(mark);
+      b.appendChild(name);
+      pop.appendChild(b);
+    });
+    (document.body || document.documentElement).appendChild(pop);
+    var r = dot.getBoundingClientRect();
+    var w = pop.offsetWidth;
+    var h = pop.offsetHeight;
+    var top = r.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    pop.style.top = Math.round(top) + "px";
+    pop.style.left = Math.round(Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))) + "px";
+    document.addEventListener("pointerdown", profilePopOutside, true);
+    document.addEventListener("keydown", profilePopKey, true);
+  }
+
+  function setPaneOwner(pane, prof) {
+    var label = profileLabel(prof);
+    paneMarks.marks.forEach(function (mark) {
+      if (mark.pane === pane) mark.owner = prof;
+    });
+    placePaneMarks(xterm());
+    showToast("Panel → " + label + "…");
+    fetch("/rc-herdr-owner", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pane: pane, profile: prof }),
+    })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (res) {
+        paneMarks.at = 0;
+        if (!res || !res.ok) {
+          showToast((res && res.error) || "No se pudo cambiar el usuario");
+          return;
+        }
+        if (res.note) showToast(res.note);
+        else if (res.restarted) showToast("Claude volvió con la cuenta de " + label);
+        else showToast("Este panel ahora usa la cuenta de " + label);
+      })
+      .catch(function () {
+        paneMarks.at = 0;
+        showToast("No se pudo cambiar el usuario");
       });
   }
 
@@ -6030,7 +6125,7 @@
 
   function profilePopOutside(ev) {
     var t = ev.target;
-    if (t && t.closest && t.closest("#rc-profile-pop, #rc-profile-chip")) return;
+    if (t && t.closest && t.closest("#rc-profile-pop, #rc-profile-chip, .rc-pane-mark")) return;
     closeProfilePop();
   }
 
