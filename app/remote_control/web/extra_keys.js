@@ -4374,11 +4374,22 @@
     if (!dot) {
       dot = document.createElement("span");
       dot.className = "rc-tab-owner";
-      dot.setAttribute("aria-hidden", "true");
+      dot.setAttribute("role", "button");
+      // Its own clicks: the menu to change the tab's user, not the tab.
+      dot.addEventListener("pointerdown", function (ev) {
+        ev.stopPropagation();
+      });
+      dot.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        toggleTabOwnerPop(dot, el.dataset.id);
+      });
       el.insertBefore(dot, el.firstChild);
     }
     var name = profileLabel(owner) || "?";
     dot.textContent = name.charAt(0).toUpperCase();
+    dot.title = "Pestaña de " + name + " · clic para cambiar de usuario";
+    dot.setAttribute("aria-label", dot.title);
     var a = profileAccent(owner);
     dot.style.background = a ? a.dot : "";
     dot.style.color = a ? (themeMode() === "light" ? "#fff" : "#111214") : "";
@@ -4773,7 +4784,7 @@
         ev.preventDefault();
         ev.stopPropagation();
         var pop = document.getElementById("rc-profile-pop");
-        if (pop && pop.dataset.pane === dot.dataset.pane) closeProfilePop();
+        if (pop && pop.dataset.key === "pane:" + dot.dataset.pane) closeProfilePop();
         else openPaneOwnerPop(dot);
       });
       (document.body || document.documentElement).appendChild(host);
@@ -4871,23 +4882,23 @@
   // A pane's mark opens this menu: picking a profile gives it the pane, so
   // the CLIs there run with that account (herdr.set_pane_owner). A Claude
   // waiting in the pane comes back with the new account, same chat.
-  function openPaneOwnerPop(dot) {
-    var pane = dot.dataset.pane;
-    if (!pane) return;
-    var owner = dot.dataset.owner || "";
+  // The profiles menu under a herdr pane's mark or a tab's dot: picking one
+  // gives it the pane or the tab. ``key`` tells two anchors apart, so a second
+  // click on the same one closes the menu.
+  function openOwnerPop(anchor, key, owner, title, pick) {
     closeProfilePop();
     var pop = document.createElement("div");
     pop.id = "rc-profile-pop";
-    pop.dataset.pane = pane;
+    pop.dataset.key = key;
     pop.setAttribute("role", "menu");
-    var title = document.createElement("div");
-    title.className = "rc-profile-pop-title";
-    title.textContent = "Usuario de este panel";
-    pop.appendChild(title);
+    var head = document.createElement("div");
+    head.className = "rc-profile-pop-title";
+    head.textContent = title;
+    pop.appendChild(head);
     [{ id: "", label: profState.primary || "Principal" }].concat(profState.profiles).forEach(function (p) {
-      var b = wsButton("", "rc-profile-pop-item" + (p.id === owner ? " is-on" : ""), "Usar la cuenta de " + p.label + " en este panel", function () {
+      var b = wsButton("", "rc-profile-pop-item" + (p.id === owner ? " is-on" : ""), "Usar la cuenta de " + p.label, function () {
         closeProfilePop();
-        if (p.id !== owner) setPaneOwner(pane, p.id);
+        if (p.id !== owner) pick(p.id);
       });
       b.setAttribute("role", "menuitemradio");
       b.setAttribute("aria-checked", p.id === owner ? "true" : "false");
@@ -4903,15 +4914,74 @@
       pop.appendChild(b);
     });
     (document.body || document.documentElement).appendChild(pop);
-    var r = dot.getBoundingClientRect();
+    var r = anchor.getBoundingClientRect();
     var w = pop.offsetWidth;
     var h = pop.offsetHeight;
     var top = r.bottom + 6;
     if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    // Opens toward the middle of the screen from wherever the anchor is.
+    var left = r.left + r.width / 2 < window.innerWidth / 2 ? r.left : r.right - w;
     pop.style.top = Math.round(top) + "px";
-    pop.style.left = Math.round(Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))) + "px";
+    pop.style.left = Math.round(Math.max(8, Math.min(left, window.innerWidth - w - 8))) + "px";
     document.addEventListener("pointerdown", profilePopOutside, true);
     document.addEventListener("keydown", profilePopKey, true);
+  }
+
+  function openPaneOwnerPop(dot) {
+    var pane = dot.dataset.pane;
+    if (!pane) return;
+    openOwnerPop(dot, "pane:" + pane, dot.dataset.owner || "", "Usuario de este panel", function (id) {
+      setPaneOwner(pane, id);
+    });
+  }
+
+  // A plain tab's dot: its owner sets its size and the account of its CLIs
+  // (herdr.set_tab_owner).
+  function toggleTabOwnerPop(dot, tab) {
+    var pop = document.getElementById("rc-profile-pop");
+    if (pop && pop.dataset.key === "tab:" + tab) {
+      closeProfilePop();
+      return;
+    }
+    var item = sessionCache.filter(function (s) {
+      return s.id === tab;
+    })[0];
+    var owner = item && typeof item.owner === "string" ? item.owner : "";
+    openOwnerPop(dot, "tab:" + tab, owner, "Usuario de esta pestaña", function (id) {
+      setTabOwner(tab, id);
+    });
+  }
+
+  function setTabOwner(tab, prof) {
+    var label = profileLabel(prof);
+    sessionCache.forEach(function (item) {
+      if (item.id === tab) item.owner = prof;
+    });
+    paintSessions();
+    showToast("Pestaña → " + label + "…");
+    fetch("/rc-tab-owner", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tab: tab, profile: prof }),
+    })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (res) {
+        pullSessions();
+        pollGuestSize();
+        if (!res || !res.ok) {
+          showToast((res && res.error) || "No se pudo cambiar el usuario");
+          return;
+        }
+        if (res.note) showToast(res.note);
+        else if (res.restarted) showToast("Claude volvió con la cuenta de " + label);
+        else showToast("Esta pestaña ahora es de " + label);
+      })
+      .catch(function () {
+        pullSessions();
+        showToast("No se pudo cambiar el usuario");
+      });
   }
 
   function setPaneOwner(pane, prof) {
@@ -6150,7 +6220,7 @@
 
   function profilePopOutside(ev) {
     var t = ev.target;
-    if (t && t.closest && t.closest("#rc-profile-pop, #rc-profile-chip, .rc-pane-mark")) return;
+    if (t && t.closest && t.closest("#rc-profile-pop, #rc-profile-chip, .rc-pane-mark, .rc-tab-owner")) return;
     closeProfilePop();
   }
 
@@ -7605,6 +7675,7 @@
     anim.appendChild(vgrid);
     [
       ["lofi", "Lofi"],
+      ["anime", "Anime"],
       ["naturaleza", "Naturaleza"],
     ].forEach(function (group) {
       var items = bgCatalog.filter(function (c) {

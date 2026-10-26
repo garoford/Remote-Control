@@ -127,24 +127,53 @@ ENCODERS = (
     ("libvpx-vp9", "webm", ["-deadline", "realtime", "-cpu-used", "8"]),
 )
 
-# Free to use (Mixkit Free License). Nothing is stored in the repo: the
-# server downloads a clip the first time someone picks it.
+
+
+def _mixkit(cid: str, title: str, group: str, vid: int, res: int) -> tuple:
+    base = f"https://assets.mixkit.co/videos/{vid}/{vid}"
+    return (cid, title, group, f"{base}-{res}.mp4", f"{base}-360.mp4")
+
+
+def _pixabay(cid: str, title: str, path: str) -> tuple:
+    base = f"https://cdn.pixabay.com/video/{path}"
+    return (cid, title, "anime", f"{base}_large.mp4", f"{base}_tiny.jpg")
+
+
+# (id, title, group, video URL, thumbnail source: a small video or a still).
+# Free to use: Mixkit Free License, Pixabay Content License. Nothing is
+# stored in the repo: the server downloads a clip the first time someone
+# picks it.
 CATALOG = (
-    ("lluvia-ventana", "Lluvia en la ventana", "lofi", 28085, 720),
-    ("ventana-luces", "Ventana lluviosa", "lofi", 2846, 1080),
-    ("gotas-vidrio", "Gotas en el vidrio", "lofi", 21144, 720),
-    ("gato-ventana", "Gato en la ventana", "lofi", 33951, 720),
-    ("calle-noche", "Calle de noche", "lofi", 6754, 720),
-    ("calle-mojada", "Calle mojada", "lofi", 4331, 1080),
-    ("olas", "Olas", "naturaleza", 17972, 720),
-    ("atardecer", "Atardecer", "naturaleza", 4205, 1080),
-    ("montanas", "Montañas", "naturaleza", 41545, 1080),
-    ("fogata", "Fogata", "naturaleza", 1243, 1080),
-    ("rio-bosque", "Río en el bosque", "naturaleza", 51585, 1080),
-    ("nubes", "Sobre las nubes", "naturaleza", 2408, 1080),
-    ("tormenta", "Tormenta", "naturaleza", 47948, 720),
-    ("mar", "Mar turquesa", "naturaleza", 42498, 1080),
+    _mixkit("lluvia-ventana", "Lluvia en la ventana", "lofi", 28085, 720),
+    _mixkit("ventana-luces", "Ventana lluviosa", "lofi", 2846, 1080),
+    _mixkit("gotas-vidrio", "Gotas en el vidrio", "lofi", 21144, 720),
+    _mixkit("gato-ventana", "Gato en la ventana", "lofi", 33951, 720),
+    _mixkit("calle-noche", "Calle de noche", "lofi", 6754, 720),
+    _mixkit("calle-mojada", "Calle mojada", "lofi", 4331, 1080),
+    _pixabay("anime-tren", "Tren de noche", "2025/10/23/311602"),
+    _pixabay("anime-gato-libro", "Gato y libro", "2025/10/27/312345"),
+    _pixabay("anime-audifonos", "Chica con gato", "2025/04/13/271841"),
+    _pixabay("anime-estudio", "Estudiando", "2025/05/03/276498"),
+    _pixabay("anime-atardecer", "Atardecer en la ciudad", "2025/11/08/314688"),
+    _pixabay("anime-ventana", "Gato en la ventana", "2024/12/11/246243"),
+    _pixabay("anime-paraguas", "Lluvia con paraguas", "2025/10/23/311563"),
+    _pixabay("anime-lectura", "Leyendo", "2025/08/17/297863"),
+    _pixabay("anime-aldea", "Aldea de noche", "2022/01/14/104372-666197751"),
+    _pixabay("anime-gato-lampara", "Gato dormido", "2026/04/11/345856"),
+    _pixabay("anime-sofa", "Siesta en el sofá", "2024/12/11/246241"),
+    _mixkit("olas", "Olas", "naturaleza", 17972, 720),
+    _mixkit("atardecer", "Atardecer", "naturaleza", 4205, 1080),
+    _mixkit("montanas", "Montañas", "naturaleza", 41545, 1080),
+    _mixkit("fogata", "Fogata", "naturaleza", 1243, 1080),
+    _mixkit("rio-bosque", "Río en el bosque", "naturaleza", 51585, 1080),
+    _mixkit("nubes", "Sobre las nubes", "naturaleza", 2408, 1080),
+    _mixkit("tormenta", "Tormenta", "naturaleza", 47948, 720),
+    _mixkit("mar", "Mar turquesa", "naturaleza", 42498, 1080),
 )
+USER_AGENT = "Mozilla/5.0 Remote-Control"
+THUMB_MAX_BYTES = 20 * 1024 * 1024
+# JPEG wants full-range color; some clips (Pixabay's) are tagged limited range.
+STILL_FILTER = "out_range=full,format=yuvj420p"
 
 _jobs: set[str] = set()
 _downloads: dict[str, float] = {}
@@ -152,11 +181,6 @@ _jobs_lock = threading.Lock()
 # One ffmpeg at a time: the tunnel's machine is also someone's computer.
 _encode_lock = threading.Lock()
 _thumb_lock = threading.Lock()
-
-
-def _catalog_url(item: tuple, res: int | None = None) -> str:
-    vid = item[3]
-    return f"https://assets.mixkit.co/videos/{vid}/{vid}-{res or item[4]}.mp4"
 
 
 def _catalog_item(cid: str) -> tuple | None:
@@ -271,7 +295,7 @@ def catalog() -> list[dict]:
     """The preset clips: {id, title, group, video, state, progress}."""
     mapping = _catalog_map()
     out = []
-    for cid, title, group, _vid, _res in CATALOG:
+    for cid, title, group, _url, _thumb in CATALOG:
         entry = {"id": cid, "title": title, "group": group, "video": "", "state": "", "progress": 0.0}
         with _jobs_lock:
             downloading = _downloads.get(cid)
@@ -371,7 +395,7 @@ def _download(item: tuple) -> None:
     base.mkdir(parents=True, exist_ok=True)
     part = base / f".dl-{cid}.part"
     try:
-        req = urllib.request.Request(_catalog_url(item), headers={"User-Agent": "Mozilla/5.0 Remote-Control"})
+        req = urllib.request.Request(item[3], headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=30) as resp, open(part, "wb") as fh:
             total = int(resp.headers.get("Content-Length") or 0)
             got = 0
@@ -398,7 +422,11 @@ def _download(item: tuple) -> None:
 
 
 def catalog_thumb(cid: str) -> Path | None:
-    """A still of a preset clip (from its small preview), made once."""
+    """A still of a preset clip, made once from its small preview or still.
+
+    The source is downloaded first: some CDNs (Pixabay's) break ffmpeg's
+    seeking over HTTP.
+    """
     item = _catalog_item(cid)
     if item is None:
         return None
@@ -413,14 +441,30 @@ def catalog_thumb(cid: str) -> Path | None:
             return path
         folder().mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".thumb-{cid}.jpg")
-        cmd = [ffmpeg, "-v", "error", "-y", "-ss", "2", "-i", _catalog_url(item, 360), "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", "-f", "image2", str(tmp)]
+        src = path.with_name(f".thumb-{cid}.src")
+        seek = [] if item[4].endswith(".jpg") else ["-ss", "2"]
+        cmd = [ffmpeg, "-v", "error", "-y", *seek, "-i", str(src), "-frames:v", "1", "-vf", f"scale=320:-2:{STILL_FILTER}", "-q:v", "5", "-f", "image2", str(tmp)]
         try:
+            _fetch(item[4], src, THUMB_MAX_BYTES)
             subprocess.run(cmd, capture_output=True, timeout=30, check=True)
             os.replace(tmp, path)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, ValueError, subprocess.SubprocessError, BackgroundError):
             tmp.unlink(missing_ok=True)
             return None
+        finally:
+            src.unlink(missing_ok=True)
     return path
+
+
+def _fetch(url: str, dest: Path, limit: int) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    got = 0
+    with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as fh:
+        while block := resp.read(1 << 20):
+            got += len(block)
+            if got > limit:
+                raise BackgroundError("Archivo demasiado grande")
+            fh.write(block)
 
 
 _encoders_seen: list[str] | None = None
@@ -530,7 +574,7 @@ def _process(work: Path, vid: str, source: str) -> None:
             made.append(poster)
             seek = str(min(1.0, duration / 2)) if duration else "0"
             subprocess.run(
-                [ffmpeg, "-v", "error", "-y", "-ss", seek, "-i", str(full), "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", "-f", "image2", str(poster)],
+                [ffmpeg, "-v", "error", "-y", "-ss", seek, "-i", str(full), "-frames:v", "1", "-vf", f"scale=640:-2:{STILL_FILTER}", "-q:v", "4", "-f", "image2", str(poster)],
                 capture_output=True,
                 timeout=60,
                 check=True,

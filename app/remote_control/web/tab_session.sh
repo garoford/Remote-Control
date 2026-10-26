@@ -85,6 +85,12 @@ fi
 if [[ -n "$prof" && "$prof" != "$owner_prof" ]]; then
   attach_flags=(-f ignore-size)
 fi
+# Whose this client is, so its ignore-size can follow when the tab changes
+# owner (herdr.set_tab_owner). The client's name is this terminal.
+client_tty="$(tty 2>/dev/null || true)"
+if [[ -n "$prof" && "$client_tty" == /dev/* ]]; then
+  tmux "${args[@]}" set-option -s "@rc_cprof_${client_tty//[^a-z0-9]/_}" "$prof" 2>/dev/null || true
+fi
 pin_size "$name"
 
 pane_cmd() {

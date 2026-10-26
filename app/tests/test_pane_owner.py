@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -108,10 +109,12 @@ class WrapperPinTests(unittest.TestCase):
         fake.chmod(0o755)
         self.path = f"{bin_dir}:{os.environ.get('PATH', '')}"
 
-    def run_claude(self, pane: str) -> str:
+    def run_claude(self, pane: str, tmux: str = "") -> str:
         env = {"HOME": str(self.home), "PATH": self.path}
         if pane:
             env["HERDR_PANE_ID"] = pane
+        if tmux:
+            env["TMUX"] = tmux
         out = subprocess.run(
             ["zsh", "-fc", f"source {shlex.quote(str(WRAPPER))}; claude"], env=env, capture_output=True, text=True, timeout=10
         )
@@ -126,6 +129,16 @@ class WrapperPinTests(unittest.TestCase):
         (self.base / "pane-profile").mkdir()
         (self.base / "pane-profile" / "w1:p2").write_text("\n")
         self.assertEqual(self.run_claude("w1:p2"), f"|{self.home}")
+
+    def test_pinned_tab(self) -> None:
+        fake = self.home / "bin" / "tmux"
+        fake.write_text('#!/bin/sh\necho rcabcdefghij\n')
+        fake.chmod(0o755)
+        (self.base / "pane-profile").mkdir()
+        (self.base / "pane-profile" / "rcabcdefghij").write_text("cuenta2\n")
+        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/cf-remote,123,0"), f"cuenta2|{self.base}/profiles/cuenta2")
+        # Another tmux server is not a Remote Control tab.
+        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/default,123,0"), f"otro|{self.base}/profiles/otro")
 
     def test_unpinned_pane_follows_the_active_profile(self) -> None:
         self.assertEqual(self.run_claude("w1:p5"), f"otro|{self.base}/profiles/otro")
@@ -202,3 +215,78 @@ class HoldPaneTests(unittest.TestCase):
         herdr._drop_dead_holds({"w1:p2"})
         self.assertEqual(list(herdr._holds), ["w1:p2"])
         self.started[0].stdin.close.assert_called_once()
+
+
+class SetTabOwnerTests(unittest.TestCase):
+    TAB = "rcabcdefghij"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        (self.base / "profiles" / "cuenta2").mkdir(parents=True)
+        self.calls = []
+        self.command = "zsh"
+        self.activity = 0
+        self.clients = {"/dev/pts/6": "pcuenta2", "/dev/pts/7": "p", "/dev/pts/8": ""}
+        from remote_control import history
+
+        for p in (
+            mock.patch.object(profiles, "base_dir", lambda: self.base),
+            mock.patch.object(history, "_tmux", self.fake_tmux),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_tmux(self, socket, *args, text=False):
+        self.calls.append(args)
+        out = ""
+        if args[0] == "display-message":
+            out = f"4242\t{self.command}\t{self.activity}\n"
+        elif args[0] == "list-sessions":
+            out = f"{self.TAB}\n"
+        elif args[0] == "list-clients":
+            out = "/dev/pts/6\t120\t40\n/dev/pts/7\t200\t50\n/dev/pts/8\t90\t30\n"
+        elif args[:2] == ("show-options", "-sv"):
+            name = "/dev/pts/" + args[2].rsplit("_", 1)[1]
+            out = self.clients.get(name, "")
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    def test_new_owner_sizes_the_tab_and_others_watch(self) -> None:
+        with mock.patch.object(herdr, "_foreground_pgid", lambda pid: None):
+            res = herdr.set_tab_owner(self.TAB, "cuenta2")
+        self.assertEqual(res, {"ok": True, "restarted": False})
+        self.assertIn(("set-option", "-t", f"={self.TAB}:", "@rc_prof", "pcuenta2"), self.calls)
+        self.assertEqual((self.base / "pane-profile" / self.TAB).read_text(), "cuenta2\n")
+        self.assertIn(("refresh-client", "-t", "/dev/pts/6", "-f", "!ignore-size"), self.calls)
+        self.assertIn(("refresh-client", "-t", "/dev/pts/7", "-f", "ignore-size"), self.calls)
+        # A client of unknown profile is left as it was.
+        self.assertFalse(any(c[:3] == ("refresh-client", "-t", "/dev/pts/8") for c in self.calls))
+        self.assertIn(("resize-window", "-t", f"={self.TAB}:", "-x", "120", "-y", "40"), self.calls)
+
+    def test_rejects_bad_input_and_herdr_tabs(self) -> None:
+        self.assertFalse(herdr.set_tab_owner("../x", "")["ok"])
+        self.assertFalse(herdr.set_tab_owner(self.TAB, "nadie")["ok"])
+        self.command = "herdr"
+        self.assertIn("panel", herdr.set_tab_owner(self.TAB, "")["error"])
+
+    def test_busy_tab_keeps_its_cli(self) -> None:
+        self.activity = int(time.time())
+        with (
+            mock.patch.object(herdr, "_foreground_pgid", lambda pid: 77),
+            mock.patch.object(herdr, "cli_profile", lambda pid: ""),
+            mock.patch.object(herdr, "detect_cli", lambda pid, home=None: ("claude", "abc")),
+            mock.patch.object(herdr.os, "killpg") as kill,
+        ):
+            res = herdr.set_tab_owner(self.TAB, "cuenta2")
+        kill.assert_not_called()
+        self.assertIn("trabajando", res["note"])
+
+    def test_old_tab_pins_are_swept_but_herdr_pins_stay(self) -> None:
+        pins = self.base / "pane-profile"
+        pins.mkdir()
+        (pins / "rczzzzzzzzzz").write_text("\n")
+        (pins / "w1:p1").write_text("\n")
+        with mock.patch.object(herdr, "_foreground_pgid", lambda pid: None):
+            herdr.set_tab_owner(self.TAB, "")
+        self.assertEqual(sorted(p.name for p in pins.iterdir()), [self.TAB, "w1:p1"])

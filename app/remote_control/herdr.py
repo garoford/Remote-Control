@@ -420,7 +420,8 @@ def _drop_dead_pins(live: set[str]) -> None:
     except OSError:
         return
     for pin in pins:
-        if pin.name not in live:
+        # Tab pins (set_tab_owner) are not herdr panes.
+        if PANE_RE.match(pin.name) and pin.name not in live:
             try:
                 pin.unlink()
             except OSError:
@@ -452,11 +453,24 @@ def _share_chats() -> None:
 
 
 def _move_cli(pane: str, prof: str, status: str) -> dict:
-    """Bring a waiting Claude back with the pane's new account, same chat."""
+    """Bring a waiting Claude in a herdr pane back with its new account, same chat."""
     proc = (_api("pane", "process-info", "--pane", pane) or {}).get("process_info") or {}
     shell_pid = proc.get("shell_pid")
     if not isinstance(shell_pid, int) or shell_pid <= 0:
         return {"restarted": False}
+
+    def run(line: str) -> None:
+        subprocess.run([_herdr_bin(), "pane", "run", pane, line], capture_output=True, timeout=5, check=False)
+
+    return _restart_cli(shell_pid, prof, status == "working", run)
+
+
+def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
+    """Close a waiting Claude under shell_pid and reopen it as prof, same chat.
+
+    ``run`` types a command line in that shell. A Claude at work, or another
+    CLI, keeps its account until someone closes it.
+    """
     fg = _foreground_pgid(shell_pid)
     if fg is None:
         return {"restarted": False}
@@ -466,7 +480,7 @@ def _move_cli(pane: str, prof: str, status: str) -> dict:
         return {"restarted": False}
     if cli != "claude" or not sid:
         return {"restarted": False, "note": f"{cli} sigue con la cuenta anterior hasta que lo cierres"}
-    if status == "working":
+    if working:
         return {"restarted": False, "note": "Claude está trabajando: el cambio aplica cuando lo vuelvas a abrir"}
     _share_chats()
     try:
@@ -480,7 +494,7 @@ def _move_cli(pane: str, prof: str, status: str) -> dict:
         time.sleep(0.2)
     line = resume_command("claude", sid, home=_profile_home(prof)) or "claude"
     try:
-        subprocess.run([_herdr_bin(), "pane", "run", pane, f" RC_PROFILE={prof} {line}"], capture_output=True, timeout=5, check=False)
+        run(f" RC_PROFILE={prof} {line}")
     except (OSError, subprocess.SubprocessError):
         return {"restarted": False, "note": "Claude se cerró: ábrelo de nuevo"}
     return {"restarted": True}
@@ -511,3 +525,84 @@ def set_pane_owner(pane: object, prof: object) -> dict:
     except OSError:
         return {"ok": False, "error": "No se pudo guardar"}
     return {"ok": True, **_move_cli(pane, prof, str(info.get("agent_status") or ""))}
+
+
+# --- changing whose a tab is ------------------------------------------------------
+# A plain tab (no herdr) has one owner: @rc_prof on its tmux session. Its
+# devices size the tab, everyone else attaches with ignore-size and sees it
+# scaled (tab_session.sh), and its CLIs run with the owner's account
+# (pane-profile/<tab>, read by web/profiles.zsh). tab_session.sh notes each
+# client's profile in @rc_cprof_<tty> so their flags can follow the change.
+
+# Output within this many seconds: the CLI in the tab is busy, leave it be.
+TAB_BUSY_S = 4
+
+
+def _client_key(client: str) -> str:
+    return "@rc_cprof_" + re.sub(r"[^a-z0-9]", "_", client)
+
+
+def _sweep_tab_pins(live: set[str]) -> None:
+    from .history import TAB_RE
+
+    try:
+        pins = list(_pins_dir().iterdir())
+    except OSError:
+        return
+    for pin in pins:
+        if TAB_RE.match(pin.name) and pin.name not in live:
+            pin.unlink(missing_ok=True)
+
+
+def set_tab_owner(tab: object, prof: object) -> dict:
+    """Make a tab another profile's: its size, its dot and the account its CLIs use."""
+    from .history import TAB_RE, TMUX_SOCKET, _tmux
+    from .profiles import home_of
+
+    if not isinstance(tab, str) or not TAB_RE.match(tab):
+        return {"ok": False, "error": "Pestaña no válida"}
+    prof = str(prof or "")
+    if prof and home_of(prof) is None:
+        return {"ok": False, "error": "Ese perfil no existe"}
+    info = _tmux(
+        TMUX_SOCKET, "display-message", "-p", "-t", f"={tab}:", "#{pane_pid}\t#{pane_current_command}\t#{window_activity}", text=True
+    )
+    parts = info.stdout.strip().split("\t") if info.returncode == 0 else []
+    if len(parts) < 3:
+        return {"ok": False, "error": "Esa pestaña ya no existe"}
+    if parts[1] == "herdr":
+        return {"ok": False, "error": "En herdr se cambia el usuario de cada panel"}
+    _tmux(TMUX_SOCKET, "set-option", "-t", f"={tab}:", "@rc_prof", "p" + prof)
+    try:
+        _pins_dir().mkdir(parents=True, exist_ok=True)
+        (_pins_dir() / tab).write_text(prof + "\n", encoding="utf-8")
+    except OSError:
+        return {"ok": False, "error": "No se pudo guardar"}
+    listing = _tmux(TMUX_SOCKET, "list-sessions", "-F", "#{session_name}", text=True)
+    _sweep_tab_pins(set(listing.stdout.split()) if listing.returncode == 0 else {tab})
+    # The new owner's devices size the tab; everyone else's only watch it.
+    clients = _tmux(TMUX_SOCKET, "list-clients", "-t", f"={tab}", "-F", "#{client_name}\t#{client_width}\t#{client_height}", text=True)
+    owner_size = None
+    for raw in (clients.stdout or "").splitlines():
+        name, _, size = raw.partition("\t")
+        seen = _tmux(TMUX_SOCKET, "show-options", "-sv", _client_key(name), text=True).stdout.strip()
+        if not seen:
+            continue
+        if seen == "p" + prof:
+            _tmux(TMUX_SOCKET, "refresh-client", "-t", name, "-f", "!ignore-size")
+            owner_size = owner_size or size.split("\t")
+        else:
+            _tmux(TMUX_SOCKET, "refresh-client", "-t", name, "-f", "ignore-size")
+    if owner_size and len(owner_size) == 2:
+        _tmux(TMUX_SOCKET, "resize-window", "-t", f"={tab}:", "-x", owner_size[0], "-y", owner_size[1])
+    try:
+        shell_pid, activity = int(parts[0]), int(parts[2])
+    except ValueError:
+        return {"ok": True, "restarted": False}
+
+    def run(line: str) -> None:
+        _tmux(TMUX_SOCKET, "send-keys", "-t", f"={tab}:", "-l", line)
+        _tmux(TMUX_SOCKET, "send-keys", "-t", f"={tab}:", "Enter")
+
+    working = time.time() - activity < TAB_BUSY_S
+    return {"ok": True, **_restart_cli(shell_pid, prof, working, run)}

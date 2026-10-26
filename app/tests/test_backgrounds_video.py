@@ -136,6 +136,44 @@ class CatalogTests(VideoBase):
         self.assertEqual(backgrounds.video_state("0123456789abcdef")["state"], "error")
 
 
+class CatalogShapeTests(unittest.TestCase):
+    def test_entries_are_well_formed(self) -> None:
+        ids = [item[0] for item in backgrounds.CATALOG]
+        self.assertEqual(len(ids), len(set(ids)))
+        for cid, title, group, url, thumb in backgrounds.CATALOG:
+            self.assertRegex(cid, r"^[a-z0-9-]+$")
+            self.assertTrue(title)
+            self.assertIn(group, ("lofi", "anime", "naturaleza"))
+            self.assertTrue(url.startswith("https://") and url.endswith(".mp4"), url)
+            self.assertTrue(thumb.startswith("https://") and thumb.endswith((".mp4", ".jpg")), thumb)
+        self.assertTrue(any(item[2] == "anime" for item in backgrounds.CATALOG))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+class ThumbTests(VideoBase):
+    def test_thumb_from_a_still_is_downloaded_then_scaled(self) -> None:
+        still = Path(self.tmp.name) / "still.png"
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=960x540", "-frames:v", "1", str(still)],
+            check=True,
+            capture_output=True,
+        )
+        cid = next(item[0] for item in backgrounds.CATALOG if item[4].endswith(".jpg"))
+        with mock.patch.object(backgrounds, "_fetch", lambda url, dest, limit: shutil.copy(still, dest)):
+            path = backgrounds.catalog_thumb(cid)
+        self.assertIsNotNone(path)
+        self.assertGreater(path.stat().st_size, 1000)
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()), [f"thumb-{cid}.jpg"])
+
+    def test_failed_download_leaves_nothing(self) -> None:
+        def boom(url, dest, limit):
+            raise OSError("offline")
+
+        with mock.patch.object(backgrounds, "_fetch", boom):
+            self.assertIsNone(backgrounds.catalog_thumb("olas"))
+        self.assertEqual(list(self.folder.iterdir()), [])
+
+
 class EncoderTests(unittest.TestCase):
     def test_preference_order(self) -> None:
         listing = " V....D libopenh264  OpenH264\n V....D h264_nvenc  NVENC\n V....D libvpx-vp9  VP9\n"

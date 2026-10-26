@@ -26,10 +26,15 @@ _rc_cli() {
   # An explicit RC_PROFILE wins, empty included (the primary user): an agent
   # launching another one picks its account (agent_context.py), and a CLI's
   # own shells keep the account it runs with.
-  # Next, a herdr pane someone gave to a profile (its mark's menu, herdr.py).
-  local id="${RC_PROFILE-}" home=""
-  local pin="$_RC_BASE/pane-profile/${HERDR_PANE_ID-}"
-  if (( ! ${+RC_PROFILE} )) && [[ -n "${HERDR_PANE_ID-}" && -r "$pin" ]]; then
+  # Next, a herdr pane or a tab someone gave to a profile (the menu on its
+  # mark or dot, herdr.py).
+  local id="${RC_PROFILE-}" home="" pin=""
+  if [[ -n "${HERDR_PANE_ID-}" ]]; then
+    pin="$_RC_BASE/pane-profile/$HERDR_PANE_ID"
+  elif [[ "${TMUX-}" == */cf-remote,* ]]; then
+    pin="$_RC_BASE/pane-profile/$(tmux display-message -p '#S' 2>/dev/null)"
+  fi
+  if (( ! ${+RC_PROFILE} )) && [[ -f "$pin" && -r "$pin" ]]; then
     IFS= read -r id < "$pin"
   elif (( ! ${+RC_PROFILE} )) && [[ -r "$_RC_ACTIVE" ]]; then
     IFS=$'\t' read -r id home < "$_RC_ACTIVE"

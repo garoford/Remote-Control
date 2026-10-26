@@ -408,6 +408,17 @@ class Sidecar:
                     req = {}
                 self._json(conn, pane_marks(req.get("boxes"), req.get("viewer")))
                 return
+            if path == "/rc-tab-owner" and method == "POST":
+                from remote_control.herdr import set_tab_owner
+
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, ValueError):
+                    req = {}
+                if not isinstance(req, dict):
+                    req = {}
+                self._json(conn, set_tab_owner(req.get("tab"), req.get("profile")))
+                return
             if path == "/rc-herdr-owner" and method == "POST":
                 from remote_control.herdr import set_pane_owner
 

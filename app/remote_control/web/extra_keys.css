@@ -3341,7 +3341,13 @@ html.rc-is-empty #rc-net-badge {
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
-  pointer-events: none;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.rc-tab-owner:hover {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 2px rgb(var(--rc-text-rgb) / 0.18);
 }
 
 .rc-tab.has-owner:not(.is-active) .rc-tab-owner {
