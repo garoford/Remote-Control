@@ -121,6 +121,19 @@ install_pkgs() {
   need_cmd git && need_cmd python3 && need_cmd rsync || die "Faltan git, python3 o rsync."
 }
 
+# Debian/Ubuntu's ttyd package starts ttyd.service, a login prompt on
+# 127.0.0.1:7681. Remote Control runs its own ttyd: turn that one off when
+# it came with the package this script installed.
+HAD_TTYD=0
+need_cmd ttyd && HAD_TTYD=1
+quiet_ttyd_service() {
+  ((HAD_TTYD)) && return 0
+  need_cmd systemctl || return 0
+  systemctl is-enabled ttyd.service >/dev/null 2>&1 || systemctl is-active ttyd.service >/dev/null 2>&1 || return 0
+  log "Apagando ttyd.service (vino con el paquete ttyd; Remote Control usa su propio ttyd)…"
+  as_root systemctl disable --now ttyd.service >/dev/null 2>&1 || warn "no pude apagar ttyd.service"
+}
+
 uname_arch() {
   case "$(uname -m)" in
     x86_64 | amd64) printf amd64 ;;
@@ -285,6 +298,7 @@ checkout_src() {
 }
 
 install_pkgs
+quiet_ttyd_service
 install_ttyd
 install_cloudflared
 install_herdr

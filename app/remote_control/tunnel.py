@@ -191,10 +191,16 @@ class TunnelService:
         self.cf_pid_file = self.pid_dir / "cloudflared.pid"
         self.proxy_pid_file = self.pid_dir / "proxy.pid"
         self.ttyd_port_file = self.pid_dir / "ttyd.port"
+        self.proxy_port_file = self.pid_dir / "proxy.port"
         self.proxy_log = self.run_dir / "proxy.log"
         self.gate_file = self.run_dir / "gate.json"
         self._gate_path: Path | None = None
         self.assets_dir = self.run_dir / "rc-assets"
+        # The port a running tunnel took (7681 may be someone else's).
+        try:
+            self.port = int(self.proxy_port_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
         self.ttyd_port = self.port + 1
         self.font_reg_url = ""
         self.font_bold_url = ""
@@ -254,6 +260,8 @@ class TunnelService:
             )
         self.ensure_dirs()
         self.stop(silent=True)
+        self.port = self._pick_proxy_port()
+        self.proxy_port_file.write_text(str(self.port), encoding="utf-8")
         self.ttyd_port = self._pick_internal_port()
         self.ttyd_port_file.write_text(str(self.ttyd_port), encoding="utf-8")
         self._prepare_tab_session()
@@ -292,6 +300,7 @@ class TunnelService:
         self._pkill("ttyd --interface 127.0.0.1 --port")
         self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
         self.ttyd_port_file.unlink(missing_ok=True)
+        self.proxy_port_file.unlink(missing_ok=True)
         # Tabs keep running when only the web access goes down; workspaces.py
         # brings them back after a PC restart.
         if close_sessions:
@@ -444,8 +453,11 @@ class TunnelService:
             if proc.poll() is not None:
                 tail = self.proxy_log.read_text(encoding="utf-8", errors="replace")[-2000:]
                 raise TunnelError("El sidecar no arrancó.\n" + tail)
+            # The port was free before (_pick_proxy_port): open means ours.
             if self._port_open(self.port):
-                return
+                time.sleep(0.2)
+                if proc.poll() is None:
+                    return
             time.sleep(0.1)
         raise TunnelError("El sidecar no abrió el puerto.")
 
@@ -819,14 +831,31 @@ class TunnelService:
             "font-feature-settings:'liga' 1,'calt' 1;}</style>"
         )
 
+    def _pick_proxy_port(self) -> int:
+        """DEFAULT_PORT, unless another program has it (Debian's ttyd.service
+        listens there): cloudflared must never publish someone else's port."""
+        if self._can_bind(DEFAULT_PORT):
+            return DEFAULT_PORT
+        return self._free_port()
+
     def _pick_internal_port(self) -> int:
         candidate = self.port + 1
+        if self._can_bind(candidate):
+            return candidate
+        while True:
+            port = self._free_port()
+            if port != self.port:
+                return port
+
+    def _can_bind(self, port: int) -> bool:
         with socket.socket() as sock:
+            # Our own proxy's TIME_WAIT sockets do not count as taken.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                sock.bind(("127.0.0.1", candidate))
-                return candidate
+                sock.bind(("127.0.0.1", port))
+                return True
             except OSError:
-                return self._free_port()
+                return False
 
     def _port_open(self, port: int) -> bool:
         try:
