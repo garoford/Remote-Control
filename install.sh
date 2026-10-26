@@ -22,6 +22,22 @@ as_root() {
   fi
 }
 
+# `sudo ./install.sh` would install everything into /root, and the user then
+# gets "command not found". Re-run as that user; packages still go through
+# sudo, command by command.
+if ((EUID == 0)) && [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+  self="${BASH_SOURCE[0]:-}"
+  [[ -n "$self" && -f "$self" && "$self" != /dev/fd/* ]] \
+    || die "no uses sudo: se instalaría para root. Córrelo como tu usuario (pedirá la contraseña de sudo cuando haga falta)."
+  uid="$(id -u "$SUDO_USER")"
+  log "Instalando para $SUDO_USER, no para root…"
+  # That user's systemd session (SSH login), for the auto-update timer.
+  session=()
+  [[ -S "/run/user/$uid/bus" ]] && session=(XDG_RUNTIME_DIR="/run/user/$uid"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus")
+  exec sudo -u "$SUDO_USER" -H env "${session[@]}" bash "$self" "$@"
+fi
+
 # Everything Remote Control uses. The tunnel needs tmux, ttyd and cloudflared;
 # the window GTK 4 + libadwaita. The rest adds features: fontTools/brotli
 # (phone font), Pillow (image previews), zsh (per-profile AI CLIs), wl-copy
@@ -192,11 +208,19 @@ install_py_fallbacks() {
     || warn "pip no pudo instalar ${pip[*]}"
 }
 
+# ~/.local/bin (remote-control, herdr) on PATH: zsh never reads ~/.profile,
+# and Ubuntu's only adds it at a login where the folder already existed.
 # New AI CLIs take the active profile also in herdr panes and plain
 # terminals, and `rc` is on PATH (profiles.zsh, written by the tunnel).
-hook_zshrc() {
+hook_shells() {
+  local rc zrc="${ZDOTDIR:-$HOME}/.zshrc"
+  local path_line='[[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || export PATH="$HOME/.local/bin:$PATH"'
+  for rc in "$HOME/.bashrc" "$zrc"; do
+    [[ "$rc" == "$zrc" ]] && ! need_cmd zsh && continue
+    grep -qF "# Remote Control: PATH" "$rc" 2>/dev/null \
+      || printf '\n# Remote Control: PATH\n%s\n' "$path_line" >>"$rc"
+  done
   need_cmd zsh || return 0
-  local zrc="${ZDOTDIR:-$HOME}/.zshrc"
   if ! grep -qF "remote-control/profiles.zsh" "$zrc" 2>/dev/null; then
     printf '\n# Remote Control: AI CLI profiles and `rc`\n%s\n' \
       '[[ -r ~/.local/share/remote-control/profiles.zsh ]] && source ~/.local/share/remote-control/profiles.zsh' >>"$zrc"
@@ -269,12 +293,14 @@ TREE=""
 checkout_src
 [[ -f "$TREE/app/install.sh" ]] || die "No encuentro app/install.sh en $TREE"
 bash "$TREE/app/install.sh"
-hook_zshrc
+hook_shells
 report
 
 log ""
 log "Listo. Arranca con:  remote-control"
-log "Si no está en PATH:  $HOME/.local/bin/remote-control"
+[[ ":$PATH:" == *":$HOME/.local/bin:"* ]] \
+  || log "En esta terminal aún no está en PATH: abre otra o corre  exec \$SHELL -l"
+log "Sin escritorio (servidor): abre el CLI."
 log ""
 log "Auto-update: cada 3 min + al abrir/enfocar la app."
 log "Para pararlo:  systemctl --user disable --now remote-control-update.timer"

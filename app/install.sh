@@ -82,9 +82,10 @@ _install_updater() {
     "$unit_dir/remote-control-update.service"
   install -m 644 "$ROOT/systemd/remote-control-update.timer" \
     "$unit_dir/remote-control-update.timer"
-  if [[ -n "${XDG_RUNTIME_DIR:-}" ]] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload
-    systemctl --user enable --now remote-control-update.timer >/dev/null
+  if [[ -d "${XDG_RUNTIME_DIR:-/nonexistent}" ]] && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user daemon-reload 2>/dev/null \
+    && systemctl --user enable --now remote-control-update.timer >/dev/null 2>&1; then
+    :
   else
     printf '%s\n' "Aviso: no se activó el timer (sin sesión systemd de usuario)."
   fi

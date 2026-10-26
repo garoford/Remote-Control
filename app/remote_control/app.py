@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from remote_control.gate import GateUsage, consume_gate_args, write_password
@@ -66,4 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         write_password("")
     elif password is not None:
         write_password(password)
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        # A server over SSH: no window to open, the CLI does the same job.
+        from remote_control.tui import run
+
+        return run()
     return _run_gui(gtk_argv)
