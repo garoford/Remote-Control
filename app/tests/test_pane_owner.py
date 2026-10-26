@@ -134,3 +134,71 @@ class WrapperPinTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeProc:
+    def __init__(self, cmd, **kw):
+        self.cmd = cmd
+        self.stdin = mock.MagicMock()
+        self.dead = False
+
+    def poll(self):
+        return 0 if self.dead else None
+
+    def wait(self, timeout=None):
+        self.dead = True
+        return 0
+
+    def kill(self):
+        self.dead = True
+
+
+class HoldPaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.started = []
+
+        def popen(cmd, **kw):
+            proc = FakeProc(cmd)
+            self.started.append(proc)
+            return proc
+
+        p = mock.patch.object(herdr.subprocess, "Popen", popen)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(herdr._holds.clear)
+
+    def test_owner_size_from_frames(self) -> None:
+        # Framed: minus the frame and herdr's scrollbar column.
+        self.assertEqual(herdr._owner_size({"w": 62, "h": 43}, False), (59, 41))
+        self.assertEqual(herdr._owner_size({"w": 94, "h": 39}, True), (93, 39))
+
+    def test_holds_then_resizes_in_place(self) -> None:
+        self.assertTrue(herdr.hold_pane("w1:p1", 80, 30, "dabcdefgh1", 100.0))
+        self.assertIn("--takeover", self.started[0].cmd)
+        self.assertEqual(self.started[0].cmd[-4:], ["--cols", "80", "--rows", "30"])
+        self.assertFalse(herdr.hold_pane("w1:p1", 80, 30, "dabcdefgh1", 101.0))
+        self.assertTrue(herdr.hold_pane("w1:p1", 90, 32, "dabcdefgh1", 102.0))
+        self.assertEqual(len(self.started), 1)
+        sent = self.started[0].stdin.write.call_args[0][0]
+        self.assertEqual(json.loads(sent), {"type": "terminal.resize", "cols": 90, "rows": 32})
+
+    def test_other_device_needs_newer_typing(self) -> None:
+        herdr.hold_pane("w1:p1", 80, 30, "dabcdefgh1", 100.0)
+        self.assertFalse(herdr.hold_pane("w1:p1", 40, 20, "dzzzzzzzz9", 50.0))
+        self.assertTrue(herdr.hold_pane("w1:p1", 40, 20, "dzzzzzzzz9", 200.0))
+        self.assertEqual(herdr._holds["w1:p1"]["dev"], "dzzzzzzzz9")
+
+    def test_only_the_owners_panes_are_held(self) -> None:
+        boxes = [{"x": 0, "y": 0, "w": 62, "h": 43, "lines": []}, {"x": 62, "y": 0, "w": 62, "h": 22, "lines": []}]
+        viewer = {"prof": "pcuenta2", "dev": "dabcdefgh1", "single": False, "idle_ms": 0}
+        herdr._hold_owned(boxes, ["w1:p1", "w1:p2"], {"w1:p1": "cuenta2", "w1:p2": ""}, viewer)
+        self.assertEqual(list(herdr._holds), ["w1:p1"])
+        herdr._hold_owned(boxes, ["w1:p1", "w1:p2"], {"w1:p1": "cuenta2", "w1:p2": ""}, {"prof": "../x", "dev": "d1"})
+        self.assertEqual(list(herdr._holds), ["w1:p1"])
+
+    def test_dead_and_closed_panes_are_released(self) -> None:
+        herdr.hold_pane("w1:p1", 80, 30, "dabcdefgh1", 1.0)
+        herdr.hold_pane("w1:p2", 80, 30, "dabcdefgh1", 1.0)
+        herdr._drop_dead_holds({"w1:p2"})
+        self.assertEqual(list(herdr._holds), ["w1:p2"])
+        self.started[0].stdin.close.assert_called_once()

@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -235,8 +236,12 @@ def _pane_text(pane_id: str) -> str:
     return " ".join(result.stdout.split()) if result.returncode == 0 else ""
 
 
-def pane_marks(raw_boxes: object) -> dict:
-    """Owner profile of each pane frame the page sees ("" is the primary user)."""
+def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
+    """Owner profile of each pane frame the page sees ("" is the primary user).
+
+    ``viewer`` ({prof, dev, single, idle_ms}) says who measured the frames:
+    the panes of that profile get held at the size they have on its screen.
+    """
     from .profiles import read_active
 
     boxes = _clean_boxes(raw_boxes)
@@ -244,6 +249,7 @@ def pane_marks(raw_boxes: object) -> dict:
     if not boxes or not isinstance(snap, dict):
         return {"ok": True, "marks": []}
     live = {p["pane_id"] for p in snap.get("panes") or [] if isinstance(p, dict) and isinstance(p.get("pane_id"), str)}
+    _drop_dead_holds(live)
     if not live:
         return {"ok": True, "marks": []}
     owners = _load_owners()
@@ -274,7 +280,120 @@ def pane_marks(raw_boxes: object) -> dict:
     if not candidates:
         return {"ok": True, "marks": []}
     _, ids = candidates[0]
+    if isinstance(viewer, dict):
+        _hold_owned(boxes, ids, fresh, viewer)
     return {"ok": True, "marks": [{"box": i, "pane": pid, "owner": fresh.get(pid, "")} for i, pid in enumerate(ids)]}
+
+
+# --- each pane keeps its owner's size ------------------------------------------------
+# A herdr pane is one terminal with one size, and herdr gives it the size of
+# the last herdr client that attached: another person opening the tab would
+# reflow the owner's agent. Instead, while its owner's page reports the
+# pane's frame, a herdr terminal controller holds the pane at that size
+# (`herdr terminal session control --takeover`: it owns the size only; input
+# from every herdr client still goes through). Everyone else sees the pane
+# at the owner's size inside their own layout.
+
+PROF_ARG_RE = re.compile(r"^p([a-z0-9][a-z0-9_-]{0,31})?$")
+DEVICE_ID_RE = re.compile(r"^d[a-z0-9]{8,32}$")
+HOLD_MIN = (10, 3)
+HOLD_MAX = (1000, 500)
+# Two devices of the owner on screen: the one typed on last sets the size.
+_holds: dict[str, dict] = {}
+_holds_lock = threading.Lock()
+
+
+def _owner_size(box: dict, single: bool) -> tuple[int, int]:
+    """Pane size from the frame measured on screen.
+
+    Framed panes: the box includes the frame, and herdr keeps one column for
+    its scrollbar. A tab with one pane has no frame: the box is the area
+    right of the sidebar, still minus the scrollbar column.
+    """
+    if single:
+        return box["w"] - 1, box["h"]
+    return box["w"] - 3, box["h"] - 2
+
+
+def _hold_owned(boxes: list[dict], ids: list[str], owners: dict[str, str], viewer: dict) -> None:
+    prof = str(viewer.get("prof") or "")
+    dev = str(viewer.get("dev") or "")
+    if not PROF_ARG_RE.match(prof) or not DEVICE_ID_RE.match(dev):
+        return
+    try:
+        idle_ms = max(0, int(viewer.get("idle_ms") or 0))
+    except (TypeError, ValueError):
+        idle_ms = 0
+    typed_at = time.time() - idle_ms / 1000
+    single = viewer.get("single") is True and len(boxes) == 1
+    for box, pid in zip(boxes, ids):
+        if owners.get(pid, "") != prof[1:]:
+            continue
+        cols, rows = _owner_size(box, single)
+        if HOLD_MIN[0] <= cols <= HOLD_MAX[0] and HOLD_MIN[1] <= rows <= HOLD_MAX[1]:
+            hold_pane(pid, cols, rows, dev, typed_at)
+
+
+def hold_pane(pane: str, cols: int, rows: int, dev: str, typed_at: float) -> bool:
+    """Keep a pane at cols x rows. Returns whether this report changed anything."""
+    with _holds_lock:
+        hold = _holds.get(pane)
+        alive = hold is not None and hold["proc"].poll() is None
+        if alive and hold["dev"] != dev and typed_at <= hold["typed_at"]:
+            return False
+        if alive and hold["size"] == (cols, rows):
+            hold.update(dev=dev, typed_at=max(typed_at, hold["typed_at"]) if hold["dev"] == dev else typed_at)
+            return False
+        if alive:
+            try:
+                hold["proc"].stdin.write(json.dumps({"type": "terminal.resize", "cols": cols, "rows": rows}) + "\n")
+                hold["proc"].stdin.flush()
+                hold.update(size=(cols, rows), dev=dev, typed_at=typed_at)
+                return True
+            except (OSError, ValueError):
+                _stop(hold)
+        try:
+            proc = subprocess.Popen(
+                [_herdr_bin(), "terminal", "session", "control", pane, "--takeover", "--cols", str(cols), "--rows", str(rows)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError:
+            _holds.pop(pane, None)
+            return False
+        _holds[pane] = {"proc": proc, "size": (cols, rows), "dev": dev, "typed_at": typed_at}
+        return True
+
+
+def _stop(hold: dict) -> None:
+    proc = hold["proc"]
+    try:
+        # Closing stdin releases the terminal; herdr lays the pane out again.
+        proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def release_pane(pane: str) -> None:
+    with _holds_lock:
+        hold = _holds.pop(pane, None)
+    if hold is not None:
+        _stop(hold)
+
+
+def _drop_dead_holds(live: set[str]) -> None:
+    with _holds_lock:
+        gone = [pid for pid, hold in _holds.items() if pid not in live or hold["proc"].poll() is not None]
+        holds = [_holds.pop(pid) for pid in gone]
+    for hold in holds:
+        _stop(hold)
 
 
 # --- changing whose a pane is ----------------------------------------------------
@@ -381,6 +500,9 @@ def set_pane_owner(pane: object, prof: object) -> dict:
     if info is None:
         return {"ok": False, "error": "Ese panel ya no existe"}
     owners = _load_owners()
+    if owners.get(pane, "") != prof:
+        # The new owner's page holds it at their size from its next report.
+        release_pane(pane)
     owners[pane] = prof
     _save_owners(owners)
     try:

@@ -4646,6 +4646,16 @@
   var FRAME_V = "│┃║";
   var FRAME_BL = "└┗╚╰";
   var paneMarks = { sig: "", at: 0, busy: false, boxes: [], marks: [] };
+  var typedAt = 0;
+  ["keydown", "paste", "beforeinput"].forEach(function (type) {
+    document.addEventListener(
+      type,
+      function () {
+        typedAt = Date.now();
+      },
+      true
+    );
+  });
 
   function screenCells(term) {
     var buf = term.buffer.active;
@@ -4809,9 +4819,11 @@
     }
     var cells = screenCells(term);
     var boxes = findFrames(cells);
+    var single = false;
     if (!boxes.length) {
       var whole = singlePane(cells);
       if (whole) boxes = [whole];
+      single = !!whole;
     }
     var sig =
       tabId() +
@@ -4834,7 +4846,13 @@
     fetch("/rc-herdr-marks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ boxes: boxes }),
+      // Who measured these frames: panes of this profile keep this size
+      // (herdr.hold_pane); with two of its devices on screen, the one typed
+      // on last wins.
+      body: JSON.stringify({
+        boxes: boxes,
+        viewer: { prof: profileArg(), dev: deviceId(), single: single, idle_ms: Math.min(864e5, Date.now() - typedAt) },
+      }),
     })
       .then(function (resp) {
         return resp.json();

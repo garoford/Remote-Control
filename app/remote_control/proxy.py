@@ -404,7 +404,9 @@ class Sidecar:
                     req = json.loads(body.decode("utf-8") or "{}")
                 except (UnicodeDecodeError, ValueError):
                     req = {}
-                self._json(conn, pane_marks(req.get("boxes") if isinstance(req, dict) else None))
+                if not isinstance(req, dict):
+                    req = {}
+                self._json(conn, pane_marks(req.get("boxes"), req.get("viewer")))
                 return
             if path == "/rc-herdr-owner" and method == "POST":
                 from remote_control.herdr import set_pane_owner
