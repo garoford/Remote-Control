@@ -471,46 +471,11 @@
     term.options.fontSize = BASE_FONT;
   }
 
-  // Whose herdr tab this is: the profile owning most of the panes on screen
-  // (ties: the top-left pane). Every device sees the same panes, so they all
-  // agree; the others size their view to that profile's (history.herdr_size).
-  // Kept a few seconds while the marks reload after a resize.
-  var herdrAuth = { id: null, at: 0 };
-
-  function herdrAuthority() {
-    var count = {};
-    var first = null;
-    var firstAt = Infinity;
-    paneMarks.marks.forEach(function (mark) {
-      var box = paneMarks.boxes[mark.box];
-      if (!box || typeof mark.owner !== "string") return;
-      count[mark.owner] = (count[mark.owner] || 0) + 1;
-      if (box.y * 10000 + box.x < firstAt) {
-        firstAt = box.y * 10000 + box.x;
-        first = mark.owner;
-      }
-    });
-    var best = null;
-    var bestN = 0;
-    Object.keys(count).forEach(function (owner) {
-      if (count[owner] > bestN || (count[owner] === bestN && owner === first)) {
-        best = owner;
-        bestN = count[owner];
-      }
-    });
-    if (best !== null) herdrAuth = { id: best, at: Date.now() };
-    else if (Date.now() - herdrAuth.at > 6000) herdrAuth = { id: null, at: 0 };
-    return herdrAuth.id;
-  }
-
   function pollGuestSize() {
     var id = tabId();
     if (!id || document.hidden || window.__rcEmpty) return;
-    var extra = "";
-    if (onHerdrTab()) {
-      var auth = herdrAuthority();
-      extra = "&dev=" + encodeURIComponent(deviceId()) + "&auth=" + (auth === null ? "" : encodeURIComponent("p" + auth));
-    }
+    // herdr tabs: this device's view keeps this screen's size (history.herdr_size).
+    var extra = onHerdrTab() ? "&dev=" + encodeURIComponent(deviceId()) : "";
     fetch("/rc-tab-size?tab=" + encodeURIComponent(id) + "&prof=" + encodeURIComponent(profileArg()) + extra, { cache: "no-store" })
       .then(function (resp) {
         return resp.ok ? resp.json() : null;

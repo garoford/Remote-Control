@@ -435,3 +435,29 @@ class TabSizeTests(unittest.TestCase):
 
     def test_unreadable_size(self):
         self.assertEqual(self.size("", "p"), {"guest": False})
+
+
+class HerdrSizeTests(unittest.TestCase):
+    def test_view_gets_its_own_screen_size_back(self):
+        from unittest import mock
+
+        from remote_control import history
+
+        calls = []
+
+        def fake(socket, *args, **kw):
+            calls.append(args)
+            if args[0] == "list-sessions":
+                out = "hv-dabcdefgh1-rcabcdefghij\t\nrcabcdefghij\tdzzzzzzzz9\n"
+            elif args[0] == "list-clients":
+                out = "/dev/pts/6\thv-dabcdefgh1-rcabcdefghij\t237\t49\tattached,ignore-size,UTF-8\n/dev/pts/7\trcabcdefghij\t42\t34\tattached\n"
+            else:
+                out = ""
+            return subprocess.CompletedProcess([], 0, stdout=out, stderr="")
+
+        with mock.patch.object(history, "_tmux", fake):
+            self.assertEqual(history.herdr_size("rcabcdefghij", "dabcdefgh1"), {"guest": False})
+        self.assertIn(("refresh-client", "-t", "/dev/pts/6", "-f", "!ignore-size"), calls)
+        self.assertIn(("resize-window", "-t", "=hv-dabcdefgh1-rcabcdefghij:", "-x", "237", "-y", "49"), calls)
+        # The other device's session is left alone.
+        self.assertFalse(any("/dev/pts/7" in c for c in calls))

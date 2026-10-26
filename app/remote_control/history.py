@@ -428,7 +428,7 @@ PROF_RE = re.compile(r"^p([a-z0-9][a-z0-9_-]{0,31})?$")
 DEVICE_RE = re.compile(r"^d[a-z0-9]{8,32}$")
 
 
-def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "", authority: str = "") -> dict:
+def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "") -> dict:
     """The tab's size, and whether this profile only watches it.
 
     The profile that opened a tab owns its size (tab_session.sh); another
@@ -442,7 +442,7 @@ def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "", auth
     )
     parts = result.stdout.strip().split("\t") if result.returncode == 0 else []
     if len(parts) >= 4 and parts[3] == "herdr":
-        return herdr_size(tab, prof, dev, authority, socket=socket)
+        return herdr_size(tab, dev, socket=socket)
     try:
         cols, rows = int(parts[0]), int(parts[1])
     except (IndexError, ValueError):
@@ -454,56 +454,25 @@ def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "", auth
     return {"guest": True, "cols": cols, "rows": rows}
 
 
-def herdr_size(tab: str, prof: str, dev: str, authority: str, socket: str = TMUX_SOCKET) -> dict:
-    """Size of this device's herdr view.
+def herdr_size(tab: str, dev: str, socket: str = TMUX_SOCKET) -> dict:
+    """herdr tabs: every device's view keeps its own screen's size.
 
-    herdr gives a pane the size of the last client that touched it. When the
-    herdr tab on screen holds another profile's panes (the page passes that
-    profile as ``authority``), this device's view takes the size of that
-    profile's latest herdr view, so touching those panes keeps their owner's
-    size; the page scales it to fit. Otherwise the view follows this screen.
+    Each device looks through its own herdr client (tab_session.sh), so
+    nobody's resolution follows anyone else's. A view left following another
+    one (ignore-size, from before) gets this screen's size back.
     """
     if not DEVICE_RE.match(dev or ""):
         return {"guest": False}
+    listing = _tmux(socket, "list-sessions", "-F", "#{session_name}\t#{@rc_dev}", text=True)
+    sessions = dict(line.split("\t", 1) for line in listing.stdout.splitlines() if "\t" in line) if listing.returncode == 0 else {}
     view = f"hv-{dev}-{tab}"
-    listing = _tmux(
-        socket,
-        "list-sessions",
-        "-F",
-        "#{session_name}\t#{@rc_vprof}\t#{@rc_dev}\t#{window_width}\t#{window_height}\t#{session_attached}\t#{session_activity}",
-        text=True,
-    )
-    sessions = {}
-    for raw in listing.stdout.splitlines() if listing.returncode == 0 else []:
-        cols = raw.split("\t")
-        if len(cols) < 7 or not (cols[0] == tab or (cols[0].startswith("hv-") and cols[0].endswith("-" + tab))):
-            continue
-        try:
-            sessions[cols[0]] = {"prof": cols[1], "dev": cols[2], "w": int(cols[3]), "h": int(cols[4]), "attached": int(cols[5]), "activity": int(cols[6])}
-        except ValueError:
-            continue
-    mine = view if view in sessions else (tab if tab in sessions and sessions[tab]["dev"] == dev else "")
+    mine = view if view in sessions else (tab if sessions.get(tab) == dev else "")
     if not mine:
         return {"guest": False}
-    clients = []
-    for raw in (_tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_width}\t#{client_height}\t#{client_flags}", text=True).stdout or "").splitlines():
+    clients = _tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_width}\t#{client_height}\t#{client_flags}", text=True)
+    for raw in (clients.stdout or "").splitlines():
         cols = raw.split("\t")
-        if len(cols) >= 5 and cols[1] == mine:
-            clients.append(cols)
-    refs = []
-    if authority and authority != prof and PROF_RE.match(authority):
-        refs = [s for name, s in sessions.items() if name != mine and s["prof"] == authority and s["attached"] > 0]
-    if not refs:
-        # Back to this screen's own size.
-        for name, _session, width, height, flags in clients:
-            if "ignore-size" in flags.split(","):
-                _tmux(socket, "refresh-client", "-t", name, "-f", "!ignore-size")
-                _tmux(socket, "resize-window", "-t", f"={mine}:", "-x", width, "-y", height)
-        return {"guest": False}
-    ref = max(refs, key=lambda s: s["activity"])
-    for name, _session, _w, _h, flags in clients:
-        if "ignore-size" not in flags.split(","):
-            _tmux(socket, "refresh-client", "-t", name, "-f", "ignore-size")
-    if (sessions[mine]["w"], sessions[mine]["h"]) != (ref["w"], ref["h"]):
-        _tmux(socket, "resize-window", "-t", f"={mine}:", "-x", str(ref["w"]), "-y", str(ref["h"]))
-    return {"guest": True, "cols": ref["w"], "rows": ref["h"]}
+        if len(cols) >= 5 and cols[1] == mine and "ignore-size" in cols[4].split(","):
+            _tmux(socket, "refresh-client", "-t", cols[0], "-f", "!ignore-size")
+            _tmux(socket, "resize-window", "-t", f"={mine}:", "-x", cols[2], "-y", cols[3])
+    return {"guest": False}

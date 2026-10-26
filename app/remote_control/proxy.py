@@ -371,7 +371,6 @@ class Sidecar:
                         (query.get("prof") or [""])[0],
                         socket=self.tmux_socket,
                         dev=(query.get("dev") or [""])[0],
-                        authority=(query.get("auth") or [""])[0],
                     ),
                 )
                 return
