@@ -201,6 +201,7 @@ def herdr_agents() -> list[dict]:
                 "owner": owner,
                 "cwd": str(a.get("foreground_cwd") or a.get("cwd") or ""),
                 "status": str(a.get("agent_status") or ""),
+                "pid": cli_pid,
             }
         )
     return out
@@ -260,6 +261,7 @@ def tab_agents(socket: str = TMUX_SOCKET) -> list[dict]:
                 "owner": owner_of(pid),
                 "cwd": cwd,
                 "status": _status_from(int(parts[3]) if parts[3].isdigit() else 0, f"={parts[0]}:", socket=socket),
+                "pid": pid,
             }
         )
     return out
@@ -323,12 +325,182 @@ def _find(agent_id: str, me: dict) -> dict | None:
 
 def read_screen(agent: dict, lines: int) -> str:
     if agent["where"] == "herdr":
-        out = _run(["herdr", "agent", "read", agent["id"], "--lines", str(lines)])
-        return out.stdout if out and out.returncode == 0 else ""
-    raw = _tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={agent['id'][3:]}:")
-    # The empty rows under the prompt are not output.
-    tail = raw.rstrip().splitlines()[-lines:]
-    return "\n".join(tail) + "\n" if tail else ""
+        out = _run(["herdr", "agent", "read", agent["id"], "--source", "recent-unwrapped", "--lines", str(lines)])
+        raw = out.stdout if out and out.returncode == 0 else ""
+    else:
+        raw = _tmux("capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", f"={agent['id'][3:]}:")
+    return tidy_screen(raw, lines)
+
+
+# A line that is only box drawing: the rules around a CLI's input box.
+RULE_RE = re.compile(r"^\s*[─━═┄┈╌]{8,}\s*$")
+
+
+def tidy_screen(raw: str, lines: int) -> str:
+    """A screen as an agent should read it: no padding spaces, no runs of
+    empty rows, and without the input box and status bar under the last
+    output (they cost tokens on every read and say nothing)."""
+    rows = [r.rstrip() for r in raw.splitlines()]
+    # The CLI's own chrome starts at the first rule of the bottom rows.
+    for i in range(max(0, len(rows) - 12), len(rows)):
+        if RULE_RE.match(rows[i]):
+            rows = rows[:i]
+            break
+    out: list[str] = []
+    for row in rows:
+        if row or (out and out[-1]):
+            out.append(row)
+    while out and not out[-1]:
+        out.pop()
+    out = out[-lines:]
+    return "\n".join(out) + "\n" if out else ""
+
+
+# --- its reply, from the CLI's own session file ----------------------------
+# A CLI draws on the alternate screen, so tmux keeps no history: a reply
+# taller than the tab (a phone's, often) is lost, and the screen is wrapped
+# to its width and framed by the CLI's chrome. The session file each CLI
+# writes has the exact text. `rc` remembers what it sent and returns what
+# the agent wrote after that message.
+
+LAST_SENT_KEEP = 50
+# A longer reply keeps its end, where a summary goes.
+REPLY_MAX = 12000
+
+
+def _sent_file() -> Path:
+    return primary_home() / ".local" / "share" / "remote-control" / "agent-last-prompt.json"
+
+
+def remember_sent(agent_id: str, text: str, at: float) -> None:
+    path = _sent_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.pop(agent_id, None)
+    data[agent_id] = {"text": text, "t": at}
+    data = dict(list(data.items())[-LAST_SENT_KEEP:])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def last_sent(agent_id: str) -> dict | None:
+    try:
+        entry = json.loads(_sent_file().read_text(encoding="utf-8")).get(agent_id)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return entry if isinstance(entry, dict) and isinstance(entry.get("text"), str) else None
+
+
+def _home_of_owner(owner: str) -> Path:
+    return profiles.home_of(owner) or primary_home()
+
+
+def _session_files(agent: dict, since: float) -> list[Path]:
+    """The CLI's session files written since ``since``, newest first."""
+    home = _home_of_owner(agent["owner"])
+    cli = agent["cli"]
+    if cli == "claude":
+        from .workspaces import _claude_session
+
+        sid = _claude_session(agent["pid"], home) if agent.get("pid") else ""
+        if sid:
+            exact = list((home / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
+            if exact:
+                return exact
+        found = list((home / ".claude" / "projects").glob("*/*.jsonl"))
+    elif cli == "pi":
+        found = list((home / ".pi" / "agent" / "sessions").glob("*/*.jsonl"))
+    elif cli == "codex":
+        found = list((home / ".codex" / "sessions").glob("*/*/*/rollout-*.jsonl"))
+    else:
+        return []
+    fresh = []
+    for f in found:
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= since - 2:
+            fresh.append((mtime, f))
+    return [f for _m, f in sorted(fresh, reverse=True)[:8]]
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _turns(path: Path) -> list[tuple[str, str]]:
+    """(role, text) of every message, for the formats of Claude Code
+    (type/message), pi (type message/message) and Codex (payload)."""
+    out = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        msg = d.get("message") if isinstance(d.get("message"), dict) else d.get("payload")
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                str(c.get("text") or "")
+                for c in content
+                if isinstance(c, dict) and c.get("type") in ("text", "input_text", "output_text")
+            ]
+        else:
+            texts = []
+        text = "\n\n".join(t for t in texts if t.strip())
+        if text:
+            out.append((role, text))
+    return out
+
+
+def reply_since(agent: dict, sent: str, since: float) -> str | None:
+    """What the agent wrote after the message ``sent``, or None if no
+    session file has that message."""
+    needle = _norm(sent)[:80]
+    if not needle:
+        return None
+    for path in _session_files(agent, since):
+        turns = _turns(path)
+        anchor = None
+        for i in range(len(turns) - 1, -1, -1):
+            if turns[i][0] == "user" and needle in _norm(turns[i][1]):
+                anchor = i
+                break
+        if anchor is None:
+            continue
+        said = [text for role, text in turns[anchor + 1 :] if role == "assistant"]
+        return "\n\n".join(said).strip()
+    return None
+
+
+def last_reply(agent: dict) -> str | None:
+    """Its reply to the last message `rc` sent it (None: nothing to go on)."""
+    sent = last_sent(agent["id"])
+    reply = reply_since(agent, sent["text"], sent["t"]) if sent else None
+    if reply and len(reply) > REPLY_MAX:
+        cut = len(reply) - REPLY_MAX
+        reply = f"[… {cut} earlier characters left out]\n" + reply[cut:]
+    return reply
 
 
 # How long `--wait` waits by default: under the 10 minutes a Claude Code
@@ -338,6 +510,9 @@ WAIT_DEFAULT = 540
 FINISHED = ("idle", "done", "blocked")
 # A prompt a plain tab agent has not reacted to in this time never started.
 START_S = 10
+# Silence that ends a turn when the CLI's session file already holds a reply
+# (reply_since); without one it takes ACTIVE_S.
+QUICK_S = 1.5
 
 
 def _until(timeout: int) -> list[str]:
@@ -371,9 +546,13 @@ def _wait_tab(agent: dict, timeout: int, sent_at: int | None = None) -> str:
                 return "error:agent_prompt_stalled"
         elif status != "working" and (sent_at is None or time.time() - sent_at > ACTIVE_S):
             return status
+        elif sent_at is not None and time.time() - activity >= QUICK_S and last_reply(agent):
+            # Quiet, and its session file already has the reply: done,
+            # without the full ACTIVE_S of silence.
+            return _status_from(0, f"={agent['id'][3:]}:")
         if timeout and waited >= timeout:
             return "error:timeout"
-        time.sleep(1)
+        time.sleep(0.5)
 
 
 def wait_for(agent: dict, timeout: int = WAIT_DEFAULT) -> str:
@@ -394,6 +573,7 @@ def prompt(agent: dict, text: str, me: dict, wait: int | None = None) -> dict:
     if foreign:
         text = f"[Mensaje del agente de {label_of(me['profile'])}] {text}"
     status = ""
+    remember_sent(agent["id"], text, time.time())
     if agent["where"] == "herdr":
         cmd = ["herdr", "agent", "prompt", agent["id"], text]
         limit: float | None = 15
@@ -491,7 +671,7 @@ def spawn(cli: str, cli_args: list[str], me: dict, cwd: str) -> tuple[dict | Non
     _tmux("send-keys", "-t", target, "Enter")
     agent = {
         "id": f"rc:{tab}", "where": "tab", "cli": cli, "name": "", "owner": me["profile"],
-        "owner_label": label_of(me["profile"]), "cwd": cwd, "status": "", "you": False,
+        "owner_label": label_of(me["profile"]), "cwd": cwd, "status": "", "you": False, "pid": 0,
     }
     return agent, _wait_ready(agent)
 
@@ -515,8 +695,13 @@ def close_spawned(agent_id: str, me: dict) -> str:
 def report(agent: dict, status: str, lines: int, waited: int) -> int:
     """What a wait ended with, the agent's screen and the exit code."""
     if status in ("idle", "done"):
-        print(f"{agent['id']} finished: {status}. Last lines of its screen:\n")
-        sys.stdout.write(read_screen(agent, lines))
+        reply = last_reply(agent)
+        if reply:
+            print(f"{agent['id']} finished. Its reply:\n")
+            print(reply)
+        else:
+            print(f"{agent['id']} finished: {status}. Last lines of its screen:\n")
+            sys.stdout.write(read_screen(agent, lines))
         return 0
     if status == "blocked":
         print(f"{agent['id']} is blocked: it waits for input or a permission. Its screen:\n")
@@ -580,6 +765,8 @@ def main(argv: list[str] | None = None) -> int:
     p_spawn.add_argument("--wait", nargs="?", type=int, const=WAIT_DEFAULT, default=None, metavar="SECONDS",
                          help="with --prompt: wait until it finishes, as rc prompt --wait")
     p_spawn.add_argument("--lines", type=int, default=40)
+    p_reply = sub.add_parser("reply", help="its reply to the last rc prompt, without waiting")
+    p_reply.add_argument("id")
     p_close = sub.add_parser("close", help="close a tab you opened with rc spawn")
     p_close.add_argument("id")
     sub.add_parser("whoami", help="your profile and pane")
@@ -615,6 +802,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.cmd == "read":
         sys.stdout.write(read_screen(agent, max(1, min(args.lines, 2000))))
+        return 0
+    if args.cmd == "reply":
+        reply = last_reply(agent)
+        if reply is None:
+            why = "rc has sent it nothing" if last_sent(agent["id"]) is None else "its session file has no reply"
+            print(f"rc: no reply ({why}); see its screen with `rc read {agent['id']}`", file=sys.stderr)
+            return 1
+        print(reply or "(it has not written anything since your last message)")
         return 0
     if agent["you"]:
         print("rc: that is you", file=sys.stderr)

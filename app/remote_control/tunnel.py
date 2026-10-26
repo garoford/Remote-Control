@@ -725,6 +725,13 @@ class TunnelService:
             prof = self.home / ".local" / "share" / "remote-control" / "profiles.zsh"
             prof.parent.mkdir(parents=True, exist_ok=True)
             prof.write_text(prof_src.read_text(encoding="utf-8"), encoding="utf-8")
+        # profiles.zsh runs this before claude: everyone's chats in --resume.
+        share_src = root / "rc_sharechats.py"
+        if share_src.is_file():
+            share = self.home / ".local" / "share" / "remote-control" / "rc_sharechats.py"
+            share.parent.mkdir(parents=True, exist_ok=True)
+            share.write_text(share_src.read_text(encoding="utf-8"), encoding="utf-8")
+            share.chmod(0o755)
         write_rc_command(self.home)
         zdot_src = root / "zdot"
         if zdot_src.is_dir():

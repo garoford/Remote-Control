@@ -34,6 +34,11 @@ _rc_cli() {
     home="$_RC_BASE/profiles/$id"
     [[ "$id" =~ '^[a-z0-9][a-z0-9_-]*$' && -d "$home" ]] || { id=""; home=""; }
   fi
+  # Every profile's chats show up in everyone's resume list
+  # (rc_sharechats.py hardlinks them across HOMEs).
+  if [[ -r "$_RC_BASE/rc_sharechats.py" ]] && (( $+commands[python3] )); then
+    python3 "$_RC_BASE/rc_sharechats.py" "$_RC_BASE" 2>/dev/null
+  fi
   # Remote Control tabs also keep Cursor Agent's scrollback (rc_keephistory.py).
   local -a pre
   pre=()
