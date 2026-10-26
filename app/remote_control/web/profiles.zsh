@@ -16,6 +16,8 @@ _RC_ACTIVE="$_RC_BASE/profile-active"
 # `rc agents` and friends (agents.py). herdr belongs to the primary user: its
 # socket stays reachable from a CLI that runs with a profile's HOME.
 [[ -d "$_RC_BASE/bin" ]] && path=("$_RC_BASE/bin" $path)
+# herdr's installer puts it in ~/.local/bin, not on every distro's PATH.
+(( ${path[(Ie)$HOME/.local/bin]} )) || path+=("$HOME/.local/bin")
 export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
 
 _rc_cli() {

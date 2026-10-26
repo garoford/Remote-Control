@@ -42,6 +42,21 @@ def main(argv: list[str] | None = None) -> int:
         from remote_control.tui import run
 
         return run()
+    if len(raw) > 1 and raw[1] == "start":
+        from remote_control.autostart import headless_start
+
+        return headless_start()
+    if len(raw) > 1 and raw[1] == "autostart":
+        from remote_control import autostart
+
+        arg = raw[2] if len(raw) > 2 else "status"
+        if arg not in ("on", "off", "status"):
+            print("uso: remote-control autostart [on|off|status]", file=sys.stderr)
+            return 2
+        if arg != "status":
+            autostart.set_enabled(arg == "on")
+        print("activado" if autostart.is_enabled() else "desactivado")
+        return 0
     try:
         gtk_argv, password, clear = consume_gate_args(raw)
     except GateUsage as exc:

@@ -19,7 +19,7 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Static, Switch
 
-from . import control
+from . import autostart, control
 from .gate import STRENGTH_LABEL, generate_password, password_strength, read_password, without_spaces, write_password
 from .tunnel import TunnelService
 
@@ -129,6 +129,10 @@ class RemoteControlTUI(App):
     .bar.ok { background: #ffeb95; }
     .bar.strong { background: #22da6e; }
     #pass-hint, .hint { color: #8a9bb3; margin-top: 1; }
+    #auto-row { height: auto; }
+    #auto-text { width: 1fr; height: auto; }
+    #auto-title { text-style: bold; }
+    #auto-text .hint { margin-top: 0; }
     #pass-hint.warn { color: #ffeb95; }
     .label { color: #8a9bb3; text-style: bold; margin-top: 1; }
     .label:first-child { margin-top: 0; }
@@ -151,6 +155,7 @@ class RemoteControlTUI(App):
         Binding("n", "new_password", "Nueva clave"),
         Binding("c", "copy_url", "Copiar URL"),
         Binding("o", "open_url", "Abrir"),
+        Binding("a", "toggle_autostart", "Inicio automático"),
         Binding("q", "quit", "Salir"),
     ]
 
@@ -193,6 +198,12 @@ class RemoteControlTUI(App):
                             for _ in range(4):
                                 yield Static("", classes="bar")
                         yield Static("", id="pass-hint")
+                    with Vertical(id="auto-card", classes="card"):
+                        with Horizontal(id="auto-row"):
+                            with Vertical(id="auto-text"):
+                                yield Static("Iniciar con el sistema", id="auto-title")
+                                yield Static("Enciende el túnel al iniciar sesión, sin abrir la ventana", classes="hint")
+                            yield Switch(value=autostart.is_enabled(), id="autostart", animate=False)
                     with Vertical(id="share", classes="card"):
                         yield Static("URL pública", classes="label")
                         with Horizontal(classes="row"):
@@ -300,6 +311,9 @@ class RemoteControlTUI(App):
     # --- events --------------------------------------------------------------
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "autostart":
+            self.set_autostart(event.value)
+            return
         if event.value and not self.running:
             self.start_tunnel()
         elif not event.value and self.running:
@@ -389,6 +403,20 @@ class RemoteControlTUI(App):
         self.refresh_state()
         if url:
             self.notify("Túnel en línea", timeout=3)
+
+    def action_toggle_autostart(self) -> None:
+        self.query_one("#autostart", Switch).value = not autostart.is_enabled()
+
+    def set_autostart(self, on: bool) -> None:
+        try:
+            autostart.set_enabled(on)
+        except OSError as exc:
+            self.notify(f"No se pudo: {exc.strerror or exc}", severity="error")
+            switch = self.query_one("#autostart", Switch)
+            with switch.prevent(Switch.Changed):
+                switch.value = autostart.is_enabled()
+            return
+        self.notify("Se encenderá al iniciar sesión" if on else "Ya no se enciende al iniciar sesión", timeout=3)
 
     def action_toggle_password(self) -> None:
         field = self.query_one("#password", Input)

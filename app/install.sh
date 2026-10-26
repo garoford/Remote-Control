@@ -20,7 +20,8 @@ install -m 755 "$ROOT/update.sh" "$APP_SHARE/update.sh"
 # `remote-control cli` (Textual) and the QR code (segno, also used by the window).
 # User-level, no sudo; the app still runs without them, minus those features.
 if ! python3 -c "import textual, segno" >/dev/null 2>&1; then
-  python3 -m pip install --user --quiet textual segno \
+  python3 -m pip install --user --quiet textual segno 2>/dev/null \
+    || python3 -m pip install --user --quiet --break-system-packages textual segno \
     || printf '%s\n' "Aviso: no pude instalar textual/segno; 'remote-control cli' y el QR no estarán."
 fi
 

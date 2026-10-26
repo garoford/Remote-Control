@@ -22,7 +22,7 @@ from remote_control.gate import (
     without_spaces,
     write_password,
 )
-from remote_control import control
+from remote_control import autostart, control
 from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
@@ -88,6 +88,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         canvas.append(self._build_password())
         canvas.append(self._build_url_card())
         canvas.append(self._build_qr_card())
+        canvas.append(self._build_autostart())
         canvas.append(self._build_error())
         spacer = Gtk.Box()
         spacer.set_vexpand(True)
@@ -232,6 +233,39 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _on_regen_password(self, *_args) -> None:
         self.password_entry.set_text(generate_password())
         self._toast("Nueva contraseña generada")
+
+    # --- start with the system (autostart.py) ---------------------------------
+
+    def _build_autostart(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        box.add_css_class("rc-card")
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        texts.set_hexpand(True)
+        texts.set_valign(Gtk.Align.CENTER)
+        title = Gtk.Label(label="Iniciar con el sistema", xalign=0)
+        title.add_css_class("rc-card-title")
+        texts.append(title)
+        hint = Gtk.Label(label="Enciende el túnel al iniciar sesión, sin abrir esta ventana", xalign=0, wrap=True)
+        hint.add_css_class("rc-hint-text")
+        texts.append(hint)
+        box.append(texts)
+        self.autostart_switch = Gtk.Switch()
+        self.autostart_switch.add_css_class("rc-switch")
+        self.autostart_switch.set_valign(Gtk.Align.CENTER)
+        self.autostart_switch.set_active(autostart.is_enabled())
+        self.autostart_switch.connect("state-set", self._on_autostart_set)
+        box.append(self.autostart_switch)
+        return box
+
+    def _on_autostart_set(self, switch: Gtk.Switch, state: bool) -> bool:
+        try:
+            autostart.set_enabled(state)
+        except OSError as exc:
+            self._toast(f"No se pudo: {exc.strerror or exc}")
+            switch.set_state(autostart.is_enabled())
+            return True
+        self._toast("Se encenderá al iniciar sesión" if state else "Ya no se enciende al iniciar sesión")
+        return False
 
     def _build_hint(self) -> Gtk.Widget:
         hint = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
