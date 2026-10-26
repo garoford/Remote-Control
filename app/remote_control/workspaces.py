@@ -8,6 +8,7 @@ exact conversation in that tab.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import backgrounds
@@ -43,6 +45,17 @@ MIC_MIN, MIC_MAX = 28, 160
 SCREEN_LINES = 3000
 
 _lock = threading.RLock()
+
+
+@contextmanager
+def _locked(base: Path):
+    """The state file is read and rewritten by the proxy and by `rc` (another
+    process): one at a time, across processes too."""
+    with _lock:
+        base.mkdir(parents=True, exist_ok=True)
+        with open(base / "workspaces.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
 
 def state_dir() -> Path:
@@ -605,7 +618,8 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
 
 def delete_background(name: str, base: Path | None = None) -> bool:
     """Remove an uploaded image and reset the profiles that were using it."""
-    with _lock:
+    base = base or state_dir()
+    with _locked(base):
         if not backgrounds.delete(name):
             return False
         state = load_state(base)
@@ -615,7 +629,8 @@ def delete_background(name: str, base: Path | None = None) -> bool:
 
 
 def workspaces_payload(socket: str = TMUX_SOCKET, base: Path | None = None) -> dict:
-    with _lock:
+    base = base or state_dir()
+    with _locked(base):
         sessions = list_sessions(socket=socket)
         state = reconcile(load_state(base), [s["id"] for s in sessions])
         save_state(state, base)
@@ -627,7 +642,8 @@ def workspaces_payload(socket: str = TMUX_SOCKET, base: Path | None = None) -> d
 
 
 def change_workspaces(op: dict, socket: str = TMUX_SOCKET, base: Path | None = None) -> dict:
-    with _lock:
+    base = base or state_dir()
+    with _locked(base):
         sessions = list_sessions(socket=socket)
         state = reconcile(load_state(base), [s["id"] for s in sessions])
         result = apply_op(state, op, socket=socket)
@@ -635,6 +651,60 @@ def change_workspaces(op: dict, socket: str = TMUX_SOCKET, base: Path | None = N
             sessions = list_sessions(socket=socket)
         save_state(state, base)
         return {**result, **public_view(state, sessions)}
+
+
+def start_tab(tab: str, folder: Path, socket: str = TMUX_SOCKET, env: dict[str, str] | None = None) -> bool:
+    """Start a tab's tmux session the way the page's + button does.
+
+    ``env`` is set inside the tab (tmux -e): the server is usually running
+    already, and a new session only takes its global environment.
+    """
+    from .herdr import tab_launch_context
+
+    if not TAB_RE.match(tab):
+        return False
+    conf, shell, launch_env = tab_launch_context()
+    # Same tmux server as the caller (its socket lives under TMUX_TMPDIR).
+    if os.environ.get("TMUX_TMPDIR"):
+        launch_env["TMUX_TMPDIR"] = os.environ["TMUX_TMPDIR"]
+    conf_args = ["-f", str(conf)] if conf.is_file() else []
+    extra = [x for k, v in (env or {}).items() for x in ("-e", f"{k}={v}")]
+    made = subprocess.run(
+        ["tmux", "-L", socket, *conf_args, "new-session", *tab_env_args(conf, shell), *extra,
+         "-d", "-s", tab, "-c", str(folder), "--", shell, "-il"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        env=launch_env,
+    )
+    return made.returncode == 0
+
+
+def open_tab_beside(beside: str, folder: Path, socket: str = TMUX_SOCKET, base: Path | None = None,
+                    env: dict[str, str] | None = None) -> str:
+    """A new tab right after tab ``beside``, in its workspace (`rc spawn`).
+
+    Under the lock from start to save: a page poll in between would put the
+    new tab in the active workspace (reconcile), which may be another one.
+    Returns the tab id, "" if tmux did not start it.
+    """
+    base = base or state_dir()
+    with _locked(base):
+        tab = "rc" + secrets.token_hex(12)
+        if not start_tab(tab, folder, socket=socket, env=env):
+            return ""
+        sessions = list_sessions(socket=socket)
+        state = reconcile(load_state(base), [s["id"] for s in sessions])
+        home = _owner(state, beside)
+        placed = _owner(state, tab)
+        if home:
+            if placed:
+                placed["tabs"].remove(tab)
+                if placed["lastTab"] == tab:
+                    placed["lastTab"] = placed["tabs"][-1] if placed["tabs"] else ""
+            home["tabs"].insert(home["tabs"].index(beside) + 1, tab)
+        save_state(state, base)
+        return tab
 
 
 # --- which conversation is running in a pane --------------------------------
@@ -873,7 +943,7 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
             tmp = path.with_suffix(".tmp")
             tmp.write_text(shot.stdout.rstrip("\n") + "\n", encoding="utf-8")
             os.replace(tmp, path)
-    with _lock:
+    with _locked(base):
         state = reconcile(load_state(base), [s["id"] for s in sessions])
         now = int(time.time())
         for tab, info in meta.items():

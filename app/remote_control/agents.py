@@ -20,14 +20,15 @@ import json
 import os
 import pwd
 import re
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from . import profiles
-from .history import TMUX_SOCKET
-from .workspaces import PROFILE_CLIS, PROFILE_RE, _children, _cmdline
+from .history import TMUX_SOCKET, close_session
+from .workspaces import PROFILE_CLIS, PROFILE_RE, _children, _cmdline, change_workspaces, open_tab_beside
 
 AGENT_CLIS = PROFILE_CLIS | {"pi"}
 NOTES_KEEP = 200
@@ -212,7 +213,8 @@ def herdr_agents() -> list[dict]:
 ACTIVE_S = 3
 BLOCKED_RE = re.compile(
     r"Do you want to (proceed|make this edit|create|run|allow)|Allow (this|command|once|always)|"
-    r"Would you like to (run|allow|proceed)|Yes, and don't ask again|Approve\b|\(y/n\)|\[y/N\]|\[Y/n\]",
+    r"Would you like to (run|allow|proceed)|Yes, and don't ask again|Approve\b|\(y/n\)|\[y/N\]|\[Y/n\]|"
+    r"Do you trust|trust (this|the) (folder|directory|files)",
     re.I,
 )
 
@@ -439,6 +441,77 @@ def prompt(agent: dict, text: str, me: dict, wait: int | None = None) -> dict:
     return {"sent": True, "foreign": foreign, "status": status}
 
 
+# --- delegating to a new tab ------------------------------------------------
+# An agent in a plain Remote Control tab opens another tab right after its
+# own, in the same workspace, starts an AI CLI there with its user's account
+# and hands it the task. In herdr the same is a pane (herdr pane split).
+
+# A CLI that has not drawn its prompt by then is reported, not waited for.
+READY_S = 60
+
+
+def _tab_of(pane: str) -> str:
+    return pane[3:] if pane.startswith("rc:") else ""
+
+
+def _wait_ready(agent: dict, limit: float = READY_S) -> str:
+    """Until the new CLI is up and quiet: idle, blocked (a question first,
+    like trusting the folder) or error:*."""
+    target = f"={agent['id'][3:]}:"
+    start = time.monotonic()
+    while time.monotonic() - start < limit:
+        time.sleep(1)
+        pid = _tmux("display-message", "-p", "-t", target, "#{pane_pid}").strip()
+        if not pid.isdigit():
+            return "error:tab_closed"
+        if not find_cli(int(pid))[0]:
+            continue
+        status, _activity = tab_state(agent)
+        if status != "working":
+            return status
+    pid = _tmux("display-message", "-p", "-t", target, "#{pane_pid}").strip()
+    return "error:timeout" if pid.isdigit() and find_cli(int(pid))[0] else "error:cli_not_started"
+
+
+def spawn(cli: str, cli_args: list[str], me: dict, cwd: str) -> tuple[dict | None, str]:
+    """Open a tab next to the caller's with ``cli`` running as the caller's
+    user. Returns (agent, status from _wait_ready) or (None, error)."""
+    beside = _tab_of(me["pane"])
+    tab = open_tab_beside(beside, Path(cwd), env={"RC_PROFILE": me["profile"]})
+    if not tab:
+        return None, "error:tab_not_started"
+    target = f"={tab}:"
+    # The size belongs to the profile of the tab it came from (tab_session.sh).
+    size_owner = _tmux("show-options", "-t", f"={beside}:", "-qv", "@rc_prof").strip()
+    if size_owner:
+        _tmux("set-option", "-t", target, "@rc_prof", size_owner)
+    # Who may `rc close` it.
+    _tmux("set-option", "-t", target, "@rc_spawned_by", me["profile"] or "-")
+    _tmux("send-keys", "-t", target, "-l", shlex.join([cli, *cli_args]))
+    _tmux("send-keys", "-t", target, "Enter")
+    agent = {
+        "id": f"rc:{tab}", "where": "tab", "cli": cli, "name": "", "owner": me["profile"],
+        "owner_label": label_of(me["profile"]), "cwd": cwd, "status": "", "you": False,
+    }
+    return agent, _wait_ready(agent)
+
+
+def close_spawned(agent_id: str, me: dict) -> str:
+    """Close a tab `rc spawn` opened for this user. "" or why not."""
+    tab = _tab_of(agent_id)
+    if not tab or agent_id == me["pane"]:
+        return "only tabs opened with `rc spawn` can be closed"
+    by = _tmux("show-options", "-t", f"={tab}:", "-qv", "@rc_spawned_by").strip()
+    if not by:
+        return "it was not opened with `rc spawn`; ask your user to close it"
+    if by != (me["profile"] or "-"):
+        return "another user opened it"
+    if not close_session(tab):
+        return "tmux did not close it"
+    change_workspaces({"op": "forget", "tab": tab})
+    return ""
+
+
 def report(agent: dict, status: str, lines: int, waited: int) -> int:
     """What a wait ended with, the agent's screen and the exit code."""
     if status in ("idle", "done"):
@@ -499,8 +572,28 @@ def main(argv: list[str] | None = None) -> int:
     p_wait.add_argument("id")
     p_wait.add_argument("--timeout", type=int, default=WAIT_DEFAULT, help=f"seconds (default {WAIT_DEFAULT}, 0 = no limit)")
     p_wait.add_argument("--lines", type=int, default=40)
+    p_spawn = sub.add_parser("spawn", help="open a tab next to yours (same workspace) with an AI CLI; not in herdr")
+    p_spawn.add_argument("cli", choices=sorted(AGENT_CLIS))
+    p_spawn.add_argument("cli_args", nargs="*", metavar="ARG", help="arguments for the CLI (put them after --)")
+    p_spawn.add_argument("--cwd", default=os.getcwd(), help="its folder (default: here)")
+    p_spawn.add_argument("--prompt", help="task to send once it is ready")
+    p_spawn.add_argument("--wait", nargs="?", type=int, const=WAIT_DEFAULT, default=None, metavar="SECONDS",
+                         help="with --prompt: wait until it finishes, as rc prompt --wait")
+    p_spawn.add_argument("--lines", type=int, default=40)
+    p_close = sub.add_parser("close", help="close a tab you opened with rc spawn")
+    p_close.add_argument("id")
     sub.add_parser("whoami", help="your profile and pane")
     args = parser.parse_args(argv)
+
+    if args.cmd == "spawn":
+        return _spawn_cmd(args, me)
+    if args.cmd == "close":
+        why = close_spawned(args.id, me)
+        if why:
+            print(f"rc: {why}", file=sys.stderr)
+            return 1
+        print(f"Closed {args.id}.")
+        return 0
 
     if args.cmd == "whoami":
         print(json.dumps({**me, "label": label_of(me["profile"]), "home": str(profiles.home_of(me["profile"]) or primary_home())}))
@@ -530,12 +623,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "wait":
         timeout = max(0, args.timeout)
         return report(agent, wait_for(agent, timeout), lines, timeout)
-    wait = None if args.wait is None else max(0, args.wait)
-    result = prompt(agent, args.text, me, wait=wait)
+    return _send(agent, args.text, me, args.wait, lines)
+
+
+def _send(agent: dict, text: str, me: dict, wait: int | None, lines: int) -> int:
+    wait = None if wait is None else max(0, wait)
+    result = prompt(agent, text, me, wait=wait)
     if not result["sent"]:
         if result["status"] == "error:agent_blocked":
             return report(agent, result["status"], lines, 0)
-        print(f"rc: could not send to {args.id} ({result['status']})", file=sys.stderr)
+        print(f"rc: could not send to {agent['id']} ({result['status']})", file=sys.stderr)
         return 1
     if result["foreign"]:
         print(f"Sent. {agent['owner_label']} owns that agent and was notified.")
@@ -544,6 +641,40 @@ def main(argv: list[str] | None = None) -> int:
     if wait is None:
         return 0
     return report(agent, result["status"], lines, wait)
+
+
+def _spawn_cmd(args: argparse.Namespace, me: dict) -> int:
+    if os.environ.get("HERDR_PANE_ID"):
+        print(
+            "rc: you are in a herdr pane: open another pane instead (`herdr pane split --current "
+            "--direction right --cwd \"$PWD\" --no-focus`, then `herdr agent start <name> --kind <kind> "
+            "--pane <new-pane-id>`) and use rc prompt/wait with its id.",
+            file=sys.stderr,
+        )
+        return 1
+    if not _tab_of(me["pane"]):
+        print("rc: spawn works from a Remote Control tab (yours is not one).", file=sys.stderr)
+        return 1
+    cwd = os.path.abspath(args.cwd)
+    if not os.path.isdir(cwd):
+        print(f"rc: no folder {cwd}", file=sys.stderr)
+        return 1
+    lines = max(1, min(args.lines, 2000))
+    agent, status = spawn(args.cli, args.cli_args, me, cwd)
+    if agent is None:
+        print(f"rc: could not open a tab ({status})", file=sys.stderr)
+        return 1
+    print(f"Opened {agent['id']} ({args.cli}) next to your tab. Close it when done: rc close {agent['id']}")
+    if status == "blocked":
+        print("It asks something before it starts (trusting the folder, a login…); nothing was sent. Its screen:\n")
+        sys.stdout.write(read_screen(agent, lines))
+        return 2
+    if status.startswith("error:"):
+        print(f"rc: {args.cli} is not ready ({status[6:]}); check it with `rc read {agent['id']}`.", file=sys.stderr)
+        return 1
+    if args.prompt is None:
+        return 0
+    return _send(agent, args.prompt, me, args.wait, lines)
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

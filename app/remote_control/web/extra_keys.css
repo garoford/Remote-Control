@@ -25,6 +25,7 @@ html[data-rc-theme="dark"] {
   --rc-teal-rgb: 127 219 202;
   --rc-on-rgb: 33 199 168;
   --rc-orange-rgb: 247 140 108;
+  --rc-red-rgb: 239 83 80;
   --rc-surface-rgb: 26 27 30;
   --rc-glass-a: 0.5;
 }
@@ -53,6 +54,7 @@ html[data-rc-theme="light"] {
   --rc-teal-rgb: 42 162 152;
   --rc-on-rgb: 42 162 152;
   --rc-orange-rgb: 211 96 47;
+  --rc-red-rgb: 222 61 59;
   --rc-surface-rgb: 246 248 251;
   --rc-glass-a: 0.6;
 }
@@ -1184,24 +1186,96 @@ html.rc-touch #rc-extra-keys {
   display: none;
 }
 
+/* Connection state, under the tab bar. ttyd's own big grey overlay
+   ("Reconnecting...") is hidden: this badge says it. */
+.xterm > div[style*="xx-large"] {
+  display: none !important;
+}
+
 #rc-net-badge {
+  --rc-net-tone: var(--rc-blue);
+  --rc-net-tone-rgb: var(--rc-blue-rgb);
   position: fixed;
   z-index: 2147483001;
-  top: calc(var(--rc-bar-h, 40px) + 8px);
+  top: calc(var(--rc-bar-h, 40px) + 10px);
   left: 50%;
-  transform: translateX(-50%);
-  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 24px);
+  padding: 7px 14px 7px 10px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
   border-radius: 999px;
-  background: var(--rc-raised);
+  background: rgb(var(--rc-surface-rgb) / 0.82);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
   color: var(--rc-text);
-  font: 700 11px/1 "FiraCode Nerd Font Mono", ui-monospace, monospace;
-  letter-spacing: 0.2px;
+  font: 600 12.5px/1.2 ui-sans-serif, system-ui, sans-serif;
+  white-space: nowrap;
   pointer-events: none;
-  box-shadow: 0 2px 10px rgb(var(--rc-shade) / 0.45);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.06) inset,
+    0 14px 34px -10px rgb(var(--rc-shade) / 0.75);
+  transform: translateX(-50%);
+  animation: rc-net-in 200ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+@keyframes rc-net-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.96);
+  }
 }
 
 #rc-net-badge[hidden] {
   display: none;
+}
+
+#rc-net-badge[data-kind="offline"] {
+  --rc-net-tone: var(--rc-orange);
+  --rc-net-tone-rgb: var(--rc-orange-rgb);
+}
+
+/* The socket closed for good: a tap reloads the page. */
+#rc-net-badge[data-kind="closed"] {
+  --rc-net-tone: var(--rc-red);
+  --rc-net-tone-rgb: var(--rc-red-rgb);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.rc-net-mark {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+}
+
+#rc-net-badge[data-kind="reconnecting"] .rc-net-mark {
+  border: 2px solid rgb(var(--rc-net-tone-rgb) / 0.25);
+  border-top-color: var(--rc-net-tone);
+  animation: rc-net-spin 800ms linear infinite;
+}
+
+#rc-net-badge:not([data-kind="reconnecting"]) .rc-net-mark {
+  width: 8px;
+  height: 8px;
+  margin: 0 3px;
+  background: var(--rc-net-tone);
+  box-shadow: 0 0 0 4px rgb(var(--rc-net-tone-rgb) / 0.2);
+}
+
+@keyframes rc-net-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #rc-net-badge,
+  #rc-net-badge[data-kind="reconnecting"] .rc-net-mark {
+    animation: none;
+  }
 }
 
 #rc-extra-keys .rc-ek-link {
@@ -2953,6 +3027,12 @@ html.rc-touch .rc-set-tabs {
 
 html.rc-touch .rc-set-me {
   display: none;
+}
+
+/* In a column a flex item is as tall as its content unless told otherwise:
+   without this the body never gets shorter than the themes and cannot scroll. */
+html.rc-touch .rc-set-main {
+  min-height: 0;
 }
 
 html.rc-touch .rc-set-close {

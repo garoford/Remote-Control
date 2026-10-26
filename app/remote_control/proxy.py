@@ -1030,29 +1030,16 @@ class Sidecar:
 
     def _fs_open_tab(self, op: dict) -> dict:
         import secrets
-        import subprocess
 
-        from remote_control.herdr import tab_launch_context
-        from remote_control.history import TAB_RE
-        from remote_control.workspaces import tab_env_args
+        from remote_control.workspaces import start_tab
 
         folder = fs.resolve(op.get("path"))
         if not folder.is_dir():
             folder = folder.parent
         if not folder.is_dir():
             raise fs.FsError("No existe esa carpeta")
-        conf, shell, env = tab_launch_context()
         tab = "rc" + secrets.token_hex(12)
-        assert TAB_RE.match(tab)
-        conf_args = ["-f", str(conf)] if conf.is_file() else []
-        made = subprocess.run(
-            ["tmux", "-L", self.tmux_socket, *conf_args, "new-session", *tab_env_args(conf, shell), "-d", "-s", tab, "-c", str(folder), "--", shell, "-il"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            env=env,
-        )
-        if made.returncode != 0:
+        if not start_tab(tab, folder, socket=self.tmux_socket):
             raise fs.FsError("No pude abrir la terminal")
         return {"ok": True, "tab": tab}
 

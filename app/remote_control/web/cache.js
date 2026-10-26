@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.4.7";
+  var VERSION = "1.4.8";
   var SYSTEM_MONO =
     "ui-monospace, 'SF Mono', Menlo, Consolas, 'Courier New', monospace";
   var FONT_STACK =
@@ -17,6 +17,12 @@
     return null;
   }
 
+  var BADGE_TEXT = {
+    reconnecting: "Reconectando…",
+    offline: "Sin red",
+    closed: "Desconectado · toca para reconectar",
+  };
+
   function setBadge(kind) {
     var el = document.getElementById("rc-net-badge");
     if (!kind) {
@@ -26,11 +32,39 @@
     if (!el) {
       el = document.createElement("div");
       el.id = "rc-net-badge";
+      el.setAttribute("role", "status");
+      el.appendChild(document.createElement("span")).className = "rc-net-mark";
+      el.appendChild(document.createElement("span")).className = "rc-net-text";
+      el.addEventListener("click", function () {
+        if (el.dataset.kind === "closed") location.reload();
+      });
       document.documentElement.appendChild(el);
     }
     el.hidden = false;
-    el.textContent = kind === "offline" ? "Sin red" : "Reconectando…";
+    el.lastChild.textContent = BADGE_TEXT[kind] || BADGE_TEXT.reconnecting;
     el.dataset.kind = kind;
+  }
+
+  // ttyd's overlay is hidden (extra_keys.css). It alone knows one state: the
+  // socket closed normally and ttyd waits for Enter before reconnecting.
+  function watchTtydOverlay(term) {
+    var host = term && term.element;
+    if (!host || !window.MutationObserver) return;
+    function read(node) {
+      var text = node.textContent || "";
+      if (/Press .* to Reconnect/.test(text)) setBadge("closed");
+      else if (/^Reconnecting/.test(text) && navigator.onLine) setBadge("reconnecting");
+    }
+    var watched = null;
+    new MutationObserver(function () {
+      var node = host.querySelector(':scope > div[style*="xx-large"]');
+      if (!node || node === watched) return;
+      watched = node;
+      read(node);
+      new MutationObserver(function () {
+        read(node);
+      }).observe(node, { childList: true, characterData: true, subtree: true });
+    }).observe(host, { childList: true });
   }
 
   function isTouch() {
@@ -169,6 +203,7 @@
   function boot() {
     registerSw();
     bootFonts();
+    waitForTerm(watchTtydOverlay);
     window.addEventListener("online", function () {
       setBadge("");
     });

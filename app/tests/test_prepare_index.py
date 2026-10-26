@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+from remote_control import __version__
 from remote_control.tunnel import TunnelService
 
 
@@ -24,7 +25,7 @@ class PrepareIndexTests(unittest.TestCase):
         self.assertNotIn("base64", css)
         self.assertIn("ui-monospace", css)
         self.assertIn("rc-touch-boot", html)
-        self.assertIn("cache.js?v=1.4.7", html)
+        self.assertIn(f"cache.js?v={__version__}", html)
         self.assertIn('<meta charset="utf-8"', html[:1024])
         self.assertIn("function bootSessions", html)
         self.assertIn("function wipeScrollback", html)
