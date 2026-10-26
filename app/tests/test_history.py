@@ -414,3 +414,24 @@ class SessionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TabSizeTests(unittest.TestCase):
+    def size(self, out: str, prof: str) -> dict:
+        from unittest import mock
+
+        from remote_control import history
+
+        done = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
+        with mock.patch.object(history, "_tmux", lambda *a, **k: done):
+            return history.tab_size("rcabcdefghij", prof)
+
+    def test_owner_devices_get_the_size_too(self):
+        # A second device of the same profile follows it, scaled.
+        self.assertEqual(self.size("120\t40\tpcuenta2\tzsh\n", "pcuenta2"), {"guest": False, "cols": 120, "rows": 40})
+
+    def test_other_profile_is_a_guest(self):
+        self.assertEqual(self.size("120\t40\tpcuenta2\tzsh\n", "p"), {"guest": True, "cols": 120, "rows": 40})
+
+    def test_unreadable_size(self):
+        self.assertEqual(self.size("", "p"), {"guest": False})

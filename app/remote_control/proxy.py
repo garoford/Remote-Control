@@ -47,6 +47,8 @@ from remote_control.mobile import (
 ASSET_CACHE = "public, max-age=31536000, immutable"
 SCRIPT_CACHE = "public, max-age=300"
 MAX_HEADER = 1024 * 1024
+# Background files are named by a hash of their bytes: they never change.
+IMMUTABLE = "private, max-age=31536000, immutable"
 _API_EXTRA = [
     ("Cache-Control", "no-store"),
     ("Access-Control-Allow-Origin", "*"),
@@ -389,7 +391,9 @@ class Sidecar:
                 self._serve_scroll(conn, parse_qs(parsed_url.query))
                 return
             if path == "/rc-bg" or path.startswith("/rc-bg/"):
-                self._serve_backgrounds(conn, method, path[len("/rc-bg/") :] if path.startswith("/rc-bg/") else "", body)
+                self._serve_backgrounds(
+                    conn, method, path[len("/rc-bg/") :] if path.startswith("/rc-bg/") else "", body, parse_qs(parsed_url.query), headers
+                )
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
@@ -829,9 +833,52 @@ class Sidecar:
 
     # --- terminal backgrounds ------------------------------------------------
 
-    def _serve_backgrounds(self, conn: socket.socket, method: str, name: str, body: bytes) -> None:
+    def _serve_backgrounds(
+        self, conn: socket.socket, method: str, name: str, body: bytes, query: dict, headers: dict[str, str]
+    ) -> None:
+        def arg(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
         if not name and method == "GET":
-            self._json(conn, {"images": backgrounds.list_images()})
+            self._json(
+                conn, {"images": backgrounds.list_images(), "videos": backgrounds.list_videos(), "catalog": backgrounds.catalog()}
+            )
+            return
+        if name == "upload" and method == "PUT":
+            try:
+                self._json(conn, backgrounds.upload_chunk(arg("token"), int(arg("offset") or 0), int(arg("total") or 0), body))
+            except ValueError:
+                self._json(conn, {"ok": False, "error": "Trozo no válido"}, "400 Bad Request")
+            except backgrounds.BackgroundError as exc:
+                self._json(conn, {"ok": False, "error": str(exc)}, "400 Bad Request")
+            except OSError:
+                self._json(conn, {"ok": False, "error": "No pude guardar el video"}, "500 Internal Server Error")
+            return
+        if name == "fetch" and method == "POST":
+            try:
+                req = json.loads(body.decode("utf-8") or "{}")
+                self._json(conn, backgrounds.fetch_catalog(str(req.get("id") or "") if isinstance(req, dict) else ""))
+            except (UnicodeDecodeError, ValueError):
+                self._json(conn, {"ok": False, "error": "bad request"}, "400 Bad Request")
+            except backgrounds.BackgroundError as exc:
+                self._json(conn, {"ok": False, "error": str(exc)}, "400 Bad Request")
+            return
+        if name.startswith("thumb/") and method in ("GET", "HEAD"):
+            path = backgrounds.catalog_thumb(name[len("thumb/") :])
+            if path is None:
+                conn.sendall(_http_response("404 Not Found", b"not found", "text/plain"))
+                return
+            self._send_file(conn, path, path.stat().st_size, "image/jpeg", headers, "", method == "HEAD", cache=IMMUTABLE)
+            return
+        if name.startswith("v/") and method in ("GET", "HEAD"):
+            vid, _, which = name[len("v/") :].partition("/")
+            path = backgrounds.video_file(vid, which)
+            if path is None:
+                conn.sendall(_http_response("404 Not Found", b"not found", "text/plain"))
+                return
+            mime = backgrounds.VIDEO_MIME[path.suffix[1:]]
+            # Range requests: iOS only plays a <video> that can seek.
+            self._send_file(conn, path, path.stat().st_size, mime, headers, "", method == "HEAD", cache=IMMUTABLE)
             return
         if not name and method in ("PUT", "POST"):
             try:
@@ -846,7 +893,11 @@ class Sidecar:
             return
         if name and method == "DELETE":
             ok = delete_background(name)
-            self._json(conn, {"ok": ok, "images": backgrounds.list_images()}, "200 OK" if ok else "404 Not Found")
+            self._json(
+                conn,
+                {"ok": ok, "images": backgrounds.list_images(), "videos": backgrounds.list_videos(), "catalog": backgrounds.catalog()},
+                "200 OK" if ok else "404 Not Found",
+            )
             return
         if name and method in ("GET", "HEAD"):
             path = backgrounds.path_of(name)
@@ -998,10 +1049,11 @@ class Sidecar:
         headers: dict[str, str],
         attachment: str,
         head_only: bool,
+        cache: str = "no-store",
     ) -> None:
         start, end = 0, size - 1
         status = "200 OK"
-        extra = [("Cache-Control", "no-store"), ("Accept-Ranges", "bytes")]
+        extra = [("Cache-Control", cache), ("Accept-Ranges", "bytes")]
         rng = (headers.get("range") or "").strip()
         if rng.startswith("bytes=") and size > 0 and not attachment:
             first = rng[len("bytes=") :].split(",", 1)[0]

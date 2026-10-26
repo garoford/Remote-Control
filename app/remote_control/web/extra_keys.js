@@ -519,8 +519,15 @@
         var pane = panes[id] || (id === bootTabId ? ensurePrimary() : null);
         if (!info || !pane || !pane.term) return;
         var term = pane.term;
+        watchOwnSize(pane);
+        var follow = guestSize[id] && guestSize[id].follow;
         if (info.guest && info.cols > 1 && info.rows > 1) {
           guestSize[id] = { cols: info.cols, rows: info.rows };
+          if (term.__rcGuest && term.cols === info.cols && term.rows === info.rows) return;
+        } else if (info.cols > 1 && info.rows > 1 && (follow || sizeTaken(id, term, info))) {
+          // Another device of this same profile typed last and sized the tab:
+          // follow it, scaled, until someone types here.
+          guestSize[id] = { cols: info.cols, rows: info.rows, follow: true };
           if (term.__rcGuest && term.cols === info.cols && term.rows === info.rows) return;
         } else {
           delete guestSize[id];
@@ -529,6 +536,41 @@
         fitPane(pane);
       })
       .catch(function () {});
+  }
+
+  // Same profile on two screens: the tab takes the size of the device that
+  // typed last; the other one shows that size scaled to fit instead of
+  // tmux's dots. Typing here takes the size back (tmux.tab.conf hooks resize
+  // the window to this client once its terminal is its own size again).
+  var ownResizeAt = {};
+  var OWN_RESIZE_GRACE_MS = 2500;
+
+  function sizeTaken(id, term, info) {
+    if (term.__rcGuest || (term.cols === info.cols && term.rows === info.rows)) return false;
+    // tmux has not caught up with a resize of our own yet.
+    return Date.now() - (ownResizeAt[id] || 0) > OWN_RESIZE_GRACE_MS;
+  }
+
+  function watchOwnSize(pane) {
+    var term = pane && pane.term;
+    if (!term || term.__rcOwnSizeHook || typeof term.onData !== "function") return;
+    term.__rcOwnSizeHook = true;
+    var id = pane.id;
+    // Just attached: tmux gives this client the window (client-attached hook).
+    ownResizeAt[id] = Date.now();
+    if (typeof term.onResize === "function") {
+      term.onResize(function () {
+        if (!term.__rcGuest) ownResizeAt[id] = Date.now();
+      });
+    }
+    term.onData(function (data) {
+      var want = guestSize[id];
+      if (!want || !want.follow) return;
+      // Focus and mouse reports are not someone typing here.
+      if (data === "\x1b[I" || data === "\x1b[O" || /^\x1b\[(M|<)/.test(data)) return;
+      delete guestSize[id];
+      fitPane(panes[id] || pane);
+    });
   }
 
   function bootGuestSize() {
@@ -5944,8 +5986,8 @@
     else if (look.kind === "preset") {
       var p = presetOf(look.value);
       raw = p ? p[4] : "";
-    } else if (look.kind === "image") {
-      var t = imageTint(look.value);
+    } else if (look.kind === "image" || look.kind === "video") {
+      var t = imageTint(tintSource(look));
       raw = t ? t.accent : "";
     }
     if (!raw) return null;
@@ -6327,7 +6369,7 @@
       var bg = colorFor(look.value);
       return Object.assign({}, TERM_THEMES[themeMode()], { background: bg, cursorAccent: bg });
     }
-    if (look.kind === "preset" || look.kind === "image") {
+    if (look.kind === "preset" || look.kind === "image" || look.kind === "video") {
       // The picture shows through; the veil (dim) matches the mode, so the
       // mode's own palette stays readable on top of it.
       // Not fully clear: xterm checks text contrast against this color, and a
@@ -6656,7 +6698,7 @@
     else if (look.kind === "preset") {
       var p = presetOf(look.value);
       if (p) raw = { tint: p[3], accent: p[4] };
-    } else if (look.kind === "image") raw = imageTint(look.value) || null;
+    } else if (look.kind === "image" || look.kind === "video") raw = imageTint(tintSource(look)) || null;
     if (!raw) return null;
     var light = themeMode() === "light";
     return { tint: raw.tint, accent: raw.accent, accent2: raw.accent2 || "", light: light, kind: look.kind };
@@ -6750,7 +6792,7 @@
 
   function lookSeeThrough() {
     var kind = myLook().kind;
-    return kind === "preset" || kind === "image";
+    return kind === "preset" || kind === "image" || kind === "video";
   }
 
   // The veil over a gradient/photo: deep navy in dark mode, a pastel of the
@@ -6784,8 +6826,8 @@
     var veil = veilRgb();
     var a = veilAlpha(look);
     var under = null;
-    if (look.kind === "image") {
-      var t = imageTints[look.value];
+    if (look.kind === "image" || look.kind === "video") {
+      var t = imageTints[tintSource(look)];
       if (t && t.avg) under = hexRgb(t.avg);
     } else if (look.kind === "preset") {
       var p = presetOf(look.value);
@@ -6815,19 +6857,89 @@
       body.insertBefore(layer, body.firstChild);
     }
     var img = layer.firstChild;
-    var css = look.kind === "preset" ? presetCss(look.value) : 'url("/rc-bg/' + look.value + '") center / cover no-repeat';
+    var css = lookBackgroundCss(look);
     if (img.dataset.src !== css) {
       img.dataset.src = css;
       img.style.background = css;
     }
     img.style.filter = look.blur ? "blur(" + look.blur + "px)" : "";
     img.style.transform = look.blur ? "scale(1.06)" : "";
+    paintBgVideo(layer, look, img);
     // The terminal already paints TERM_VEIL_A of the veil; the layer adds the rest.
     layer.style.setProperty("--rc-bg-dim", String(Math.max(0, 1 - (1 - veilAlpha(look)) / (1 - TERM_VEIL_A))));
     root.style.setProperty("--rc-veil-rgb", veilRgb().join(" "));
     layer.hidden = false;
     root.classList.add("rc-has-bg");
   }
+
+  // --- looping video backgrounds (backgrounds.py) ---------------------------------
+  // /rc-bg/v/<id>/full on a computer, /light on phones and tablets, /poster
+  // while it loads. Muted, looping, paused while the page is hidden.
+  function videoUrl(id, which) {
+    return "/rc-bg/v/" + id + "/" + which;
+  }
+
+  // What the adaptive color and the contrast check read: the image itself,
+  // or a video's poster (imageTint loads "/rc-bg/" + this).
+  function tintSource(look) {
+    return look.kind === "video" ? "v/" + look.value + "/poster" : look.value;
+  }
+
+  function reducedMotion() {
+    try {
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function paintBgVideo(layer, look, img) {
+    var video = layer.querySelector("video");
+    if (look.kind !== "video" || reducedMotion()) {
+      if (video) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+        video.remove();
+      }
+      return;
+    }
+    if (!video) {
+      video = document.createElement("video");
+      video.className = "rc-term-bg-video";
+      video.muted = true;
+      video.loop = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      ["muted", "playsinline", "disablepictureinpicture", "disableremoteplayback"].forEach(function (attr) {
+        video.setAttribute(attr, "");
+      });
+      video.setAttribute("aria-hidden", "true");
+      img.after(video);
+    }
+    var src = videoUrl(look.value, detectDevice() === "pc" ? "full" : "light");
+    if (video.dataset.src !== src) {
+      video.dataset.src = src;
+      video.poster = videoUrl(look.value, "poster");
+      video.src = src;
+    }
+    video.style.filter = img.style.filter;
+    video.style.transform = img.style.transform;
+    syncBgVideo();
+  }
+
+  function syncBgVideo() {
+    var video = document.querySelector("#rc-term-bg video");
+    if (!video) return;
+    if (document.hidden) video.pause();
+    else if (video.paused) {
+      var played = video.play();
+      if (played && played.catch) played.catch(function () {});
+    }
+  }
+
+  document.addEventListener("visibilitychange", syncBgVideo);
 
   var lookSaveTimer = 0;
 
@@ -6880,6 +6992,13 @@
   ];
   var settingsTab = "themes";
   var bgImages = [];
+  var bgVideos = [];
+  var bgCatalog = [];
+  var bgPoll = 0;
+  // A clip someone picked that is still downloading or being converted:
+  // {catalog: id} or {video: id}. It becomes the background once ready.
+  var bgWant = null;
+  var bgUpload = null;
   var GEAR_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 1.8h2.8l.4 1.8 1.2.7 1.8-.6 1.4 2.4-1.4 1.3v1.2l1.4 1.3-1.4 2.4-1.8-.6-1.2.7-.4 1.8H6.6l-.4-1.8-1.2-.7-1.8.6-1.4-2.4 1.4-1.3V7.4L1.8 6.1l1.4-2.4 1.8.6 1.2-.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
   var CHECK_ICON =
@@ -6898,9 +7017,145 @@
       })
       .then(function (payload) {
         if (payload && Array.isArray(payload.images)) bgImages = payload.images;
+        takeBgVideos(payload);
         paintSettings();
       })
       .catch(function () {});
+  }
+
+  function takeBgVideos(payload) {
+    if (!payload) return;
+    if (Array.isArray(payload.videos)) bgVideos = payload.videos;
+    if (Array.isArray(payload.catalog)) bgCatalog = payload.catalog;
+    if (bgWant) {
+      var hit = null;
+      var failed = "";
+      if (bgWant.catalog) {
+        var entry = bgCatalog.filter(function (c) {
+          return c.id === bgWant.catalog;
+        })[0];
+        if (entry && entry.state === "ready" && entry.video) hit = entry.video;
+        else if (!entry || !entry.state) failed = "No se pudo descargar el fondo";
+      } else {
+        var mine = bgVideos.filter(function (v) {
+          return v.id === bgWant.video;
+        })[0];
+        if (mine && mine.state === "ready") hit = mine.id;
+        else if (!mine || mine.state === "error") failed = (mine && mine.error) || "No se pudo procesar el video";
+      }
+      if (hit) {
+        bgWant = null;
+        setLook({ kind: "video", value: hit }, true);
+        showToast("Fondo animado listo");
+      } else if (failed) {
+        bgWant = null;
+        showToast(failed);
+      }
+    }
+    var busy =
+      bgWant ||
+      bgVideos.some(function (v) {
+        return v.state === "processing";
+      }) ||
+      bgCatalog.some(function (c) {
+        return c.state === "downloading" || c.state === "processing";
+      });
+    clearTimeout(bgPoll);
+    if (busy) bgPoll = setTimeout(loadBgImages, 1000);
+  }
+
+  function pickCatalogVideo(entry) {
+    if (entry.state === "ready" && entry.video) {
+      setLook({ kind: "video", value: entry.video }, true);
+      return;
+    }
+    bgWant = { catalog: entry.id };
+    entry.state = entry.state || "downloading";
+    paintSettings();
+    fetch("/rc-bg/fetch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: entry.id }), cache: "no-store" })
+      .then(function (resp) {
+        return resp.json().catch(function () {
+          return {};
+        });
+      })
+      .then(function (r) {
+        if (!r || !r.ok) {
+          bgWant = null;
+          showToast((r && r.error) || "No se pudo descargar el fondo");
+        } else if (r.state === "ready" && r.video) {
+          bgWant = null;
+          setLook({ kind: "video", value: r.video }, true);
+        } else showToast("Descargando «" + entry.title + "»…");
+        loadBgImages();
+      })
+      .catch(function () {
+        bgWant = null;
+        showToast("No se pudo descargar el fondo");
+      });
+  }
+
+  var VIDEO_CHUNK = 8 * 1024 * 1024;
+
+  // Same pieces as the file explorer's uploads: one request stays under the
+  // tunnel's 100 MB limit.
+  function uploadVideo(file) {
+    if (!file) return;
+    if (!/^video\//.test(file.type || "") && !/\.(mp4|mov|m4v|webm)$/i.test(file.name || "")) {
+      showToast("Eso no es un video");
+      return;
+    }
+    if (file.size > 200 * 1024 * 1024) {
+      showToast("El video pasa de 200 MB");
+      return;
+    }
+    if (bgUpload) {
+      showToast("Ya se está subiendo un video");
+      return;
+    }
+    var token = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+    var total = file.size;
+    var offset = 0;
+    bgUpload = { pct: 0 };
+    paintSettings();
+    (function send() {
+      var end = Math.min(total, offset + VIDEO_CHUNK);
+      fetch("/rc-bg/upload?token=" + token + "&offset=" + offset + "&total=" + total, {
+        method: "PUT",
+        body: file.slice(offset, end),
+        cache: "no-store",
+      })
+        .then(function (resp) {
+          return resp.json().catch(function () {
+            return { ok: false, error: "Error " + resp.status };
+          });
+        })
+        .then(
+          function (r) {
+            if (!r || !r.ok) {
+              bgUpload = null;
+              showToast((r && r.error) || "No pude subir el video");
+              paintSettings();
+              return;
+            }
+            offset = end;
+            if (!r.done) {
+              bgUpload = { pct: Math.round((offset / total) * 100) };
+              paintSettings();
+              send();
+              return;
+            }
+            bgUpload = null;
+            bgWant = { video: r.video };
+            showToast("Video subido; preparándolo…");
+            loadBgImages();
+          },
+          function () {
+            bgUpload = null;
+            showToast("Sin conexión");
+            paintSettings();
+          }
+        );
+    })();
   }
 
   function uploadBg(file) {
@@ -6943,8 +7198,9 @@
       })
       .then(function (payload) {
         if (payload && Array.isArray(payload.images)) bgImages = payload.images;
+        takeBgVideos(payload);
         var look = myLook();
-        if (look.kind === "image" && look.value === name) {
+        if ((look.kind === "image" || look.kind === "video") && look.value === name) {
           lookDraft = null;
           if (wsState && wsState.looks) wsState.looks[myProfile()] = Object.assign({}, look, { kind: "default", value: "" });
         }
@@ -6992,6 +7248,8 @@
     if (look.kind === "color") return colorFor(look.value);
     if (look.kind === "preset") return presetCss(look.value);
     if (look.kind === "image") return 'url("/rc-bg/' + look.value + '") center / cover no-repeat';
+    // A video shows its poster until it plays (and in place of it with reduced motion).
+    if (look.kind === "video") return 'url("' + videoUrl(look.value, "poster") + '") center / cover no-repeat';
     return TERM_THEMES[themeMode()].background;
   }
 
@@ -7003,7 +7261,7 @@
     var bg = document.createElement("div");
     bg.className = "rc-look-hero-bg";
     bg.style.background = lookBackgroundCss(look);
-    var see = look.kind === "preset" || look.kind === "image";
+    var see = look.kind === "preset" || look.kind === "image" || look.kind === "video";
     if (see && look.blur) {
       bg.style.filter = "blur(" + Math.round(look.blur / 2) + "px)";
       bg.style.transform = "scale(1.08)";
@@ -7052,9 +7310,32 @@
     hero.appendChild(win);
     var tag = document.createElement("span");
     tag.className = "rc-look-hero-tag";
-    tag.textContent = look.kind === "default" ? "Tema" : look.kind === "color" ? "Color" : look.kind === "preset" ? "Degradado" : "Imagen";
+    tag.textContent =
+      look.kind === "default" ? "Tema" : look.kind === "color" ? "Color" : look.kind === "preset" ? "Degradado" : look.kind === "video" ? "Animado" : "Imagen";
     hero.appendChild(tag);
     return hero;
+  }
+
+  // ▶ on a video tile; while it downloads or converts, how far along it is.
+  function videoBadge(tile, state, progress, error) {
+    var badge = document.createElement("span");
+    badge.className = "rc-look-play";
+    badge.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.8v8.4L12.2 8z" fill="currentColor"/></svg>';
+    tile.appendChild(badge);
+    if (state === "downloading" || state === "processing") {
+      tile.classList.add("is-busy");
+      var bar = document.createElement("span");
+      bar.className = "rc-look-progress";
+      bar.style.setProperty("--pct", Math.round((progress || 0) * 100) + "%");
+      bar.textContent = (state === "downloading" ? "Descargando " : "Preparando ") + Math.round((progress || 0) * 100) + "%";
+      tile.appendChild(bar);
+    } else if (state === "error") {
+      tile.classList.add("is-error");
+      tile.title = error || "No se pudo procesar el video";
+    } else if (state === "remote") {
+      // Not downloaded yet: the first pick fetches it.
+      tile.classList.add("is-remote");
+    }
   }
 
   function lookCard(title, hint, icon) {
@@ -7113,6 +7394,8 @@
     '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10.5" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="10.4" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
   var ICON_IMAGE =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="6" cy="6.6" r="1.2" fill="currentColor"/><path d="M2.6 12l3.6-3.4 2.6 2.4 1.8-1.6L13.4 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  var ICON_VIDEO =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3.5" width="12" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6.8 6.2v3.6L9.9 8z" fill="currentColor"/></svg>';
   var ICON_TUNE =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1M6.5 11.5h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="11" cy="4.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5" cy="11.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
 
@@ -7272,6 +7555,104 @@
     });
     images.appendChild(igrid);
     box.appendChild(images);
+
+    // Animated (looping videos)
+    var anim = lookCard("Animados", "Videos en loop, sin sonido. En el celular se usa una versión liviana.", ICON_VIDEO);
+    var vgrid = document.createElement("div");
+    vgrid.className = "rc-look-grid is-images";
+    var vup = document.createElement("label");
+    vup.className = "rc-look-tile is-upload";
+    vup.title = "Subir video (hasta 200 MB)";
+    vup.innerHTML =
+      '<span class="rc-look-up-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V3.5M4.8 6.4L8 3.2l3.2 3.2M3 12.8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
+    vup.appendChild(document.createElement("span")).textContent = bgUpload ? "Subiendo " + bgUpload.pct + "%" : "Subir video";
+    if (bgUpload) vup.classList.add("is-busy");
+    var vfile = document.createElement("input");
+    vfile.type = "file";
+    vfile.accept = "video/mp4,video/quicktime,video/webm,video/*";
+    vfile.addEventListener("change", function () {
+      uploadVideo(vfile.files && vfile.files[0]);
+      vfile.value = "";
+    });
+    vup.appendChild(vfile);
+    vgrid.appendChild(vup);
+    bgVideos
+      .filter(function (v) {
+        return v.source === "upload";
+      })
+      .forEach(function (v) {
+        var on = look.kind === "video" && look.value === v.id;
+        var tile = lookTile("is-image is-upload-img is-video", "Video subido", on, function () {
+          if (v.state === "ready") setLook({ kind: "video", value: v.id });
+          else if (v.state === "error") showToast(v.error || "No se pudo procesar el video");
+        });
+        var art = document.createElement("span");
+        art.className = "rc-look-art";
+        if (v.state === "ready") art.style.background = 'url("' + videoUrl(v.id, "poster") + '") center / cover no-repeat';
+        tile.insertBefore(art, tile.firstChild);
+        videoBadge(tile, v.state, v.progress, v.error);
+        var del = document.createElement("span");
+        del.className = "rc-look-del";
+        del.setAttribute("role", "button");
+        del.setAttribute("aria-label", "Borrar video");
+        del.title = "Borrar video";
+        del.innerHTML = WS_ICONS["🗑"];
+        del.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          deleteBg(v.id);
+        });
+        tile.appendChild(del);
+        vgrid.appendChild(tile);
+      });
+    ["dragenter", "dragover"].forEach(function (type) {
+      anim.addEventListener(type, function (ev) {
+        ev.preventDefault();
+        anim.classList.add("is-drop");
+      });
+    });
+    anim.addEventListener("dragleave", function (ev) {
+      if (!anim.contains(ev.relatedTarget)) anim.classList.remove("is-drop");
+    });
+    anim.addEventListener("drop", function (ev) {
+      ev.preventDefault();
+      anim.classList.remove("is-drop");
+      uploadVideo(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]);
+    });
+    anim.appendChild(vgrid);
+    [
+      ["lofi", "Lofi"],
+      ["naturaleza", "Naturaleza"],
+    ].forEach(function (group) {
+      var items = bgCatalog.filter(function (c) {
+        return c.group === group[0];
+      });
+      if (!items.length) return;
+      var sub = document.createElement("div");
+      sub.className = "rc-look-subtitle";
+      sub.textContent = group[1];
+      anim.appendChild(sub);
+      var grid = document.createElement("div");
+      grid.className = "rc-look-grid is-images";
+      items.forEach(function (c) {
+        var on = look.kind === "video" && !!c.video && look.value === c.video;
+        var tile = lookTile("is-image is-video", c.title, on, function () {
+          pickCatalogVideo(c);
+        });
+        var art = document.createElement("span");
+        art.className = "rc-look-art";
+        art.style.background = 'url("/rc-bg/thumb/' + encodeURIComponent(c.id) + '") center / cover no-repeat';
+        tile.insertBefore(art, tile.firstChild);
+        var name = document.createElement("span");
+        name.className = "rc-look-name";
+        name.textContent = c.title;
+        tile.appendChild(name);
+        videoBadge(tile, c.state || "remote", c.progress, "");
+        grid.appendChild(tile);
+      });
+      anim.appendChild(grid);
+    });
+    box.appendChild(anim);
 
     // Readability
     var see = lookSeeThrough();

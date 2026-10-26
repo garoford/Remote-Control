@@ -443,12 +443,15 @@ def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "", auth
     parts = result.stdout.strip().split("\t") if result.returncode == 0 else []
     if len(parts) >= 4 and parts[3] == "herdr":
         return herdr_size(tab, prof, dev, authority, socket=socket)
-    if len(parts) < 4 or not parts[2] or parts[2] == prof:
-        return {"guest": False}
     try:
-        return {"guest": True, "cols": int(parts[0]), "rows": int(parts[1])}
-    except ValueError:
+        cols, rows = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
         return {"guest": False}
+    if len(parts) < 4 or not parts[2] or parts[2] == prof:
+        # The owner's devices get the size too: one that did not type last
+        # follows it, scaled (extra_keys.js), instead of tmux's dots.
+        return {"guest": False, "cols": cols, "rows": rows}
+    return {"guest": True, "cols": cols, "rows": rows}
 
 
 def herdr_size(tab: str, prof: str, dev: str, authority: str, socket: str = TMUX_SOCKET) -> dict:

@@ -1,15 +1,26 @@
-"""Terminal background images, shared by every profile.
+"""Terminal backgrounds (images and looping videos), shared by every profile.
 
 Files live in ~/.local/share/remote-control/backgrounds, named by a hash of
 their bytes, so the same picture uploaded twice is kept once and the browser
 can cache it forever. The type comes from the bytes, never from the name.
+
+Videos, uploaded or picked from CATALOG (downloaded the first time someone
+picks one), go through ffmpeg: <id>.mp4 (up to 1080p, no sound), a lighter
+<id>.light.mp4 for phones and <id>.poster.jpg. <id>.json says whether it is
+still being processed.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
+import threading
+import time
+import urllib.request
 from pathlib import Path
 
 MAX_BYTES = 15 * 1024 * 1024
@@ -92,3 +103,470 @@ def delete(name: str) -> bool:
     except OSError:
         return False
     return True
+
+
+# --- looping videos ---------------------------------------------------------------
+
+VIDEO_MAX_BYTES = 200 * 1024 * 1024
+VIDEO_MAX_FILES = 30
+VIDEO_MAX_SECONDS = 600
+CHUNK_MAX = 9 * 1024 * 1024
+VIDEO_ID_RE = re.compile(r"^[a-f0-9]{16}$")
+TOKEN_RE = re.compile(r"^[a-z0-9]{8,32}$")
+# <id>.mp4 / <id>.webm, <id>.light.mp4 / .light.webm, <id>.poster.jpg
+VIDEO_FILE_RE = re.compile(r"^([a-f0-9]{16})(\.light)?\.(mp4|webm)$")
+VIDEO_MIME = {"mp4": "video/mp4", "webm": "video/webm", "jpg": "image/jpeg"}
+# Long side in pixels and bitrate of each version.
+FULL = (1920, "4M", "6M")
+LIGHT = (1280, "1200k", "1800k")
+# Tried in this order; an encoder ffmpeg lists can still fail (NVENC with no GPU).
+ENCODERS = (
+    ("libx264", "mp4", ["-preset", "veryfast"]),
+    ("libopenh264", "mp4", []),
+    ("h264_nvenc", "mp4", []),
+    ("libvpx-vp9", "webm", ["-deadline", "realtime", "-cpu-used", "8"]),
+)
+
+# Free to use (Mixkit Free License). Nothing is stored in the repo: the
+# server downloads a clip the first time someone picks it.
+CATALOG = (
+    ("lluvia-ventana", "Lluvia en la ventana", "lofi", 28085, 720),
+    ("ventana-luces", "Ventana lluviosa", "lofi", 2846, 1080),
+    ("gotas-vidrio", "Gotas en el vidrio", "lofi", 21144, 720),
+    ("gato-ventana", "Gato en la ventana", "lofi", 33951, 720),
+    ("calle-noche", "Calle de noche", "lofi", 6754, 720),
+    ("calle-mojada", "Calle mojada", "lofi", 4331, 1080),
+    ("olas", "Olas", "naturaleza", 17972, 720),
+    ("atardecer", "Atardecer", "naturaleza", 4205, 1080),
+    ("montanas", "Montañas", "naturaleza", 41545, 1080),
+    ("fogata", "Fogata", "naturaleza", 1243, 1080),
+    ("rio-bosque", "Río en el bosque", "naturaleza", 51585, 1080),
+    ("nubes", "Sobre las nubes", "naturaleza", 2408, 1080),
+    ("tormenta", "Tormenta", "naturaleza", 47948, 720),
+    ("mar", "Mar turquesa", "naturaleza", 42498, 1080),
+)
+
+_jobs: set[str] = set()
+_downloads: dict[str, float] = {}
+_jobs_lock = threading.Lock()
+# One ffmpeg at a time: the tunnel's machine is also someone's computer.
+_encode_lock = threading.Lock()
+_thumb_lock = threading.Lock()
+
+
+def _catalog_url(item: tuple, res: int | None = None) -> str:
+    vid = item[3]
+    return f"https://assets.mixkit.co/videos/{vid}/{vid}-{res or item[4]}.mp4"
+
+
+def _catalog_item(cid: str) -> tuple | None:
+    return next((item for item in CATALOG if item[0] == cid), None)
+
+
+def sniff_video(head: bytes) -> str:
+    """"mp4" (also .mov), "webm" or ""."""
+    if head[4:8] == b"ftyp":
+        return "mp4"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "webm"
+    return ""
+
+
+def _state_path(vid: str) -> Path:
+    return folder() / f"{vid}.json"
+
+
+def _write_state(vid: str, **state) -> None:
+    path = _state_path(vid)
+    tmp = path.with_name(f".{vid}.json.tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def video_state(vid: str) -> dict:
+    try:
+        state = json.loads(_state_path(vid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    if state.get("state") == "processing":
+        with _jobs_lock:
+            alive = vid in _jobs
+        if not alive:
+            # The server restarted halfway through.
+            state = {"state": "error", "error": "Se interrumpió; vuelve a subirlo"}
+    return state
+
+
+def video_file(vid: str, which: str) -> Path | None:
+    """The file behind /rc-bg/v/<id>/<full|light|poster>."""
+    if not VIDEO_ID_RE.match(vid or ""):
+        return None
+    base = folder()
+    if which == "poster":
+        path = base / f"{vid}.poster.jpg"
+        return path if path.is_file() else None
+    if which == "light":
+        for ext in ("mp4", "webm"):
+            path = base / f"{vid}.light.{ext}"
+            if path.is_file():
+                return path
+        which = "full"
+    if which == "full":
+        for ext in ("mp4", "webm"):
+            path = base / f"{vid}.{ext}"
+            if path.is_file():
+                return path
+    return None
+
+
+def list_videos() -> list[dict]:
+    """Uploaded and downloaded videos, newest first: {id, state, progress, error, source}."""
+    base = folder()
+    if not base.is_dir():
+        return []
+    found = []
+    for item in base.iterdir():
+        name = item.name
+        if not (name.endswith(".json") and VIDEO_ID_RE.match(name[:-5])):
+            continue
+        vid = name[:-5]
+        state = video_state(vid)
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        found.append(
+            (
+                mtime,
+                {
+                    "id": vid,
+                    "state": state.get("state") or "error",
+                    "progress": float(state.get("progress") or 0),
+                    "error": str(state.get("error") or ""),
+                    "source": str(state.get("source") or "upload"),
+                },
+            )
+        )
+    return [entry for _, entry in sorted(found, key=lambda x: x[0], reverse=True)]
+
+
+def _catalog_map() -> dict[str, str]:
+    try:
+        data = json.loads((folder() / "catalog.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str) and VIDEO_ID_RE.match(v)} if isinstance(data, dict) else {}
+
+
+def _save_catalog_map(mapping: dict[str, str]) -> None:
+    path = folder() / "catalog.json"
+    tmp = path.with_name(".catalog.json.tmp")
+    tmp.write_text(json.dumps(mapping), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def catalog() -> list[dict]:
+    """The preset clips: {id, title, group, video, state, progress}."""
+    mapping = _catalog_map()
+    out = []
+    for cid, title, group, _vid, _res in CATALOG:
+        entry = {"id": cid, "title": title, "group": group, "video": "", "state": "", "progress": 0.0}
+        with _jobs_lock:
+            downloading = _downloads.get(cid)
+        if downloading is not None:
+            entry.update(state="downloading", progress=downloading)
+        elif cid in mapping:
+            state = video_state(mapping[cid])
+            if state.get("state") in ("ready", "processing"):
+                entry.update(video=mapping[cid], state=state["state"], progress=float(state.get("progress") or 0))
+        out.append(entry)
+    return out
+
+
+def _video_count() -> int:
+    return sum(1 for v in list_videos() if v["state"] != "error")
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()[:16]
+
+
+def _ingest(src: Path, source: str) -> str:
+    """Take a finished upload or download: dedupe by hash, then encode in the background."""
+    with open(src, "rb") as fh:
+        kind = sniff_video(fh.read(64))
+    if not kind:
+        src.unlink(missing_ok=True)
+        raise BackgroundError("Solo videos MP4, MOV o WebM")
+    vid = _hash_file(src)
+    state = video_state(vid)
+    if state.get("state") in ("ready", "processing") and (state.get("state") == "processing" or video_file(vid, "full")):
+        src.unlink(missing_ok=True)
+        return vid
+    if _video_count() >= VIDEO_MAX_FILES:
+        src.unlink(missing_ok=True)
+        raise BackgroundError("Hay demasiados videos; borra alguno")
+    work = folder() / f".src-{vid}"
+    os.replace(src, work)
+    with _jobs_lock:
+        _jobs.add(vid)
+    _write_state(vid, state="processing", progress=0, source=source)
+    threading.Thread(target=_process, args=(work, vid, source), daemon=True).start()
+    return vid
+
+
+def upload_chunk(token: str, offset: int, total: int, body: bytes) -> dict:
+    """One piece of an uploaded video (pieces come in order, like the file explorer's)."""
+    if not TOKEN_RE.match(token or ""):
+        raise BackgroundError("Subida no válida")
+    if total <= 0 or total > VIDEO_MAX_BYTES:
+        raise BackgroundError("El video pasa de 200 MB")
+    if len(body) > CHUNK_MAX or offset < 0 or offset + len(body) > total:
+        raise BackgroundError("Trozo no válido")
+    base = folder()
+    base.mkdir(parents=True, exist_ok=True)
+    part = base / f".up-{token}.part"
+    if offset == 0:
+        if not sniff_video(body[:64]):
+            raise BackgroundError("Solo videos MP4, MOV o WebM")
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    else:
+        if not part.is_file() or part.stat().st_size != offset:
+            raise BackgroundError("La subida se cortó; vuelve a intentarlo")
+        fd = os.open(part, os.O_WRONLY | os.O_APPEND)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(body)
+    if offset + len(body) < total:
+        return {"ok": True, "done": False, "received": offset + len(body)}
+    return {"ok": True, "done": True, "video": _ingest(part, "upload")}
+
+
+def fetch_catalog(cid: str) -> dict:
+    """Pick a preset clip: ready at once when cached, else download it in the background."""
+    item = _catalog_item(cid)
+    if item is None:
+        raise BackgroundError("Ese fondo no existe")
+    vid = _catalog_map().get(cid, "")
+    if vid:
+        state = video_state(vid)
+        if state.get("state") == "processing" or (state.get("state") == "ready" and video_file(vid, "full")):
+            return {"ok": True, "video": vid, "state": state["state"]}
+    with _jobs_lock:
+        if cid in _downloads:
+            return {"ok": True, "video": "", "state": "downloading"}
+        _downloads[cid] = 0.0
+    threading.Thread(target=_download, args=(item,), daemon=True).start()
+    return {"ok": True, "video": "", "state": "downloading"}
+
+
+def _download(item: tuple) -> None:
+    cid = item[0]
+    base = folder()
+    base.mkdir(parents=True, exist_ok=True)
+    part = base / f".dl-{cid}.part"
+    try:
+        req = urllib.request.Request(_catalog_url(item), headers={"User-Agent": "Mozilla/5.0 Remote-Control"})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(part, "wb") as fh:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                block = resp.read(1 << 20)
+                if not block:
+                    break
+                got += len(block)
+                if got > VIDEO_MAX_BYTES:
+                    raise BackgroundError("El video pasa de 200 MB")
+                fh.write(block)
+                if total:
+                    with _jobs_lock:
+                        _downloads[cid] = min(1.0, got / total)
+        vid = _ingest(part, cid)
+        mapping = _catalog_map()
+        mapping[cid] = vid
+        _save_catalog_map(mapping)
+    except (OSError, ValueError, BackgroundError):
+        part.unlink(missing_ok=True)
+    finally:
+        with _jobs_lock:
+            _downloads.pop(cid, None)
+
+
+def catalog_thumb(cid: str) -> Path | None:
+    """A still of a preset clip (from its small preview), made once."""
+    item = _catalog_item(cid)
+    if item is None:
+        return None
+    path = folder() / f"thumb-{cid}.jpg"
+    if path.is_file():
+        return path
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    with _thumb_lock:
+        if path.is_file():
+            return path
+        folder().mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".thumb-{cid}.jpg")
+        cmd = [ffmpeg, "-v", "error", "-y", "-ss", "2", "-i", _catalog_url(item, 360), "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", "-f", "image2", str(tmp)]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30, check=True)
+            os.replace(tmp, path)
+        except (OSError, subprocess.SubprocessError):
+            tmp.unlink(missing_ok=True)
+            return None
+    return path
+
+
+_encoders_seen: list[str] | None = None
+
+
+def encoders(ffmpeg: str) -> list[tuple]:
+    """ENCODERS this ffmpeg has, in order of preference."""
+    global _encoders_seen
+    if _encoders_seen is None:
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _encoders_seen = re.findall(r"^\s*V\S*\s+(\S+)", out, re.M)
+    return [enc for enc in ENCODERS if enc[0] in _encoders_seen]
+
+
+def _probe_duration(src: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0.0
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type:format=duration", "-of", "json", str(src)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    try:
+        info = json.loads(out.stdout or "{}")
+    except ValueError:
+        info = {}
+    if not info.get("streams"):
+        raise BackgroundError("Ese archivo no tiene video")
+    try:
+        return float((info.get("format") or {}).get("duration") or 0)
+    except ValueError:
+        return 0.0
+
+
+def scale_filter(long_side: int) -> str:
+    """Fit the long side in long_side pixels, never upscale, even sizes."""
+    return (
+        f"scale='if(gte(iw,ih),min({long_side},iw),-2)':'if(gte(iw,ih),-2,min({long_side},ih))',"
+        "format=yuv420p"
+    )
+
+
+def encode_cmd(ffmpeg: str, src: Path, dest: Path, enc: tuple, size: tuple) -> list[str]:
+    long_side, rate, maxrate = size
+    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(src), "-an", "-sn", "-dn", "-vf", scale_filter(long_side)]
+    cmd += ["-c:v", enc[0], *enc[2], "-b:v", rate, "-maxrate", maxrate, "-bufsize", maxrate]
+    if enc[1] == "mp4":
+        cmd += ["-movflags", "+faststart"]
+    cmd += ["-progress", "pipe:1", "-nostats", "-f", enc[1], str(dest)]
+    return cmd
+
+
+def _run_encode(cmd: list[str], vid: str, source: str, duration: float, lo: float, hi: float) -> bool:
+    last = 0.0
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True) as proc:
+        for line in proc.stdout or []:
+            if not line.startswith("out_time_us=") or duration <= 0:
+                continue
+            try:
+                done = int(line.split("=", 1)[1]) / 1e6 / duration
+            except ValueError:
+                continue
+            now = time.monotonic()
+            if now - last > 0.5:
+                last = now
+                _write_state(vid, state="processing", progress=round(lo + (hi - lo) * max(0.0, min(1.0, done)), 3), source=source)
+    return proc.returncode == 0
+
+
+def _process(work: Path, vid: str, source: str) -> None:
+    base = folder()
+    made: list[Path] = []
+    try:
+        with _encode_lock:
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                # No ffmpeg: a browser-ready file is kept as it is.
+                with open(work, "rb") as fh:
+                    head = fh.read(64)
+                kind = sniff_video(head)
+                if kind == "mp4" and head[8:12] == b"qt  ":
+                    raise BackgroundError("Para videos MOV hace falta ffmpeg")
+                os.replace(work, base / f"{vid}.{kind}")
+                _write_state(vid, state="ready", progress=1, source=source)
+                return
+            duration = _probe_duration(work)
+            if duration > VIDEO_MAX_SECONDS:
+                raise BackgroundError("El video dura más de 10 minutos")
+            for enc in encoders(ffmpeg):
+                full = base / f".{vid}.full.{enc[1]}"
+                light = base / f".{vid}.light.{enc[1]}"
+                made = [full, light]
+                if _run_encode(encode_cmd(ffmpeg, work, full, enc, FULL), vid, source, duration, 0.0, 0.65) and _run_encode(
+                    encode_cmd(ffmpeg, work, light, enc, LIGHT), vid, source, duration, 0.65, 0.95
+                ):
+                    break
+                for path in made:
+                    path.unlink(missing_ok=True)
+            else:
+                raise BackgroundError("ffmpeg no pudo convertir el video")
+            poster = base / f".{vid}.poster.jpg"
+            made.append(poster)
+            seek = str(min(1.0, duration / 2)) if duration else "0"
+            subprocess.run(
+                [ffmpeg, "-v", "error", "-y", "-ss", seek, "-i", str(full), "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", "-f", "image2", str(poster)],
+                capture_output=True,
+                timeout=60,
+                check=True,
+            )
+            os.replace(full, base / f"{vid}.{enc[1]}")
+            os.replace(light, base / f"{vid}.light.{enc[1]}")
+            os.replace(poster, base / f"{vid}.poster.jpg")
+            _write_state(vid, state="ready", progress=1, source=source)
+    except (OSError, ValueError, subprocess.SubprocessError, BackgroundError) as exc:
+        for path in made:
+            path.unlink(missing_ok=True)
+        message = str(exc) if isinstance(exc, BackgroundError) else "No se pudo procesar el video"
+        _write_state(vid, state="error", progress=0, error=message, source=source)
+    finally:
+        work.unlink(missing_ok=True)
+        with _jobs_lock:
+            _jobs.discard(vid)
+
+
+def delete_video(vid: str) -> bool:
+    if not VIDEO_ID_RE.match(vid or ""):
+        return False
+    with _jobs_lock:
+        if vid in _jobs:
+            return False
+    base = folder()
+    gone = False
+    for name in (f"{vid}.mp4", f"{vid}.webm", f"{vid}.light.mp4", f"{vid}.light.webm", f"{vid}.poster.jpg", f"{vid}.json"):
+        try:
+            (base / name).unlink()
+            gone = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+    mapping = _catalog_map()
+    if vid in mapping.values():
+        _save_catalog_map({k: v for k, v in mapping.items() if v != vid})
+    return gone

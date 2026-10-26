@@ -2150,6 +2150,14 @@ html.rc-touch .rc-profile-chip-name {
   background-size: cover;
 }
 
+.rc-term-bg-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 /* Dark veil over the picture so the terminal text stays readable. */
 #rc-term-bg::after {
   content: "";
@@ -2934,6 +2942,80 @@ html[data-rc-theme="light"] .rc-set-group {
 .rc-look-tile:hover .rc-look-del,
 html.rc-touch .rc-look-del {
   opacity: 1;
+}
+
+/* Animated backgrounds: ▶ on each clip; progress while it downloads or converts. */
+.rc-look-play {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.5);
+  color: #fff;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.rc-look-play svg {
+  width: 12px;
+  height: 12px;
+}
+
+.rc-look-tile.is-remote .rc-look-play {
+  background: rgb(0 0 0 / 0.35);
+  opacity: 0.85;
+}
+
+.rc-look-tile.is-busy {
+  cursor: progress;
+}
+
+.rc-look-progress {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 8px;
+  background:
+    linear-gradient(var(--rc-blue), var(--rc-blue)) left bottom / var(--pct, 0%) 4px no-repeat,
+    rgb(0 0 0 / 0.55);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.rc-look-tile.is-error .rc-look-art {
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+
+.rc-look-tile.is-error::after {
+  content: "Error";
+  position: absolute;
+  inset: auto 0 0;
+  padding: 4px;
+  background: rgb(var(--rc-red-rgb, 239 83 80) / 0.85);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.rc-look-tile.is-upload.is-busy {
+  color: var(--rc-muted);
+}
+
+.rc-look-subtitle {
+  margin: 14px 0 8px;
+  color: var(--rc-muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 /* Sliders */

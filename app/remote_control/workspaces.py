@@ -37,7 +37,7 @@ NAME_MAX = 40
 THEMES = ("system", "light", "dark")
 # Terminal background per profile ("" is the primary one). Presets are CSS
 # gradients drawn by the page; images are files from backgrounds.py.
-LOOK_KINDS = ("default", "color", "preset", "image")
+LOOK_KINDS = ("default", "color", "preset", "image", "video")
 LOOK_PRESETS = ("aurora", "sunset", "ocean", "forest", "nebula", "graphite", "rose", "mint")
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 LOOKS_MAX = 40
@@ -115,6 +115,8 @@ def _clean_look(raw) -> dict | None:
         return None
     if kind == "image" and not backgrounds.NAME_RE.match(value):
         return None
+    if kind == "video" and not backgrounds.VIDEO_ID_RE.match(value):
+        return None
     if kind == "default":
         value = ""
 
@@ -135,9 +137,9 @@ def _clean_look(raw) -> dict | None:
 
 
 def drop_image_looks(state: dict, name: str) -> None:
-    """A deleted image falls back to the default background wherever it was used."""
+    """A deleted image or video falls back to the default background wherever it was used."""
     for pid, look in list((state.get("looks") or {}).items()):
-        if look.get("kind") == "image" and look.get("value") == name:
+        if look.get("kind") in ("image", "video") and look.get("value") == name:
             state["looks"][pid] = {"kind": "default", "value": "", "dim": look.get("dim", 35), "blur": look.get("blur", 0)}
 
 
@@ -617,10 +619,11 @@ def public_view(state: dict, sessions: list[dict]) -> dict:
 
 
 def delete_background(name: str, base: Path | None = None) -> bool:
-    """Remove an uploaded image and reset the profiles that were using it."""
+    """Remove an uploaded image or video and reset the profiles that were using it."""
     base = base or state_dir()
     with _locked(base):
-        if not backgrounds.delete(name):
+        gone = backgrounds.delete_video(name) if backgrounds.VIDEO_ID_RE.match(name or "") else backgrounds.delete(name)
+        if not gone:
             return False
         state = load_state(base)
         drop_image_looks(state, name)
