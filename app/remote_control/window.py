@@ -90,10 +90,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         canvas.append(self._build_qr_card())
         canvas.append(self._build_autostart())
         canvas.append(self._build_error())
-        spacer = Gtk.Box()
-        spacer.set_vexpand(True)
-        canvas.append(spacer)
-        canvas.append(self._build_hint())
 
         self.set_content(toolbar)
 
@@ -121,9 +117,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         title = Gtk.Label(label="Túnel web", xalign=0)
         title.add_css_class("rc-hero-title")
         texts.append(title)
-        self.hero_sub = Gtk.Label(label="Publica tu terminal en una URL temporal", xalign=0, wrap=True)
-        self.hero_sub.add_css_class("rc-hero-sub")
-        texts.append(self.hero_sub)
         top.append(texts)
 
         self.switch = Gtk.Switch()
@@ -223,10 +216,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             meter.append(bar)
             self.meter_bars.append(bar)
         box.append(meter)
-
-        self.pass_hint = Gtk.Label(xalign=0, wrap=True)
-        self.pass_hint.add_css_class("rc-hint-text")
-        box.append(self.pass_hint)
         self._refresh_strength()
         return box
 
@@ -239,16 +228,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _build_autostart(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.add_css_class("rc-card")
-        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        texts.set_hexpand(True)
-        texts.set_valign(Gtk.Align.CENTER)
         title = Gtk.Label(label="Iniciar con el sistema", xalign=0)
         title.add_css_class("rc-card-title")
-        texts.append(title)
-        hint = Gtk.Label(label="Enciende el túnel al iniciar sesión, sin abrir esta ventana", xalign=0, wrap=True)
-        hint.add_css_class("rc-hint-text")
-        texts.append(hint)
-        box.append(texts)
+        title.set_hexpand(True)
+        title.set_valign(Gtk.Align.CENTER)
+        box.append(title)
         self.autostart_switch = Gtk.Switch()
         self.autostart_switch.add_css_class("rc-switch")
         self.autostart_switch.set_valign(Gtk.Align.CENTER)
@@ -266,16 +250,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             return True
         self._toast("Se encenderá al iniciar sesión" if state else "Ya no se enciende al iniciar sesión")
         return False
-
-    def _build_hint(self) -> Gtk.Widget:
-        hint = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        hint.set_halign(Gtk.Align.CENTER)
-        hint.add_css_class("rc-footer")
-        icon = Gtk.Image.new_from_icon_name("network-wireless-encrypted-symbolic")
-        icon.set_pixel_size(12)
-        hint.append(icon)
-        hint.append(Gtk.Label(label="Cloudflare Quick Tunnel · ttyd"))
-        return hint
 
     # --- URLs (shown while the tunnel is up) ---------------------------------
 
@@ -343,9 +317,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         title.add_css_class("rc-card-title")
         title.set_hexpand(True)
         head.append(title)
-        hint = Gtk.Label(label="Escanea la URL pública", xalign=1)
-        hint.add_css_class("rc-hint-text")
-        head.append(hint)
         self.qr_card.append(head)
         frame = Gtk.Box()
         frame.add_css_class("rc-qr")
@@ -626,12 +597,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             if i < filled:
                 bar.add_css_class(kind)
         self.copy_password_btn.set_sensitive(bool(text))
-        self.pass_hint.set_label(
-            "Cualquiera con la URL podrá usar tu terminal." if not text else "Se pide al abrir la URL; se recuerda 30 días por dispositivo."
-        )
-        self.pass_hint.remove_css_class("warn")
-        if not text:
-            self.pass_hint.add_css_class("warn")
         self.lock_label.set_label("Con contraseña" if text else "Sin contraseña")
         self.lock_chip.remove_css_class("warn")
         if not text:
@@ -667,13 +632,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
     def _set_status(self, kind: str, text: str) -> None:
         self.status_label.set_label(text)
-        self.hero_sub.set_label(
-            {
-                "on": "Tu terminal está publicada",
-                "busy": "Un momento…",
-                "off": "Publica tu terminal en una URL temporal",
-            }.get(kind, "")
-        )
         for cls in ("on", "off", "busy"):
             self.hero.remove_css_class(cls)
         self.hero.add_css_class(kind)

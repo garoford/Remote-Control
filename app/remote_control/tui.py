@@ -99,8 +99,7 @@ class RemoteControlTUI(App):
     #badge { width: 6; height: 3; content-align: center middle; background: #21c7a8; color: #011627; text-style: bold; }
     #hero.off #badge { background: #1d3b53; color: #7fdbca; }
     #hero-text { width: 1fr; height: auto; padding: 0 2; }
-    #hero-title { text-style: bold; }
-    #hero-sub { color: #8a9bb3; }
+    #hero-title { height: 3; content-align: left middle; text-style: bold; }
     #switch { width: auto; }
     Switch { background: #0b2942; border: tall #1d3b53; }
     Switch > .switch--slider { color: #1d3b53; background: #011627; }
@@ -128,12 +127,8 @@ class RemoteControlTUI(App):
     .bar.weak { background: #ef5350; }
     .bar.ok { background: #ffeb95; }
     .bar.strong { background: #22da6e; }
-    #pass-hint, .hint { color: #8a9bb3; margin-top: 1; }
     #auto-row { height: auto; }
-    #auto-text { width: 1fr; height: auto; }
-    #auto-title { text-style: bold; }
-    #auto-text .hint { margin-top: 0; }
-    #pass-hint.warn { color: #ffeb95; }
+    #auto-title { width: 1fr; height: 3; content-align: left middle; text-style: bold; }
     .label { color: #8a9bb3; text-style: bold; margin-top: 1; }
     .label:first-child { margin-top: 0; }
     .url { width: 1fr; height: 1; padding: 0 1; background: #0b2942; color: #7fdbca; }
@@ -181,7 +176,6 @@ class RemoteControlTUI(App):
                             yield Static(">_", id="badge")
                             with Vertical(id="hero-text"):
                                 yield Static("Túnel web", id="hero-title")
-                                yield Static("Publica tu terminal en una URL temporal", id="hero-sub")
                             yield Switch(id="switch", animate=False)
                         with Horizontal(id="chips"):
                             yield Static("● Apagado", id="status-chip", classes="chip")
@@ -197,12 +191,9 @@ class RemoteControlTUI(App):
                         with Horizontal(id="meter"):
                             for _ in range(4):
                                 yield Static("", classes="bar")
-                        yield Static("", id="pass-hint")
                     with Vertical(id="auto-card", classes="card"):
                         with Horizontal(id="auto-row"):
-                            with Vertical(id="auto-text"):
-                                yield Static("Iniciar con el sistema", id="auto-title")
-                                yield Static("Enciende el túnel al iniciar sesión, sin abrir la ventana", classes="hint")
+                            yield Static("Iniciar con el sistema", id="auto-title")
                             yield Switch(value=autostart.is_enabled(), id="autostart", animate=False)
                     with Vertical(id="share", classes="card"):
                         yield Static("URL pública", classes="label")
@@ -234,7 +225,6 @@ class RemoteControlTUI(App):
         self.query_one("#pass-card").border_title = "Contraseña"
         self.query_one("#share").border_title = "Compartir"
         self.query_one("#qr-card").border_title = "Abrir en el celular"
-        self.query_one("#qr-card").border_subtitle = "Escanea la URL pública"
 
         saved = without_spaces(read_password())
         if not saved:
@@ -267,9 +257,6 @@ class RemoteControlTUI(App):
         chip = self.query_one("#status-chip", Static)
         chip.set_classes(f"chip {kind}")
         chip.update(text or {"on": "● En línea", "off": "● Apagado", "busy": "● Un momento…"}[kind])
-        self.query_one("#hero-sub", Static).update(
-            {"on": "Tu terminal está publicada", "off": "Publica tu terminal en una URL temporal", "busy": "Un momento…"}[kind]
-        )
         switch = self.query_one("#switch", Switch)
         with switch.prevent(Switch.Changed):
             switch.value = kind != "off"
@@ -290,13 +277,6 @@ class RemoteControlTUI(App):
         self.query_one("#pass-card").border_subtitle = STRENGTH_LABEL[kind]
         for i, bar in enumerate(self.query(".bar")):
             bar.set_classes("bar " + (kind if i < STRENGTH_BARS[kind] else ""))
-        hint = self.query_one("#pass-hint", Static)
-        if text:
-            hint.update("Se pide al abrir la URL; se recuerda 30 días por dispositivo.")
-            hint.remove_class("warn")
-        else:
-            hint.update("Sin contraseña: cualquiera con la URL podrá usar tu terminal.")
-            hint.add_class("warn")
         lock = self.query_one("#lock-chip", Static)
         lock.update("🔒 Con contraseña" if text else "🔓 Sin contraseña")
         lock.set_classes("chip" if text else "chip warn")

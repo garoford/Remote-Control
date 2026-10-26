@@ -99,10 +99,6 @@ window.rc-window,
   font-weight: 800;
 }
 
-.rc-hero-sub {
-  color: @rc_muted;
-  font-size: 12.5px;
-}
 
 .rc-switch {
   background-color: alpha(@rc_text, 0.14);
@@ -323,10 +319,6 @@ window.rc-window,
   color: @rc_yellow;
 }
 
-.rc-footer {
-  color: alpha(@rc_muted, 0.75);
-  font-size: 11px;
-}
 
 .rc-error {
   background-color: alpha(@rc_red, 0.1);
