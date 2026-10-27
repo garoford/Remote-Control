@@ -597,8 +597,11 @@ def set_pane_owner(pane: object, prof: object) -> dict:
 # (web/profiles.zsh reads @rc_prof). tab_session.sh notes each client's
 # profile in @rc_cprof_<tty> so their flags can follow the change.
 
-# Output within this many seconds: the CLI in the tab is busy, leave it be.
-TAB_BUSY_S = 4
+# A CLI at work shows how to stop it under its spinner ("esc to interrupt";
+# Gemini: "esc to cancel"); a waiting one does not. The tab's last output
+# time is no sign: an idle Claude redraws itself on every resize and when
+# it opens, which is just when someone moves the tab to another profile.
+WORKING_RE = re.compile(r"\besc to (interrupt|cancel)\b", re.I)
 
 
 def _client_key(client: str) -> str:
@@ -640,7 +643,7 @@ def set_tab_owner(tab: object, prof: object) -> dict:
     if owner_size and len(owner_size) == 2:
         _tmux(TMUX_SOCKET, "resize-window", "-t", f"={tab}:", "-x", owner_size[0], "-y", owner_size[1])
     try:
-        shell_pid, activity = int(parts[0]), int(parts[2])
+        shell_pid = int(parts[0])
     except ValueError:
         return {"ok": True, "restarted": False}
 
@@ -648,5 +651,6 @@ def set_tab_owner(tab: object, prof: object) -> dict:
         _tmux(TMUX_SOCKET, "send-keys", "-t", f"={tab}:", "-l", line)
         _tmux(TMUX_SOCKET, "send-keys", "-t", f"={tab}:", "Enter")
 
-    working = time.time() - activity < TAB_BUSY_S
+    screen = _tmux(TMUX_SOCKET, "capture-pane", "-p", "-t", f"={tab}:", text=True).stdout or ""
+    working = bool(WORKING_RE.search("\n".join(screen.rstrip().splitlines()[-15:])))
     return {"ok": True, **_restart_cli(shell_pid, prof, working, run)}

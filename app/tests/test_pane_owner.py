@@ -237,6 +237,7 @@ class SetTabOwnerTests(unittest.TestCase):
         self.calls = []
         self.command = "zsh"
         self.activity = 0
+        self.screen = "❯ \n"
         self.clients = {"/dev/pts/6": "pcuenta2", "/dev/pts/7": "p", "/dev/pts/8": ""}
         from remote_control import history
 
@@ -252,6 +253,8 @@ class SetTabOwnerTests(unittest.TestCase):
         out = ""
         if args[0] == "display-message":
             out = f"4242\t{self.command}\t{self.activity}\n"
+        elif args[0] == "capture-pane":
+            out = self.screen
         elif args[0] == "list-sessions":
             out = f"{self.TAB}\n"
         elif args[0] == "list-clients":
@@ -280,6 +283,7 @@ class SetTabOwnerTests(unittest.TestCase):
 
     def test_busy_tab_keeps_its_cli(self) -> None:
         self.activity = int(time.time())
+        self.screen = "✻ Pensando… (12s · esc to interrupt)\n"
         with (
             mock.patch.object(herdr, "_foreground_pgid", lambda pid: 77),
             mock.patch.object(herdr, "cli_profile", lambda pid: ""),
@@ -289,6 +293,24 @@ class SetTabOwnerTests(unittest.TestCase):
             res = herdr.set_tab_owner(self.TAB, "cuenta2")
         kill.assert_not_called()
         self.assertIn("trabajando", res["note"])
+
+    def test_a_waiting_claude_that_just_redrew_moves(self) -> None:
+        # Fresh output (it just opened, or the tab was resized) is no work.
+        self.activity = int(time.time())
+        self.screen = "Claude Code v2.1\n❯ \n  ? for shortcuts\n"
+        fg = iter([77, None])
+        with (
+            mock.patch.object(herdr, "_foreground_pgid", lambda pid: next(fg, None)),
+            mock.patch.object(herdr, "cli_profile", lambda pid: ""),
+            mock.patch.object(herdr, "detect_cli", lambda pid, home=None: ("claude", "abc")),
+            mock.patch.object(herdr, "_share_chats"),
+            mock.patch.object(herdr, "resume_command", lambda cli, sid, home=None: "claude --resume abc"),
+            mock.patch.object(herdr.os, "killpg") as kill,
+        ):
+            res = herdr.set_tab_owner(self.TAB, "cuenta2")
+        kill.assert_called_once()
+        self.assertEqual(res, {"ok": True, "restarted": True})
+        self.assertIn(("send-keys", "-t", f"={self.TAB}:", "-l", " RC_PROFILE=cuenta2 claude --resume abc"), self.calls)
 
     def test_marks_note_every_known_panes_owner(self) -> None:
         herdr._write_missing_pins({"w1:p1": "cuenta2", "w1:p2": "", "rcabcdefghij": "x"})
