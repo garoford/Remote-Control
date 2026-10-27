@@ -12,8 +12,11 @@ login page and POST /rc-login.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import mimetypes
+import queue
 import socket
 import sys
 import threading
@@ -211,6 +214,33 @@ def _http_response(
     return ("\r\n".join(headers)).encode("latin1") + body
 
 
+def _ws_accept(key: str) -> str:
+    digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("latin1")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _ws_frame(payload: bytes, opcode: int) -> bytes:
+    """One unmasked, final WebSocket frame (server to page)."""
+    size = len(payload)
+    if size < 126:
+        head = bytes([0x80 | opcode, size])
+    elif size < 1 << 16:
+        head = bytes([0x80 | opcode, 126]) + size.to_bytes(2, "big")
+    else:
+        head = bytes([0x80 | opcode, 127]) + size.to_bytes(8, "big")
+    return head + payload
+
+
+def _recv_exact(conn: socket.socket, size: int) -> bytes | None:
+    data = b""
+    while len(data) < size:
+        part = conn.recv(size - len(data))
+        if not part:
+            return None
+        data += part
+    return data
+
+
 def _splice(left: socket.socket, right: socket.socket) -> None:
     def pump(src: socket.socket, dst: socket.socket) -> None:
         try:
@@ -396,6 +426,9 @@ class Sidecar:
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
+                return
+            if path == "/rc-sound" and method == "GET":
+                self._serve_sound(conn, parse_qs(parsed_url.query), headers)
                 return
             if path == "/rc-herdr-marks" and method == "POST":
                 from remote_control.herdr import pane_marks
@@ -940,6 +973,85 @@ class Sidecar:
         self._json(conn, {"ok": False, "error": "bad request"}, "400 Bad Request")
 
     # --- file explorer -------------------------------------------------------
+
+    def _serve_sound(self, conn: socket.socket, query: dict, headers: dict[str, str]) -> None:
+        """This page's share of the terminals' sounds (sound.py), over a WebSocket.
+
+        A WebSocket and not server-sent events: Cloudflare's quick tunnel
+        holds any long HTTP response until it ends.
+        """
+        from remote_control import sound
+
+        key = headers.get("sec-websocket-key", "")
+        if headers.get("upgrade", "").lower() != "websocket" or not key:
+            self._json(conn, {"ok": False, "error": "websocket"}, "400 Bad Request")
+            return
+        dev = (query.get("dev") or [""])[0]
+        prof = (query.get("prof") or [""])[0]
+        prof = prof[1:] if prof.startswith("p") else prof
+        sound._watcher.tmux_socket = self.tmux_socket
+        item = sound.listen(dev, prof)
+        if item is None:
+            self._json(conn, {"ok": False, "error": "sin sonido"}, "404 Not Found")
+            return
+        gone = threading.Event()
+
+        def drain() -> None:
+            # The page only reports how its audio is doing; notice when it goes.
+            try:
+                while not gone.is_set():
+                    head = _recv_exact(conn, 2)
+                    if head is None or head[0] & 0x0F == 0x8:
+                        break
+                    size = head[1] & 0x7F
+                    if size == 126:
+                        size = int.from_bytes(_recv_exact(conn, 2) or b"\0\0", "big")
+                    elif size == 127:
+                        size = int.from_bytes(_recv_exact(conn, 8) or bytes(8), "big")
+                    mask = _recv_exact(conn, 4) if head[1] & 0x80 else b"\0\0\0\0"
+                    data = _recv_exact(conn, size) if size else b""
+                    if mask is None or data is None:
+                        break
+                    if head[0] & 0x0F == 0x1 and size <= 4096:
+                        text = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                        try:
+                            report = json.loads(text.decode("utf-8"))
+                        except (UnicodeDecodeError, ValueError):
+                            report = None
+                        if isinstance(report, dict):
+                            item.status = report
+            except OSError:
+                pass
+            gone.set()
+
+        try:
+            conn.sendall(
+                "\r\n".join(
+                    [
+                        "HTTP/1.1 101 Switching Protocols",
+                        "Upgrade: websocket",
+                        "Connection: Upgrade",
+                        "Sec-WebSocket-Accept: " + _ws_accept(key),
+                        "",
+                        "",
+                    ]
+                ).encode("latin1")
+            )
+            conn.settimeout(None)
+            threading.Thread(target=drain, daemon=True).start()
+            while not gone.is_set() and not self._stop.is_set():
+                try:
+                    event = item.events.get(timeout=15)
+                except queue.Empty:
+                    # Keeps the tunnel from closing an idle socket.
+                    conn.sendall(_ws_frame(b"", 0x9))
+                    continue
+                conn.sendall(_ws_frame(json.dumps(event, separators=(",", ":")).encode(), 0x1))
+        except OSError:
+            pass
+        finally:
+            gone.set()
+            sound.unlisten(item)
 
     def _json(self, conn: socket.socket, payload: dict, status: str = "200 OK") -> None:
         conn.sendall(

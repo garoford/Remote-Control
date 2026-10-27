@@ -3429,3 +3429,35 @@ html.rc-is-empty #rc-net-badge {
     animation: none;
   }
 }
+
+/* Settings → Sonido */
+.rc-set-group > .rc-set-toggle,
+.rc-set-group > .rc-set-action {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 12px;
+}
+
+.rc-set-action {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.14);
+  border-radius: 999px;
+  background: rgb(var(--rc-text-rgb) / 0.05);
+  color: var(--rc-text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rc-set-action:hover:not(:disabled) {
+  background: rgb(var(--rc-text-rgb) / 0.1);
+}
+
+.rc-set-action:disabled,
+.rc-set-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

@@ -2,6 +2,18 @@
   "use strict";
 
   var NativeWS = window.WebSocket;
+  // Audio may only start inside a touch or a key (browser rule). Caught on
+  // window before anything else, since several handlers stop these events.
+  var onGesture = [];
+  ["pointerdown", "mousedown", "touchend", "keydown", "click"].forEach(function (type) {
+    window.addEventListener(
+      type,
+      function () {
+        for (var i = 0; i < onGesture.length; i++) onGesture[i]();
+      },
+      true
+    );
+  });
   var INPUT = 48;
   var encoder = new TextEncoder();
   var mods = { shift: false, ctrl: false, alt: false };
@@ -5015,6 +5027,322 @@
       });
   }
 
+  // Sounds of herdr and the terminals (sound.py): they no longer play on the
+  // computer that runs them but here, on the device they belong to: this
+  // device's own herdr dings and whatever plays in its profile's panes and
+  // tabs. A terminal's bell rings here too. Browsers only play audio after a
+  // touch or a key on the page, so the first one unlocks it.
+  var SOUND_KEY = "rc-sound";
+  var SOUND_VOL_KEY = "rc-sound-vol";
+  var SOUND_NOTIFY_KEY = "rc-sound-notify";
+  var soundState = { ws: null, retry: 0, ctx: null, gain: null, streams: {}, notifiedAt: 0, got: 0, played: 0 };
+
+  function soundPref(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function setSoundPref(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch (_) {}
+  }
+
+  function soundOn() {
+    return soundPref(SOUND_KEY, "on") !== "off";
+  }
+
+  function soundVolume() {
+    var v = parseInt(soundPref(SOUND_VOL_KEY, "80"), 10);
+    return isNaN(v) ? 80 : Math.max(0, Math.min(100, v));
+  }
+
+  function audioCtx() {
+    if (!soundState.ctx) {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      try {
+        soundState.ctx = new Ctx();
+        soundState.gain = soundState.ctx.createGain();
+        soundState.gain.gain.value = soundVolume() / 100;
+        soundState.gain.connect(soundState.ctx.destination);
+      } catch (_) {
+        soundState.ctx = null;
+        return null;
+      }
+    }
+    return soundState.ctx;
+  }
+
+  function unlockAudio() {
+    var ctx = audioCtx();
+    if (ctx && ctx.state === "suspended")
+      ctx
+        .resume()
+        .then(reportSound)
+        .catch(function () {});
+  }
+
+  // How this page is doing with the sounds, for the server's log
+  // (sound.Listener.status): what arrived, what played, the audio state.
+  function reportSound() {
+    var ws = soundState.ws;
+    if (!ws || ws.readyState !== 1) return;
+    try {
+      ws.send(
+        JSON.stringify({
+          on: soundOn(),
+          ctx: soundState.ctx ? soundState.ctx.state : "none",
+          got: soundState.got,
+          played: soundState.played,
+          vol: soundVolume(),
+          hidden: document.hidden,
+        })
+      );
+    } catch (_) {}
+  }
+
+  function soundReady() {
+    var ctx = soundState.ctx;
+    return soundOn() && ctx && ctx.state === "running" ? ctx : null;
+  }
+
+  // A system notification while the page is not in front (another app, a
+  // locked phone), at most one every few seconds.
+  function soundNotify(text) {
+    if (!document.hidden || soundPref(SOUND_NOTIFY_KEY, "off") !== "on") return;
+    if (!window.Notification || Notification.permission !== "granted") return;
+    var now = Date.now();
+    if (now - soundState.notifiedAt < 8000) return;
+    soundState.notifiedAt = now;
+    var opts = { body: text, tag: "rc-sound", renotify: true };
+    var fallback = function () {
+      try {
+        new Notification("Remote Control", opts);
+      } catch (_) {}
+    };
+    if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+      navigator.serviceWorker.ready
+        .then(function (reg) {
+          return reg.showNotification("Remote Control", opts);
+        })
+        .catch(fallback);
+    } else fallback();
+  }
+
+  function playPcm(ev) {
+    var st = soundState.streams[ev.s];
+    if (ev.end) {
+      delete soundState.streams[ev.s];
+      reportSound();
+      return;
+    }
+    soundState.got++;
+    if (!st) {
+      st = soundState.streams[ev.s] = { next: 0 };
+      soundNotify("Sonido en una terminal");
+    }
+    var ctx = soundReady();
+    if (!ctx || !ev.d) return;
+    var raw = atob(ev.d);
+    var n = raw.length >> 1;
+    if (!n) return;
+    var buf = ctx.createBuffer(1, n, ev.rate || 22050);
+    var out = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) {
+      var v = raw.charCodeAt(2 * i) | (raw.charCodeAt(2 * i + 1) << 8);
+      out[i] = (v >= 32768 ? v - 65536 : v) / 32768;
+    }
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(soundState.gain);
+    // Chunks of one stream back to back; the first waits a little so the
+    // ones behind it, held up by the network, still land in time.
+    var at = Math.max(ctx.currentTime + 0.15, st.next);
+    src.start(at);
+    soundState.played++;
+    st.next = at + buf.duration;
+  }
+
+  function ding() {
+    var ctx = soundReady();
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    [
+      [880, 0],
+      [1320, 0.09],
+    ].forEach(function (note) {
+      var osc = ctx.createOscillator();
+      var g = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = note[0];
+      g.gain.setValueAtTime(0.0001, t + note[1]);
+      g.gain.exponentialRampToValueAtTime(0.35, t + note[1] + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + note[1] + 0.35);
+      osc.connect(g);
+      g.connect(soundState.gain);
+      osc.start(t + note[1]);
+      osc.stop(t + note[1] + 0.4);
+    });
+  }
+
+  // A WebSocket: Cloudflare's quick tunnel holds a long HTTP response (and
+  // so server-sent events) until it ends. Reopened a few seconds after it drops.
+  function connectSound() {
+    clearTimeout(soundState.retry);
+    if (soundState.ws) {
+      soundState.ws.onclose = null;
+      soundState.ws.close();
+      soundState.ws = null;
+    }
+    if (!soundOn() || !NativeWS) return;
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var url =
+      proto + "//" + location.host + "/rc-sound?dev=" + encodeURIComponent(deviceId()) + "&prof=" + encodeURIComponent(profileArg());
+    var ws;
+    try {
+      ws = new NativeWS(url);
+    } catch (_) {
+      return;
+    }
+    ws.onmessage = function (ev) {
+      var data = null;
+      try {
+        data = JSON.parse(ev.data);
+      } catch (_) {}
+      if (data && typeof data.s === "string") playPcm(data);
+    };
+    ws.onopen = reportSound;
+    ws.onclose = function () {
+      if (soundState.ws !== ws) return;
+      soundState.ws = null;
+      soundState.retry = setTimeout(connectSound, 3000);
+    };
+    soundState.ws = ws;
+  }
+
+  function hookBell() {
+    var term = xterm();
+    if (!term || term.__rcBell || typeof term.onBell !== "function") return;
+    term.__rcBell = true;
+    term.onBell(function () {
+      ding();
+      soundNotify("Una terminal pide atención");
+    });
+  }
+
+  function bootSound() {
+    onGesture.push(unlockAudio);
+    connectSound();
+    hookBell();
+    setInterval(hookBell, 2000);
+  }
+
+  function renderSoundPane(box) {
+    var head = document.createElement("div");
+    head.className = "rc-set-head";
+    var t = document.createElement("div");
+    t.className = "rc-set-title";
+    t.textContent = "Sonido";
+    head.appendChild(t);
+    var on = soundOn();
+    var toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "rc-set-toggle" + (on ? " is-on" : "");
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", on ? "true" : "false");
+    toggle.innerHTML = '<span class="rc-set-toggle-label">Activado</span><span class="rc-set-toggle-track"><span></span></span>';
+    toggle.addEventListener("click", function () {
+      setSoundPref(SOUND_KEY, soundOn() ? "off" : "on");
+      connectSound();
+      unlockAudio();
+      paintSettings(true);
+    });
+    head.appendChild(toggle);
+    box.appendChild(head);
+
+    var card = lookCard(
+      "Sonidos de las terminales",
+      "Los sonidos de herdr y de lo que corre en tus terminales suenan en este dispositivo, no en la PC. Oyes los de tus pantallas de herdr y los de los paneles y pestañas de tu perfil.",
+      ICON_SOUND
+    );
+    var wrap = document.createElement("label");
+    wrap.className = "rc-set-range";
+    var label = document.createElement("span");
+    label.textContent = "Volumen";
+    var out = document.createElement("span");
+    out.className = "rc-set-range-val";
+    out.textContent = soundVolume() + "%";
+    var range = document.createElement("input");
+    range.type = "range";
+    range.min = "0";
+    range.max = "100";
+    range.value = String(soundVolume());
+    range.disabled = !on;
+    var fill = function () {
+      range.style.setProperty("--pct", range.value + "%");
+    };
+    fill();
+    range.addEventListener("input", function () {
+      out.textContent = range.value + "%";
+      fill();
+      setSoundPref(SOUND_VOL_KEY, range.value);
+      if (soundState.gain) soundState.gain.gain.value = (parseInt(range.value, 10) || 0) / 100;
+    });
+    range.addEventListener("change", function () {
+      unlockAudio();
+      ding();
+    });
+    wrap.appendChild(label);
+    wrap.appendChild(range);
+    wrap.appendChild(out);
+    card.appendChild(wrap);
+    var test = document.createElement("button");
+    test.type = "button";
+    test.className = "rc-set-action";
+    test.textContent = "Probar sonido";
+    test.disabled = !on;
+    test.addEventListener("click", function () {
+      unlockAudio();
+      setTimeout(ding, 60);
+    });
+    card.appendChild(test);
+    box.appendChild(card);
+
+    var notify = lookCard(
+      "Avisos del sistema",
+      "Con la página en segundo plano o el celular bloqueado, el navegador no reproduce audio: en su lugar te llega una notificación.",
+      ""
+    );
+    var granted = window.Notification && Notification.permission === "granted";
+    var active = granted && soundPref(SOUND_NOTIFY_KEY, "off") === "on";
+    var nt = document.createElement("button");
+    nt.type = "button";
+    nt.className = "rc-set-toggle" + (active ? " is-on" : "");
+    nt.setAttribute("role", "switch");
+    nt.setAttribute("aria-checked", active ? "true" : "false");
+    nt.innerHTML = '<span class="rc-set-toggle-label">Notificaciones</span><span class="rc-set-toggle-track"><span></span></span>';
+    nt.disabled = !window.Notification;
+    nt.addEventListener("click", function () {
+      if (active) {
+        setSoundPref(SOUND_NOTIFY_KEY, "off");
+        paintSettings(true);
+        return;
+      }
+      Notification.requestPermission().then(function (res) {
+        setSoundPref(SOUND_NOTIFY_KEY, res === "granted" ? "on" : "off");
+        if (res === "denied") showToast("El navegador bloqueó las notificaciones de esta página");
+        paintSettings(true);
+      });
+    });
+    notify.appendChild(nt);
+    box.appendChild(notify);
+  }
+
   function bootPaneMarks() {
     setInterval(scanPaneMarks, 1000);
     window.addEventListener("resize", function () {
@@ -6026,6 +6354,7 @@
     renderProfiles();
     lookDraft = null;
     refreshLook();
+    connectSound();
     showToast("Perfil: " + profileLabel(id));
   }
 
@@ -7047,12 +7376,15 @@
 
   // --- settings modal --------------------------------------------------------
 
+  var ICON_SOUND =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.2h2.2L8 3.4v9.2L4.7 9.8H2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M10.6 5.6a3.2 3.2 0 0 1 0 4.8M12.4 3.9a5.6 5.6 0 0 1 0 8.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   var SETTINGS_TABS = [
     {
       id: "themes",
       label: "Themes",
       icon: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a6.2 6.2 0 1 0 0 12.4c.9 0 1.3-.5 1.3-1.1 0-.7-.6-1-.6-1.7 0-.6.5-1.1 1.2-1.1h1.5a3.4 3.4 0 0 0 3.4-3.4C14.8 4.1 11.8 1.8 8 1.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="4.8" cy="7.4" r="1" fill="currentColor"/><circle cx="7.2" cy="4.7" r="1" fill="currentColor"/><circle cx="10.6" cy="5.4" r="1" fill="currentColor"/></svg>',
     },
+    { id: "sound", label: "Sonido", icon: ICON_SOUND },
   ];
   var settingsTab = "themes";
   var bgImages = [];
@@ -7884,6 +8216,7 @@
       b.classList.toggle("is-on", b.dataset.tab === settingsTab);
     });
     if (settingsTab === "themes") renderThemesPane(main);
+    else if (settingsTab === "sound") renderSoundPane(main);
     main.scrollTop = keep;
   }
 
@@ -8278,6 +8611,7 @@
     bootOsc52();
     bootSizeClaim();
     bootPaneMarks();
+    bootSound();
     bootGuestSize();
     bootGpuWatch();
     bootLinks();
