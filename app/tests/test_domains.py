@@ -61,6 +61,16 @@ class HostTests(unittest.TestCase):
         self.assertEqual(domains.locate(cfg, prov), ("midominio.com", "rc"))
         prov.domains.assert_not_called()
 
+    def test_an_account_without_a_name_is_checked_by_its_domain(self) -> None:
+        # The multi window/CLI saves just the account: no name for this machine.
+        cfg = domains.DomainConfig(provider="namecom", host="", zone="bizz.page", creds={"user": "u", "token": "t"})
+        _http, patch = fake({("GET", "/domains"): (200, b'{"domains": [{"domainName": "bizz.page"}, {"domainName": "a.pe"}]}')})
+        with patch:
+            self.assertIn("bizz.page", domains.check(cfg))
+            cfg.zone = "ajeno.com"
+            with self.assertRaisesRegex(domains.DomainError, "no está en esta cuenta"):
+                domains.check(cfg)
+
     def test_account_domains_needs_the_key_first(self) -> None:
         with self.assertRaisesRegex(domains.DomainError, "API token"):
             domains.account_domains("namecom", {"user": "me"})

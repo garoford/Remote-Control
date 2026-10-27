@@ -704,10 +704,15 @@ def check(cfg: DomainConfig) -> str:
     if problems:
         raise DomainError("; ".join(problems))
     prov = provider_for(cfg)
-    zones = prov.domains()
-    zone, _name = split_host(cfg.host, zones)
-    if cfg.zone and cfg.zone not in zones:
+    zones = [z.lower() for z in prov.domains()]
+    if cfg.zone and cfg.zone.lower() not in zones:
         raise DomainError(f"{cfg.zone} no está en esta cuenta")
+    if not cfg.host:
+        # Just the account (multi: each container picks its name, router.py).
+        if not cfg.zone:
+            raise DomainError("elige un dominio")
+        return f"Clave OK ({cfg.zone})."
+    zone, _name = split_host(cfg.host, zones)
     cfg.zone = zone
     return f"Clave OK ({zone})."
 
