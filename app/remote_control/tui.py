@@ -69,21 +69,26 @@ class Confirm(ModalScreen[bool]):
 
 
 class DomainScreen(ModalScreen[bool]):
-    """Your own domain (domains.py): key, then one of the account's domains."""
+    """Your own domain (domains.py): key, then one of the account's domains.
+
+    ``account_only`` (multi_tui.py): just the provider account and its domain;
+    each container picks its own name, so no name or reach check here.
+    """
 
     BINDINGS = [Binding("escape", "dismiss(False)", "Cancelar")]
 
-    def __init__(self) -> None:
+    def __init__(self, account_only: bool = False) -> None:
         super().__init__()
+        self.account_only = account_only
         self.saved = domains.load_config()
         self.cfg = self.saved or domains.DomainConfig(provider="namecom")
         self.zones: list[str] = []
-        self.reach_ok = False
+        self.reach_ok = account_only
 
     def compose(self) -> ComposeResult:
         cfg = self.cfg
         with VerticalScroll(id="domain"):
-            yield Static("Dominio propio", id="confirm-title")
+            yield Static("Cuenta de dominios" if self.account_only else "Dominio propio", id="confirm-title")
             yield Static("Proveedor", classes="label")
             yield Select([(label, key) for key, label in domains.PROVIDERS.items()], value=cfg.provider, allow_blank=False, id="provider", compact=True)
             # Every provider's fields; only the chosen one's are shown.
@@ -97,11 +102,11 @@ class DomainScreen(ModalScreen[bool]):
             with Vertical(id="pick"):
                 yield Static("Dominio", classes="label")
                 yield Select([], prompt="Elige un dominio", id="zone", compact=True)
-                yield Static("Subdominio (vacío = el dominio mismo)", classes="label")
-                yield Input("rc", id="sub", compact=True)
-                yield Static("", id="preview")
+                yield Static("Subdominio (vacío = el dominio mismo)", classes="label sub-only")
+                yield Input("rc", id="sub", classes="sub-only", compact=True)
+                yield Static("", id="preview", classes="sub-only")
             # Served here, no redirect: it can be saved only once reachable.
-            yield Static("Comprobando si tu PC es alcanzable desde internet…", id="reach")
+            yield Static("Comprobando si tu PC es alcanzable desde internet…", id="reach", classes="sub-only")
             yield Static("", id="domain-result")
             with Horizontal(id="domain-buttons"):
                 yield Button("Quitar" if self.saved else "Cancelar", id="domain-remove", compact=True)
@@ -128,7 +133,10 @@ class DomainScreen(ModalScreen[bool]):
         self.query_one("#domain-save", Button).disabled = not (self.zones and self.reach_ok)
 
     def on_mount(self) -> None:
-        self.probe()
+        for widget in self.query(".sub-only"):
+            widget.display = not self.account_only
+        if not self.account_only:
+            self.probe()
         self.show_provider(self.cfg.provider)
         saved = self.saved
         if saved and saved.zone:
@@ -226,7 +234,8 @@ class DomainScreen(ModalScreen[bool]):
         zone = self.query_one("#zone", Select).value
         new = domains.DomainConfig(
             provider=provider,
-            host=self.chosen_host(),
+            # Account only: never the bare domain as this machine's name.
+            host=(self.saved.host if self.saved and self.saved.zone == zone else "") if self.account_only else self.chosen_host(),
             zone=zone if isinstance(zone, str) else "",
             creds=self.creds(provider),
             mode="direct",

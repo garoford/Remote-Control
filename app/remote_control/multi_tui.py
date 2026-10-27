@@ -255,6 +255,7 @@ class MultiTUI(App):
                                     yield Input(id="dom-sub", compact=True)
                                     yield Static("", id="dom-zone")
                                     yield Button("Activar", id="dom-btn", classes="accent", compact=True)
+                                    yield Button("Cuenta", id="dom-account", compact=True)
                                 yield Static("", id="dom-hint")
                             with Vertical(id="auto-card", classes="card"):
                                 with Horizontal(id="auto-row"):
@@ -407,7 +408,7 @@ class MultiTUI(App):
         if not zone:
             state.set_classes("chip")
             state.update("Sin cuenta")
-            hint.update("Configura tu proveedor:  remote-control domain set --provider …")
+            hint.update("Configura tu proveedor de dominios con «Cuenta».")
             ok = False
         elif self.reach is None:
             state.set_classes("chip busy")
@@ -427,6 +428,15 @@ class MultiTUI(App):
             ok = True
         sub.disabled = not ok or busy
         btn.disabled = not ok or busy or not b.running
+
+    def account_dialog(self) -> None:
+        """The provider account (the same one the window's ⚙ opens)."""
+        from .tui import DomainScreen
+
+        def done(_changed: bool | None) -> None:
+            self.paint_domain()
+
+        self.push_screen(DomainScreen(account_only=True), done)
 
     def toggle_domain(self) -> None:
         b = self.box()
@@ -509,6 +519,7 @@ class MultiTUI(App):
             "rename": self.rename_box,
             "rm": self.remove_box,
             "dom-btn": self.toggle_domain,
+            "dom-account": self.account_dialog,
         }
         handler = handlers.get(event.button.id or "")
         if handler:
