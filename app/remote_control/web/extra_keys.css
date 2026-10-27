@@ -605,8 +605,8 @@ html.rc-ws-open #rc-ws-drawer {
   flex: 0 0 auto;
   align-self: stretch;
   text-align: left;
-  height: 32px;
-  margin: 6px 0 0;
+  height: 30px;
+  margin: 2px 0 0;
   padding: 0 10px;
   border: 0;
   border-radius: 7px;
@@ -1600,19 +1600,59 @@ html.rc-touch #rc-pc-file {
 .rc-ws-section {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
+/* Folded groups sit close together; an open one keeps some air under its
+   workspaces so the next group's name reads as a new block. */
 .rc-ws-section + .rc-ws-section {
-  margin-top: 14px;
+  margin-top: 2px;
+}
+
+.rc-ws-section:has(.rc-ws-item, .rc-ws-add-in) {
+  margin-bottom: 8px;
+}
+
+/* A group's workspaces hang under its name (a tree): indented to the name's
+   text, smaller than it is loud, so the group still reads as the heading. */
+.rc-ws-section .rc-ws-item {
+  min-height: 32px;
+  margin-left: 18px;
+  border-radius: 8px;
+}
+
+.rc-ws-section .rc-ws-main {
+  height: 32px;
+  padding-left: 10px;
+  font-size: 13px;
+}
+
+.rc-ws-section .rc-ws-item.is-current {
+  background: rgb(var(--rc-blue-rgb) / 0.1);
+  box-shadow: none;
+}
+
+.rc-ws-section .rc-ws-item.is-current::before {
+  top: 8px;
+  bottom: 8px;
+}
+
+.rc-ws-section .rc-ws-item .rc-ws-act {
+  height: 28px;
+  min-width: 28px;
+}
+
+.rc-ws-section .rc-ws-add-in {
+  margin-left: 18px;
+  height: 28px;
+  font-size: 12.5px;
 }
 
 .rc-ws-group {
   display: flex;
   align-items: center;
   gap: 2px;
-  min-height: 32px;
-  margin-bottom: 2px;
+  min-height: 28px;
   padding-right: 4px;
 }
 
@@ -1622,7 +1662,7 @@ html.rc-touch #rc-pc-file {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 32px;
+  height: 28px;
   padding: 0 6px 0 2px;
   border: 0;
   border-radius: 7px;
@@ -1633,6 +1673,11 @@ html.rc-touch #rc-pc-file {
   text-transform: uppercase;
   text-align: left;
   cursor: pointer;
+}
+
+.rc-ws-group .rc-ws-act {
+  height: 28px;
+  min-width: 28px;
 }
 
 .rc-ws-group-label {
@@ -1671,6 +1716,43 @@ html.rc-touch #rc-pc-file {
   letter-spacing: 0;
 }
 
+/* A folded group holding the current workspace lights up like the current
+   row does when it is open (soft blue, the little bar on the left), with
+   that workspace's name beside the group's. */
+.rc-ws-group.has-current {
+  position: relative;
+  border-radius: 8px;
+  background: rgb(var(--rc-blue-rgb) / 0.1);
+}
+
+.rc-ws-group.has-current::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--rc-blue);
+  pointer-events: none;
+}
+
+.rc-ws-group.has-current .rc-ws-group-name {
+  padding-left: 6px;
+}
+
+.rc-ws-here {
+  min-width: 0;
+  margin-left: 8px;
+  overflow: hidden;
+  color: var(--rc-text);
+  font: 500 12.5px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .rc-ws-group.is-folded .rc-ws-caret {
   transform: rotate(-90deg);
 }
@@ -1681,7 +1763,7 @@ html.rc-touch #rc-pc-file {
 
 .rc-ws-auto {
   flex: 0 0 auto;
-  height: 26px;
+  height: 24px;
   padding: 0 10px;
   border: 0;
   border-radius: 7px;
@@ -2408,6 +2490,33 @@ html.rc-has-bg .xterm-viewport {
 
 .rc-set-head .rc-set-title {
   flex: 1 1 auto;
+}
+
+/* "Color adaptativo" and "Textos adaptativos" side by side; under the title
+   when there is no room. */
+.rc-set-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rc-set-group > .rc-set-switches > .rc-set-toggle {
+  margin-top: 0;
+}
+
+/* "Todo" in the section's corner; the switches it locks look locked. */
+.rc-set-group-head .rc-set-toggle-all {
+  margin-left: auto;
+  margin-top: 0;
+}
+
+.rc-set-switches .rc-set-toggle:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rc-set-head {
+  flex-wrap: wrap;
 }
 
 .rc-set-modes {
@@ -3417,6 +3526,25 @@ html.rc-is-empty #rc-net-badge {
 
 .rc-tab.has-owner:not(.is-active) .rc-tab-owner {
   opacity: 0.75;
+}
+
+/* The tab on screen: its owner's dot stands out with a bright ring and a
+   soft glow in that profile's own color. */
+.rc-tab.has-owner.is-active .rc-tab-owner {
+  width: 21px;
+  height: 21px;
+  font-size: 10.5px;
+  box-shadow:
+    0 0 0 2px var(--rc-bg),
+    0 0 0 3.5px var(--rc-owner, var(--rc-teal)),
+    0 0 12px 2px color-mix(in srgb, var(--rc-owner, var(--rc-teal)) 65%, transparent);
+}
+
+.rc-tab.has-owner.is-active .rc-tab-owner:hover {
+  box-shadow:
+    0 0 0 2px var(--rc-bg),
+    0 0 0 3.5px var(--rc-owner, var(--rc-teal)),
+    0 0 16px 3px color-mix(in srgb, var(--rc-owner, var(--rc-teal)) 75%, transparent);
 }
 
 .rc-tab.has-owner.is-busy:not(.is-active) .rc-tab-owner {

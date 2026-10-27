@@ -81,18 +81,19 @@
       "0 0 64 64"
     );
   }
+  // Kind colors from the theme's palette, so they follow it like the rest.
   var KIND_ICON = {
     file: fileBig("", '<path d="M19 26h26M19 32h26M19 38h18" stroke="var(--rcf-page-edge)" stroke-width="2.4" stroke-linecap="round"/>'),
-    text: fileBig("", '<path d="M19 24h26M19 30h26M19 36h26M19 42h16" stroke="#8a8f98" stroke-width="2.4" stroke-linecap="round"/>'),
-    code: fileBig("#3584e4", '<path d="M26 24l-7 7 7 7M38 24l7 7-7 7" fill="none" stroke="#3584e4" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'),
-    image: fileBig("#26a269", '<circle cx="24" cy="25" r="4" fill="#f6d32d"/><path d="M15 40l10-9 7 6 6-5 11 8z" fill="#2ec27e"/>'),
-    video: fileBig("#e01b24", '<path d="M27 22v18l14-9z" fill="#e01b24"/>'),
-    audio: fileBig("#ff7800", '<path d="M28 39V24l14-3v15" fill="none" stroke="#ff7800" stroke-width="3"/><circle cx="25" cy="39" r="4" fill="#ff7800"/><circle cx="39" cy="36" r="4" fill="#ff7800"/>'),
-    pdf: fileBig("#c01c28", '<text x="32" y="37" text-anchor="middle" font-family="sans-serif" font-weight="700" font-size="12" fill="#c01c28">PDF</text>'),
-    archive: fileBig("#865e3c", '<path d="M30 8h4v4h-4zM30 16h4v4h-4zM30 24h4v4h-4zM28 30h8v8h-8z" fill="#865e3c"/>'),
-    doc: fileBig("#1c71d8", '<path d="M19 24h26M19 30h26M19 36h20" stroke="#1c71d8" stroke-width="2.4" stroke-linecap="round"/>'),
-    sheet: fileBig("#2ec27e", '<path d="M19 24h26v16H19zM19 32h26M28 24v16M37 24v16" fill="none" stroke="#26a269" stroke-width="2"/>'),
-    exec: fileBig("#5e5c64", '<path d="M22 28l6 4-6 4M31 37h10" fill="none" stroke="#5e5c64" stroke-width="2.6" stroke-linecap="round"/>'),
+    text: fileBig("", '<path d="M19 24h26M19 30h26M19 36h26M19 42h16" stroke="var(--rc-muted)" stroke-width="2.4" stroke-linecap="round"/>'),
+    code: fileBig("var(--rc-blue)", '<path d="M26 24l-7 7 7 7M38 24l7 7-7 7" fill="none" stroke="var(--rc-blue)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'),
+    image: fileBig("var(--rc-green)", '<circle cx="24" cy="25" r="4" fill="var(--rc-yellow)"/><path d="M15 40l10-9 7 6 6-5 11 8z" fill="var(--rc-green)"/>'),
+    video: fileBig("var(--rc-red)", '<path d="M27 22v18l14-9z" fill="var(--rc-red)"/>'),
+    audio: fileBig("var(--rc-orange)", '<path d="M28 39V24l14-3v15" fill="none" stroke="var(--rc-orange)" stroke-width="3"/><circle cx="25" cy="39" r="4" fill="var(--rc-orange)"/><circle cx="39" cy="36" r="4" fill="var(--rc-orange)"/>'),
+    pdf: fileBig("var(--rc-red)", '<text x="32" y="37" text-anchor="middle" font-family="sans-serif" font-weight="700" font-size="12" fill="var(--rc-red)">PDF</text>'),
+    archive: fileBig("var(--rc-warn)", '<path d="M30 8h4v4h-4zM30 16h4v4h-4zM30 24h4v4h-4zM28 30h8v8h-8z" fill="var(--rc-warn)"/>'),
+    doc: fileBig("var(--rc-blue)", '<path d="M19 24h26M19 30h26M19 36h20" stroke="var(--rc-blue)" stroke-width="2.4" stroke-linecap="round"/>'),
+    sheet: fileBig("var(--rc-teal)", '<path d="M19 24h26v16H19zM19 32h26M28 24v16M37 24v16" fill="none" stroke="var(--rc-teal)" stroke-width="2"/>'),
+    exec: fileBig("var(--rc-muted)", '<path d="M22 28l6 4-6 4M31 37h10" fill="none" stroke="var(--rc-muted)" stroke-width="2.6" stroke-linecap="round"/>'),
   };
 
   var EXT_KIND = {};
@@ -1493,6 +1494,13 @@
         menu.appendChild(el("div", "rcf-menu-title", item.title));
         return;
       }
+      if (item.node) {
+        // A live control (a slider) that stays open while it is used.
+        var holder = el("div", "rcf-menu-node");
+        holder.appendChild(item.node);
+        menu.appendChild(holder);
+        return;
+      }
       var b = el("button", "rcf-menu-item" + (item.danger ? " is-danger" : "") + (item.checked ? " is-checked" : ""));
       b.type = "button";
       b.setAttribute("role", item.checked != null ? "menuitemcheckbox" : "menuitem");
@@ -1675,6 +1683,9 @@
       "-",
       { icon: I.reload, label: "Recargar", fn: reload, key: "F5" },
       { icon: I.info, label: "Atajos de teclado", fn: shortcutsHelp, key: "Ctrl+?" },
+      // The window's transparency, the same setting as in Themes.
+      host().glassSlider ? "-" : null,
+      host().glassSlider ? { node: host().glassSlider() } : null,
     ]);
   }
 

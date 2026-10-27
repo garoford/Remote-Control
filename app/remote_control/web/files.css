@@ -1,22 +1,29 @@
-/* Remote Control — file explorer (files.js). Adwaita / Nautilus look on top of
-   the page theme tokens (--rc-*), so light, dark and system all follow. */
+/* Remote Control — file explorer (files.js). A Nautilus layout dressed like
+   the rest of the page (the settings window): every color comes from the
+   theme tokens (--rc-*), which the chosen theme and wallpaper set, so the
+   folders, the glass and the accent follow whatever is configured. */
 
 #rc-files {
   --rcf-accent: var(--rc-blue);
   --rcf-accent-rgb: var(--rc-blue-rgb);
-  --rcf-win: var(--rc-bg);
-  --rcf-side: var(--rc-surface);
-  --rcf-head: var(--rc-bg);
+  --rcf-win:
+    radial-gradient(120% 60% at 100% 0%, rgb(var(--rc-blue-rgb) / 0.1), transparent 60%),
+    rgb(var(--rc-surface-rgb) / var(--rcf-alpha, 0.9));
+  /* What must hide what scrolls under it (sticky header, path field). */
+  --rcf-solid: rgb(var(--rc-surface-rgb));
+  --rcf-side: rgb(var(--rc-shade) / 0.22);
+  --rcf-head: transparent;
   --rcf-hover: rgb(var(--rc-text-rgb) / 0.07);
   --rcf-active: rgb(var(--rc-text-rgb) / 0.12);
   --rcf-line: rgb(var(--rc-text-rgb) / 0.1);
   --rcf-sel: rgb(var(--rcf-accent-rgb) / 0.22);
   --rcf-sel-strong: rgb(var(--rcf-accent-rgb) / 0.32);
-  --rcf-folder: #62a0ea;
-  --rcf-folder-back: #3584e4;
-  --rcf-page: #ffffff;
-  --rcf-page-fold: #e6e7ea;
-  --rcf-page-edge: #c0c4cc;
+  /* Folders in the theme's accent, pages in its text tone. */
+  --rcf-folder: var(--rc-blue);
+  --rcf-folder-back: color-mix(in srgb, var(--rc-blue) 72%, rgb(var(--rc-shade)));
+  --rcf-page: color-mix(in srgb, var(--rc-text) 90%, var(--rc-bg));
+  --rcf-page-fold: color-mix(in srgb, var(--rc-text) 70%, var(--rc-bg));
+  --rcf-page-edge: color-mix(in srgb, var(--rc-text) 45%, var(--rc-bg));
   --rcf-tile: 96px;
   position: fixed;
   z-index: 2147483640;
@@ -24,26 +31,29 @@
   display: none;
   align-items: center;
   justify-content: center;
-  background: rgb(var(--rc-shade) / 0.55);
+  background: rgb(var(--rc-shade) / 0.42);
   color: var(--rc-text);
-  font: 400 14px/1.35 "Cantarell", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 14px/1.35 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
 }
 
+
+/* Pages are the light tone of the theme: its text when dark, its background when light. */
 html[data-rc-theme="light"] #rc-files {
-  background: rgb(64 63 83 / 0.3);
-  --rcf-head: #f6f6f8;
-  --rcf-page-edge: #b8bcc6;
+  --rcf-page: color-mix(in srgb, var(--rc-bg) 96%, var(--rc-text));
+  --rcf-page-fold: color-mix(in srgb, var(--rc-bg) 80%, var(--rc-text));
+  --rcf-page-edge: color-mix(in srgb, var(--rc-bg) 62%, var(--rc-text));
 }
 
-html[data-rc-theme="dark"] #rc-files,
-html:not([data-rc-theme]) #rc-files {
-  --rcf-page: #e9ebef;
-  --rcf-page-fold: #c7cbd3;
-  --rcf-page-edge: #9aa1ad;
+@media (prefers-color-scheme: light) {
+  html:not([data-rc-theme]) #rc-files {
+    --rcf-page: color-mix(in srgb, var(--rc-bg) 96%, var(--rc-text));
+    --rcf-page-fold: color-mix(in srgb, var(--rc-bg) 80%, var(--rc-text));
+    --rcf-page-edge: color-mix(in srgb, var(--rc-bg) 62%, var(--rc-text));
+  }
 }
 
 #rc-files.is-open {
@@ -74,11 +84,14 @@ html.rcf-open #rc-pc-files {
   width: min(94vw, 1400px);
   height: min(90vh, 960px);
   overflow: hidden;
-  border-radius: 14px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  border-radius: 20px;
   background: var(--rcf-win);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
   box-shadow:
-    0 0 0 1px rgb(var(--rc-text-rgb) / 0.08),
-    0 24px 64px rgb(0 0 0 / 0.45);
+    0 1px 0 rgb(255 255 255 / 0.06) inset,
+    0 40px 90px -20px rgb(var(--rc-shade) / 0.85);
   animation: rcf-pop 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
@@ -411,7 +424,7 @@ html.rc-touch .rcf-win .rcf-side-btn {
   margin: 0;
   border-radius: 9px;
   box-shadow: inset 0 0 0 2px rgb(var(--rcf-accent-rgb) / 0.6);
-  background: var(--rcf-win);
+  background: var(--rcf-solid);
 }
 
 .rcf-loc.is-edit .rcf-crumbs {
@@ -743,7 +756,7 @@ html.rc-touch .rcf-tab-x {
   z-index: 1;
   min-height: 34px;
   margin-bottom: 2px;
-  background: var(--rcf-win);
+  background: var(--rcf-solid);
   border-radius: 0;
   border-bottom: 1px solid var(--rcf-line);
 }
@@ -849,7 +862,7 @@ html.rc-touch .rcf-tile .rcf-icon {
   height: 20px;
   border-radius: 50%;
   border: 2px solid rgb(var(--rc-text-rgb) / 0.5);
-  background: var(--rcf-win);
+  background: var(--rcf-solid);
 }
 
 #rc-files.rcf-selecting .rcf-row:not(.rcf-row-head) {
@@ -1341,7 +1354,7 @@ html.rc-touch .rcf-menu-item {
 .rcf-preview {
   display: flex;
   flex-direction: column;
-  background: rgb(10 12 16 / 0.97);
+  background: rgb(var(--rc-shade) / 0.97);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   color: #fff;
@@ -1936,4 +1949,14 @@ html.rc-touch .rcf-tree-tog {
 html.rc-touch .rcf-tree-note {
   height: 36px;
   line-height: 36px;
+}
+
+/* A live control inside a menu (the transparency slider). */
+.rcf-menu-node {
+  padding: 6px 12px 8px;
+}
+
+.rcf-menu-node .rc-set-range {
+  min-width: 240px;
+  margin: 0;
 }

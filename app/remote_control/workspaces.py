@@ -131,8 +131,14 @@ def _clean_look(raw) -> dict | None:
         "value": value.lower() if kind == "color" else value,
         "dim": num("dim", 0, 85, 35),
         "blur": num("blur", 0, 20, 0),
+        # How see-through the file explorer's window is (0 = solid).
+        "glass": num("glass", 0, 70, 10),
         # Tint the whole UI from the background (off: only the terminal changes).
         "adaptive": raw.get("adaptive") is True,
+        # Titles and text in the background's hue (off: plain black / white).
+        "adaptive_text": raw.get("adaptive_text") is True,
+        # Both of the above on and locked ("Todo").
+        "adaptive_all": raw.get("adaptive_all") is True,
     }
 
 
@@ -140,7 +146,13 @@ def drop_image_looks(state: dict, name: str) -> None:
     """A deleted image or video falls back to the default background wherever it was used."""
     for pid, look in list((state.get("looks") or {}).items()):
         if look.get("kind") in ("image", "video") and look.get("value") == name:
-            state["looks"][pid] = {"kind": "default", "value": "", "dim": look.get("dim", 35), "blur": look.get("blur", 0)}
+            state["looks"][pid] = {
+                "kind": "default",
+                "value": "",
+                "dim": look.get("dim", 35),
+                "blur": look.get("blur", 0),
+                "glass": look.get("glass", 10),
+            }
 
 
 def load_state(base: Path | None = None) -> dict:

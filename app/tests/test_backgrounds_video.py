@@ -249,6 +249,16 @@ class EncoderTests(unittest.TestCase):
 
 
 class LookTests(VideoBase):
+    def test_clean_look_keeps_the_explorer_glass_in_range(self) -> None:
+        self.assertEqual(workspaces._clean_look({"kind": "default"})["glass"], 10)
+        self.assertEqual(workspaces._clean_look({"kind": "default", "glass": 45})["glass"], 45)
+        self.assertEqual(workspaces._clean_look({"kind": "default", "glass": 500})["glass"], 70)
+        self.assertEqual(workspaces._clean_look({"kind": "default", "glass": "x"})["glass"], 10)
+        self.assertFalse(workspaces._clean_look({"kind": "default"})["adaptive_text"])
+        self.assertTrue(workspaces._clean_look({"kind": "default", "adaptive_text": True})["adaptive_text"])
+        self.assertTrue(workspaces._clean_look({"kind": "default", "adaptive_all": True})["adaptive_all"])
+        self.assertFalse(workspaces._clean_look({"kind": "default", "adaptive_all": "yes"})["adaptive_all"])
+
     def test_clean_look_accepts_video_ids_only(self) -> None:
         self.assertEqual(workspaces._clean_look({"kind": "video", "value": "0123456789abcdef"})["kind"], "video")
         self.assertIsNone(workspaces._clean_look({"kind": "video", "value": "../x"}))

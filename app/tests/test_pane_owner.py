@@ -226,6 +226,14 @@ class HoldPaneTests(unittest.TestCase):
         self.started[0].stdin.close.assert_called_once()
 
 
+class OuterBoxesTests(unittest.TestCase):
+    def test_a_table_inside_a_pane_is_not_a_pane(self) -> None:
+        left = {"x": 9, "y": 1, "w": 21, "h": 9, "lines": []}
+        table = {"x": 11, "y": 3, "w": 14, "h": 5, "lines": []}
+        right = {"x": 30, "y": 1, "w": 22, "h": 5, "lines": []}
+        self.assertEqual(herdr._outer_boxes([left, table, right]), [left, right])
+
+
 class SetTabOwnerTests(unittest.TestCase):
     TAB = "rcabcdefghij"
 

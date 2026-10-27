@@ -182,6 +182,15 @@ def _clean_boxes(raw: object) -> list[dict]:
     return boxes
 
 
+def _outer_boxes(boxes: list[dict]) -> list[dict]:
+    """Without the boxes inside another: a CLI's table in a pane is not a pane."""
+
+    def inside(a: dict, b: dict) -> bool:
+        return a is not b and a["x"] >= b["x"] and a["y"] >= b["y"] and a["x"] + a["w"] <= b["x"] + b["w"] and a["y"] + a["h"] <= b["y"] + b["h"]
+
+    return [a for a in boxes if not any(inside(a, b) for b in boxes)]
+
+
 def _norm(rects: list[tuple[int, int, int, int]]) -> list[tuple[float, float, float, float]]:
     left = min(r[0] for r in rects)
     top = min(r[1] for r in rects)
@@ -292,7 +301,7 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     """
     from .profiles import read_active
 
-    boxes = _clean_boxes(raw_boxes)
+    boxes = _outer_boxes(_clean_boxes(raw_boxes))
     snap = (_api("api", "snapshot") or {}).get("snapshot")
     if not boxes or not isinstance(snap, dict):
         return {"ok": True, "marks": []}

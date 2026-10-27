@@ -4405,6 +4405,9 @@
     var a = profileAccent(owner);
     dot.style.background = a ? a.dot : "";
     dot.style.color = a ? (themeMode() === "light" ? "#fff" : "#111214") : "";
+    // The active tab's ring and glow take the owner's own color (extra_keys.css).
+    if (a) dot.style.setProperty("--rc-owner", a.dot);
+    else dot.style.removeProperty("--rc-owner");
     el.title = "Abierta por " + name + (item.path ? " · " + item.path : "");
   }
 
@@ -4737,6 +4740,51 @@
     return out;
   }
 
+  // Box-drawn things inside a pane (a CLI's tables, its input box) look like
+  // frames too. herdr's frames never nest, and they tile the area right of
+  // the sidebar's rule: the first starts next to the rule, each other one
+  // next to a frame. Anything else is content.
+  function paneFramesOnly(boxes, rows) {
+    var inside = function (a, b) {
+      return a !== b && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
+    };
+    var outer = boxes.filter(function (a) {
+      return !boxes.some(function (b) {
+        return inside(a, b);
+      });
+    });
+    var rule = sidebarRule(rows);
+    if (rule < 0 || !outer.length) return outer;
+    var kept = outer.filter(function (b) {
+      return Math.abs(b.x - (rule + 1)) <= 1;
+    });
+    for (var grew = true; grew; ) {
+      grew = false;
+      outer.forEach(function (b) {
+        if (kept.indexOf(b) !== -1) return;
+        var next = kept.some(function (k) {
+          return Math.abs(b.x - (k.x + k.w)) <= 1 || (Math.abs(b.x - k.x) <= 1 && Math.abs(b.y - (k.y + k.h)) <= 1);
+        });
+        if (next) {
+          kept.push(b);
+          grew = true;
+        }
+      });
+    }
+    return kept;
+  }
+
+  // The column of herdr's sidebar rule (a vertical line most rows long), -1 if none.
+  function sidebarRule(rows) {
+    var cols = rows.length ? rows[0].length : 0;
+    for (var x = 0; x < cols; x++) {
+      var hits = 0;
+      for (var y = 0; y < rows.length; y++) if (isIn(FRAME_V, rows[y][x])) hits++;
+      if (hits >= Math.max(4, rows.length * 0.7)) return x;
+    }
+    return -1;
+  }
+
   // A herdr tab with one pane draws no frame: the pane is everything right
   // of the sidebar's vertical rule and below the tab strip.
   function singlePane(rows) {
@@ -4841,7 +4889,7 @@
       return;
     }
     var cells = screenCells(term);
-    var boxes = findFrames(cells);
+    var boxes = paneFramesOnly(findFrames(cells), cells);
     var single = false;
     if (!boxes.length) {
       var whole = singlePane(cells);
@@ -5845,7 +5893,7 @@
     return row;
   }
 
-  function groupHead(group, members, folded) {
+  function groupHead(group, members, folded, cur) {
     var head = document.createElement("div");
     head.className = "rc-ws-group" + (folded ? " is-folded" : "");
     if (groupEdit === group.id) {
@@ -5895,10 +5943,19 @@
     label.textContent = group.name;
     fold.appendChild(caret);
     fold.appendChild(label);
-    if (folded && members.length) {
+    // Folded with the current workspace inside: its name stays in sight.
+    var here = folded && cur && members.indexOf(cur) !== -1;
+    if (here) {
+      head.classList.add("has-current");
+      var name = document.createElement("span");
+      name.className = "rc-ws-here";
+      name.textContent = cur.name || "";
+      fold.appendChild(name);
+    }
+    if (folded && members.length && !(here && members.length === 1)) {
       var hint = document.createElement("span");
       hint.className = "rc-ws-count";
-      hint.textContent = String(members.length);
+      hint.textContent = here ? "+" + (members.length - 1) : String(members.length);
       fold.appendChild(hint);
     }
     fold.setAttribute("aria-label", (folded ? "Mostrar " : "Ocultar ") + group.name);
@@ -5974,7 +6031,7 @@
       var isFolded = !!folded[group.id] && !wsFilter;
       var section = document.createElement("section");
       section.className = "rc-ws-section";
-      section.appendChild(groupHead(group, members, isFolded));
+      section.appendChild(groupHead(group, members, isFolded, cur));
       if (!isFolded) {
         if (!members.length && !wsFilter) {
           // An empty group offers to start its first workspace right there.
@@ -6380,6 +6437,8 @@
   // Each profile shows its own accent: the one of the background it picked in
   // Themes (color, gradient or image). Default background: the usual teal.
   function profileAccent(pid) {
+    // Each profile's own color, from its own background: it tells users
+    // apart, so "Textos adaptativos" (this viewer's ink) does not touch it.
     var look = wsState && wsState.looks ? wsState.looks[pid] : null;
     if (!look || !look.kind || look.kind === "default") return null;
     var raw = "";
@@ -6870,6 +6929,8 @@
     var mode = themeMode();
     var root = document.documentElement;
     root.dataset.rcTheme = mode;
+    // files.css: the explorer window's opacity.
+    root.style.setProperty("--rcf-alpha", String((100 - lookGlass()) / 100));
     var meta = document.querySelector('meta[name="theme-color"]');
     if (!meta) {
       meta = document.createElement("meta");
@@ -6877,6 +6938,7 @@
       (document.head || root).appendChild(meta);
     }
     var ui = paintUiTint();
+    paintText();
     meta.content = ui ? ui.surface : mode === "light" ? "#eef1f5" : "#1a1b1e";
     var terms = [];
     Object.keys(panes).forEach(function (key) {
@@ -6918,7 +6980,14 @@
 
   // --- terminal background per profile (Ajustes › Themes) ----------------------
 
-  var LOOK_DEFAULT = { kind: "default", value: "", dim: 35, blur: 0, adaptive: false };
+  // glass: how see-through the file explorer's window is, in % (0 = solid).
+  var LOOK_DEFAULT = { kind: "default", value: "", dim: 35, blur: 0, glass: 10, adaptive: false, adaptive_text: false, adaptive_all: false };
+  var GLASS_MAX = 70;
+
+  function lookGlass() {
+    var g = myLook().glass;
+    return typeof g === "number" ? Math.max(0, Math.min(GLASS_MAX, g)) : LOOK_DEFAULT.glass;
+  }
   var LOOK_COLORS = [
     ["#011627", "Night Owl"],
     ["#000000", "Negro"],
@@ -7121,12 +7190,15 @@
     style.setProperty("--rc-on-rgb", accent2.join(" "));
   }
 
-  // The accent (marks, active tab, buttons, chips) always follows the chosen
-  // color or image. "Color adaptativo" also tints the surfaces (bars, panels).
+  // "Textos adaptativos" lends the chosen color or image to everything that
+  // reads as ink: text (paintText) and the accent (icons, group names, marks,
+  // buttons, chips); off, they are plain black / white. "Color adaptativo"
+  // tints the surfaces (bars, panels), on its own.
   function paintUiTint() {
     var style = document.documentElement.style;
     var t = lookColors();
     var surfaces = !!(t && myLook().adaptive);
+    var inks = !!(t && myLook().adaptive_text);
     if (!t) {
       UI_TINT_KEYS.forEach(function (k) {
         style.removeProperty(k);
@@ -7161,9 +7233,13 @@
     var set = function (k, v) {
       style.setProperty(k, v);
     };
-    setAccents(style, accent, accent2);
+    if (inks) setAccents(style, accent, accent2);
+    else {
+      var plain = MONO_ACCENT[t.light ? "light" : "dark"];
+      setAccents(style, plain, plain);
+    }
     if (!surfaces) {
-      ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb"].forEach(function (k) {
+      ["--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb"].forEach(function (k) {
         style.removeProperty(k);
       });
       return null;
@@ -7174,22 +7250,40 @@
     // hue instead of Night Owl navy.
     var shade = t.light ? hslRgb(hue, Math.min(sat, 0.35), 0.3) : hslRgb(hue, sat < 0.08 ? 0.06 : Math.max(0.3, Math.min(sat, 0.6)), 0.05);
     set("--rc-shade", shade.join(" "));
-    // Light mode text: deep shades of the same hue, so labels read clearly on
-    // the pastel instead of a washed-out blue-grey.
-    if (t.light) {
-      var ink = hslRgb(hue, Math.min(sat, 0.5), 0.14);
-      set("--rc-text", rgbHex(ink));
-      set("--rc-text-rgb", ink.join(" "));
-      set("--rc-muted", rgbHex(hslRgb(hue, Math.min(sat, 0.4), 0.3)));
-    } else {
-      style.removeProperty("--rc-text");
-      style.removeProperty("--rc-text-rgb");
-      style.removeProperty("--rc-muted");
-    }
     set("--rc-surface", rgbHex(surf[1]));
     set("--rc-raised", rgbHex(surf[2]));
     set("--rc-surface-rgb", surf[1].join(" "));
     return { surface: rgbHex(surf[1]) };
+  }
+
+  // Text color, apart from "Color adaptativo": plain black on light and white
+  // on dark, or with "Textos adaptativos" shades of the background's own hue
+  // (deep on light, pale on dark) so titles and labels carry its color.
+  var PLAIN_TEXT = {
+    light: { text: [17, 18, 20], muted: [93, 96, 104] },
+    dark: { text: [242, 243, 245], muted: [163, 166, 173] },
+  };
+
+  function paintText() {
+    var style = document.documentElement.style;
+    var light = themeMode() === "light";
+    var t = myLook().adaptive_text ? lookColors() : null;
+    var text;
+    var muted;
+    if (t) {
+      var base = rgbHsl(hexRgb(t.tint));
+      var hue = base[0];
+      var sat = base[1];
+      text = light ? hslRgb(hue, Math.min(sat, 0.5), 0.14) : hslRgb(hue, Math.min(sat, 0.35), 0.9);
+      muted = light ? hslRgb(hue, Math.min(sat, 0.4), 0.3) : hslRgb(hue, Math.min(sat, 0.25), 0.7);
+    } else {
+      var plain = PLAIN_TEXT[light ? "light" : "dark"];
+      text = plain.text;
+      muted = plain.muted;
+    }
+    style.setProperty("--rc-text", rgbHex(text));
+    style.setProperty("--rc-text-rgb", text.join(" "));
+    style.setProperty("--rc-muted", rgbHex(muted));
   }
 
   function myLook() {
@@ -7897,7 +7991,20 @@
     adapt.addEventListener("click", function () {
       setLook({ adaptive: !myLook().adaptive });
     });
-    head.appendChild(adapt);
+    var switches = document.createElement("div");
+    switches.className = "rc-set-switches";
+    switches.appendChild(adapt);
+    var inks = document.createElement("button");
+    inks.type = "button";
+    inks.className = "rc-set-toggle" + (look.adaptive_text ? " is-on" : "");
+    inks.setAttribute("role", "switch");
+    inks.setAttribute("aria-checked", look.adaptive_text ? "true" : "false");
+    inks.title = "Teñir textos, íconos y acentos con el color o la imagen (apagado: blanco y negro)";
+    inks.innerHTML = '<span class="rc-set-toggle-label">Textos adaptativos</span><span class="rc-set-toggle-track"><span></span></span>';
+    inks.addEventListener("click", function () {
+      setLook({ adaptive_text: !myLook().adaptive_text });
+    });
+    switches.appendChild(inks);
     box.appendChild(head);
 
     // Light / dark, the same choice as Tema in the drawer.
@@ -7919,6 +8026,29 @@
     });
     box.appendChild(modes);
     box.appendChild(lookHero(look));
+
+    // What takes the background's color: a section of its own, above the colors.
+    var adaptCard = lookCard("Adaptar al fondo", "", ICON_TUNE);
+    // "Todo": both on and locked; turning it off turns both off.
+    var all = !!look.adaptive_all;
+    var master = document.createElement("button");
+    master.type = "button";
+    master.className = "rc-set-toggle rc-set-toggle-all" + (all ? " is-on" : "");
+    master.setAttribute("role", "switch");
+    master.setAttribute("aria-checked", all ? "true" : "false");
+    master.title = "Adaptar todo al fondo";
+    master.innerHTML = '<span class="rc-set-toggle-label">Todo</span><span class="rc-set-toggle-track"><span></span></span>';
+    master.addEventListener("click", function () {
+      // Off turns both off too.
+      if (myLook().adaptive_all) setLook({ adaptive_all: false, adaptive: false, adaptive_text: false });
+      else setLook({ adaptive_all: true, adaptive: true, adaptive_text: true });
+    });
+    adaptCard.querySelector(".rc-set-group-head").appendChild(master);
+    [adapt, inks].forEach(function (b) {
+      b.disabled = all;
+    });
+    adaptCard.appendChild(switches);
+    box.appendChild(adaptCard);
 
     // Colors
     var colors = lookCard("Colores", "", ICON_SWATCH);
@@ -8220,6 +8350,48 @@
       tune.appendChild(wrap);
     });
     box.appendChild(tune);
+    box.appendChild(glassCard());
+  }
+
+  // The file explorer's transparency: here and in the explorer's own menu
+  // (files.js, through __rcHost), both on the profile's look.
+  function glassCard() {
+    var card = lookCard("Explorador de archivos", "", ICON_TUNE);
+    card.appendChild(
+      glassSlider(function () {
+        var hero = document.querySelector("#rc-settings .rc-look-hero");
+        if (hero) hero.replaceWith(lookHero(myLook()));
+      })
+    );
+    return card;
+  }
+
+  function glassSlider(after) {
+    var wrap = document.createElement("label");
+    wrap.className = "rc-set-range";
+    var label = document.createElement("span");
+    label.textContent = "Transparencia";
+    var out = document.createElement("span");
+    out.className = "rc-set-range-val";
+    var range = document.createElement("input");
+    range.type = "range";
+    range.min = "0";
+    range.max = String(GLASS_MAX);
+    range.value = String(lookGlass());
+    var paint = function () {
+      out.textContent = range.value + "%";
+      range.style.setProperty("--pct", (range.value / GLASS_MAX) * 100 + "%");
+    };
+    paint();
+    range.addEventListener("input", function () {
+      paint();
+      setLook({ glass: parseInt(range.value, 10) || 0 }, false, true);
+      if (after) after();
+    });
+    wrap.appendChild(label);
+    wrap.appendChild(range);
+    wrap.appendChild(out);
+    return wrap;
   }
 
   function paintSettings(force) {
@@ -8532,6 +8704,10 @@
 
   // What the file explorer (files.js) needs from the terminal page.
   window.__rcHost = {
+    // The explorer's transparency control (its ⋮ menu) is the Themes one.
+    glassSlider: function () {
+      return glassSlider(null);
+    },
     sendInput: function (text) {
       return sendInput(text);
     },
