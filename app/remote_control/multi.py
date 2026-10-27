@@ -304,12 +304,13 @@ def rename(old: str, new: str) -> None:
 # --- inside ------------------------------------------------------------------------------
 
 
-def run(name: str, *args: str, user: str = USER, timeout: float | None = 120, check: bool = True) -> str:
+def run(name: str, *args: str, user: str = USER, timeout: float | None = 120, check: bool = True, log=None) -> str:
+    """A command inside, as its user; ``log`` gets each line as it comes."""
     env = ["--env", f"HOME={HOME}", "--env", f"USER={USER}", "--env", f"XDG_RUNTIME_DIR=/run/user/{UID}", "--env", "LANG=C.UTF-8",
            "--env", "RC_LISTEN_HOST=0.0.0.0"]
     if user == "root":
         env = []
-    return podman("exec", "--user", user, "--workdir", HOME if user != "root" else "/", *env, container(name), *args, timeout=timeout, check=check)
+    return podman("exec", "--user", user, "--workdir", HOME if user != "root" else "/", *env, container(name), *args, timeout=timeout, check=check, log=log)
 
 
 def install_rc(name: str, log=lambda _line: None) -> None:
@@ -340,9 +341,8 @@ def setup_env(name: str, log=lambda _line: None) -> None:
     """The PC's terminal inside: zsh, Oh My Posh, plugins, tools, Node, Bun and
     the AI CLIs (container_setup.sh). Skips what is there: quick on updates."""
     script = f"{HOME}/.local/share/remote-control/remote_control/container_setup.sh"
-    out = run(name, "bash", script, timeout=1800, check=False)
-    for line in out.splitlines():
-        log(line)
+    # Streamed: it takes minutes the first time, each step shows as it starts.
+    run(name, "bash", script, timeout=1800, check=False, log=log)
 
 
 def tunnel_status(name: str) -> dict:
@@ -374,9 +374,57 @@ def tunnel_stop(name: str) -> None:
     stop(name)
 
 
+GATE_FILE = f"{HOME}/.config/remote-control/gate"
+
+
 def password(name: str, action: str = "show", value: str = "") -> str:
-    args = [RC_BIN, "password", action] + ([value] if action == "set" else [])
-    return run(name, *args, timeout=20).strip()
+    """Its password; readable and changeable with the container stopped too
+    (its file through ``podman cp``), so turning the tunnel off never locks it."""
+    if get(name).running:
+        args = [RC_BIN, "password", action] + ([value] if action == "set" else [])
+        return run(name, *args, timeout=20).strip()
+    from .gate import generate_password, without_spaces
+
+    if action == "show":
+        return _read_file(name, GATE_FILE).strip()
+    new = generate_password() if action == "new" else without_spaces(value)
+    if not new:
+        raise MultiError("la contraseña no puede quedar vacía")
+    _write_file(name, GATE_FILE, new + "\n")
+    return new
+
+
+def _read_file(name: str, path: str) -> str:
+    """A file of a container, running or not (podman cp hands a tar)."""
+    import io
+    import tarfile
+
+    res = subprocess.run(["podman", "cp", f"{container(name)}:{path}", "-"], capture_output=True, check=False, timeout=30)
+    if res.returncode != 0:
+        return ""
+    with tarfile.open(fileobj=io.BytesIO(res.stdout)) as tar:
+        member = next((m for m in tar.getmembers() if m.isfile()), None)
+        data = tar.extractfile(member).read() if member else b""
+    return data.decode("utf-8", "replace")
+
+
+def _write_file(name: str, path: str, text: str) -> None:
+    """Write a private file of its user (uid 1000, 0600), even with it stopped."""
+    import io
+    import tarfile
+
+    data = text.encode("utf-8")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(Path(path).name)
+        info.size, info.mode, info.uid, info.gid = len(data), 0o600, UID, UID
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(data))
+    # --archive=false: keep the tar's owner (its user), not the container's root.
+    res = subprocess.run(["podman", "cp", "--archive=false", "-", f"{container(name)}:{Path(path).parent}"], input=buf.getvalue(),
+                         capture_output=True, check=False, timeout=30)
+    if res.returncode != 0:
+        raise MultiError("no se pudo guardar: " + res.stderr.decode("utf-8", "replace").strip()[-200:])
 
 
 def autostart(name: str) -> bool:

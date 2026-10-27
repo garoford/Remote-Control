@@ -44,7 +44,42 @@ class CreateScreen(ModalScreen[str | None]):
         elif event.button.id == "new-ok":
             self.create()
 
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.busy = False
+        self.step = ""
+        self.started = 0.0
+        self.tick = 0
+
+    def action_dismiss(self, result=None) -> None:
+        # Esc does nothing while it is being created.
+        if not self.busy:
+            self.dismiss(result)
+
+    def set_busy(self, busy: bool) -> None:
+        self.busy = busy
+        ok = self.query_one("#new-ok", Button)
+        ok.label = "Creando…" if busy else "Crear"
+        for wid in ("#new-ok", "#new-cancel", "#new-name", "#new-base"):
+            self.query_one(wid).disabled = busy
+
+    def paint_progress(self) -> None:
+        if not self.busy:
+            return
+        import time
+
+        self.tick += 1
+        secs = int(time.monotonic() - self.started)
+        spin = self.SPIN[self.tick % len(self.SPIN)]
+        self.query_one("#domain-result", Static).update(f"{spin} {self.step}  ·  {secs}s")
+
     def create(self) -> None:
+        import time
+
+        if self.busy:
+            return
         name = self.query_one("#new-name", Input).value.strip().lower()
         result = self.query_one("#domain-result", Static)
         if not multi.valid_name(name):
@@ -52,24 +87,35 @@ class CreateScreen(ModalScreen[str | None]):
             result.update("Nombre inválido: minúsculas, números y guiones.")
             return
         base = str(self.query_one("#new-base", Select).value)
-        result.set_classes("")
-        result.update("Creando… la primera vez arma la imagen y puede tardar unos minutos.")
-        self.query_one("#new-ok", Button).disabled = True
+        result.set_classes("busy")
+        self.step = f"Creando {name}… (la primera vez tarda unos minutos)"
+        self.started = time.monotonic()
+        self.set_busy(True)
+        self.paint_progress()
+        timer = self.set_interval(0.25, self.paint_progress)
 
         def log(line: str) -> None:
-            if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or line.endswith("…") or "listo" in line:
-                self.app.call_from_thread(result.update, line[:80])
+            line = line.strip()
+            if line.startswith(("Creando", "Copiando", "Preparando")) or line.endswith("…") or line.startswith("STEP"):
+                self.step = line[:70]
 
         def work() -> None:
             try:
                 multi.create(name, base, log=log)
-                self.app.call_from_thread(self.dismiss, name)
             except Exception as exc:
                 def fail() -> None:
-                    self.query_one("#new-ok", Button).disabled = False
+                    timer.stop()
+                    self.set_busy(False)
                     result.set_classes("error")
                     result.update(str(exc).splitlines()[0])
                 self.app.call_from_thread(fail)
+                return
+
+            def done() -> None:
+                timer.stop()
+                self.busy = False
+                self.dismiss(name)
+            self.app.call_from_thread(done)
 
         self.run_worker(work, thread=True)
 
@@ -136,6 +182,8 @@ class MultiTUI(App):
     #actions Button { margin-right: 1; }
     #rm { background: #3b1d22; color: #ef5350; }
     #empty { color: #8a9bb3; padding: 2 2; }
+    #domain-buttons Button:disabled { background: #1d3b53; color: #5f7187; text-style: none; }
+    #domain-result.busy { color: #82aaff; }
     #dom-sub { width: 1fr; }
     #dom-zone { width: auto; color: #8a9bb3; padding: 0 1; }
     #dom-hint { color: #8a9bb3; margin-top: 1; }
@@ -308,11 +356,14 @@ class MultiTUI(App):
             sw.value = on
         sw.disabled = busy
         self.query_one("#autostart", Switch).disabled = busy or not b.running
-        self.query_one("#regen", Button).disabled = busy or on or not b.running
+        # Its password changes with the tunnel off, container on or not (multi.password).
+        self.query_one("#regen", Button).disabled = busy or on
         url = (self.tunnel.get("url") or "") if on else ""
         self.url = url or None
         self.query_one("#public-url", Static).update(Text(url, style=f"link {url}") if url else Text("Aparece al encender el túnel", style="#5f7187"))
-        self.query_one("#local-url", Static).update(f"http://localhost:{b.port}/")
+        # Nothing answers there with the tunnel off.
+        local = f"http://localhost:{b.port}/" if on else ""
+        self.query_one("#local-url", Static).update(Text(local) if on else Text("Aparece al encender el túnel", style="#5f7187"))
         if url != self._qr_for:
             art = qr_text(url) if url else None
             self.query_one("#qr", Static).update(art if art is not None else Text("Enciende el túnel para ver el QR", style="#8a9bb3"))
@@ -404,7 +455,7 @@ class MultiTUI(App):
         b = self.box()
         field = self.query_one("#password", Input)
         field.value = ""
-        if b is None or not b.running:
+        if b is None:
             return
         name = b.name
 
@@ -450,7 +501,7 @@ class MultiTUI(App):
             "new": self.action_new,
             "power": self.action_power,
             "copy-url": self.action_copy_url,
-            "copy-local": lambda: self.box() and self.copy(f"http://localhost:{self.box().port}/", "URL local copiada"),
+            "copy-local": lambda: self.url and self.box() and self.copy(f"http://localhost:{self.box().port}/", "URL local copiada"),
             "copy-pass": lambda: self.copy(self.query_one("#password", Input).value, "Contraseña copiada"),
             "show": self.action_toggle_password,
             "regen": self.new_password,

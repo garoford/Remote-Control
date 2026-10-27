@@ -120,6 +120,25 @@ class InsideTests(unittest.TestCase):
                      "claude.ai/install.sh", "@openai/codex", "cursor.com/install", ".config/remote-control/zshrc"):
             self.assertIn(need, script, need)
 
+    def test_password_of_a_stopped_container_goes_through_its_file(self) -> None:
+        import io
+        import tarfile
+
+        stopped = multi.Box("backend", "fedora", "exited", 17700, 0, "")
+        sent = {}
+
+        def fake_run(cmd, input=None, **kw):
+            sent["cmd"], sent["tar"] = cmd, input
+            return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(multi, "get", lambda name: stopped), mock.patch.object(multi.subprocess, "run", fake_run):
+            new = multi.password("backend", "set", "Nueva123")
+        self.assertEqual(new, "Nueva123")
+        self.assertIn("--archive=false", sent["cmd"])
+        with tarfile.open(fileobj=io.BytesIO(sent["tar"])) as tar:
+            info = tar.getmembers()[0]
+            self.assertEqual((info.name, info.uid, info.mode, tar.extractfile(info).read()), ("gate", 1000, 0o600, b"Nueva123\n"))
+
     def test_commands_run_as_the_container_user(self) -> None:
         fake = FakePodman()
         with mock.patch.object(multi, "podman", fake):

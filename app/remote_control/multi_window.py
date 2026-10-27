@@ -9,6 +9,7 @@ call runs off the GTK thread; the sidebar refreshes every few seconds.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -575,11 +576,14 @@ class MultiWindow(Adw.ApplicationWindow):
         # Off: the tunnel and its container; on starts the container if needed.
         self.switch.set_sensitive(not busy)
         self.auto_switch.set_sensitive(b.running and not busy)
-        self.regen_btn.set_sensitive(b.running and not on and not busy)
+        # Its password changes with the tunnel off, container on or not (multi.password).
+        self.regen_btn.set_sensitive(not on and not busy)
         url = (self.tunnel.get("url") or "") if on else ""
         if self.url_entry.get_text() != url:
             self.url_entry.set_text(url)
-        self.local_entry.set_text(f"http://localhost:{b.port}/")
+        # Nothing answers there with the tunnel off.
+        self.local_entry.set_placeholder_text("Aparece al encender el túnel")
+        self.local_entry.set_text(f"http://localhost:{b.port}/" if on else "")
         if url and self._qr_for != url:
             png = control.qr_png(url, scale=5)
             if png:
@@ -656,7 +660,7 @@ class MultiWindow(Adw.ApplicationWindow):
 
     def _load_password(self) -> None:
         b = self._box()
-        if b is None or not b.running:
+        if b is None:
             return
         name = b.name
         _bg(lambda: multi.password(name), lambda pw, err: name == self.selected and not err and self.pass_entry.set_text(pw))
@@ -722,6 +726,7 @@ class MultiWindow(Adw.ApplicationWindow):
         ok.connect("clicked", lambda *_: on_ok())
         row.append(ok)
         card.append(row)
+        ok.cancel = cancel
         return ok
 
     def _confirm(self, title: str, body: str, yes: str, action) -> None:
@@ -756,11 +761,36 @@ class MultiWindow(Adw.ApplicationWindow):
         base_ids = list(multi.BASES)
         base = Gtk.DropDown.new_from_strings(list(multi.BASES.values()))
         self._field(card, "Sistema", base)
+        # While it is made: a spinner, the step it is on and the seconds.
+        progress = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        spinner = Gtk.Spinner()
+        spinner.set_visible(False)
+        progress.append(spinner)
         status = Gtk.Label(wrap=True, xalign=0)
         status.add_css_class("rc-hint-text")
         status.set_max_width_chars(46)
-        card.append(status)
+        status.set_hexpand(True)
+        progress.append(status)
+        card.append(progress)
         ok = None
+        state = {"busy": False, "step": "", "start": 0.0}
+
+        def paint() -> bool:
+            if not state["busy"]:
+                return False
+            secs = int(time.monotonic() - state["start"])
+            status.set_label(f"{state['step']}  ·  {secs}s")
+            return True
+
+        def busy(on: bool) -> None:
+            state["busy"] = on
+            spinner.set_visible(on)
+            spinner.set_spinning(on)
+            ok.set_label("Creando…" if on else "Crear")
+            for widget in (ok, ok.cancel, name, base):
+                widget.set_sensitive(not on)
+            # Not closed half-made (Esc, a click outside).
+            dialog.set_can_close(not on)
 
         def create():
             value = name.get_text().strip().lower()
@@ -772,20 +802,24 @@ class MultiWindow(Adw.ApplicationWindow):
                 status.add_css_class("warn")
                 status.set_label(f"Ya existe {value}.")
                 return
+            if state["busy"]:
+                return
             status.remove_css_class("warn")
-            ok.set_sensitive(False)
-            name.set_sensitive(False)
             chosen = base_ids[base.get_selected()]
-            status.set_label("Creando… la primera vez arma la imagen y puede tardar unos minutos.")
+            state["step"] = f"Creando {value}… (la primera vez tarda unos minutos)"
+            state["start"] = time.monotonic()
+            busy(True)
+            paint()
+            GLib.timeout_add(500, paint)
 
             def log(line: str) -> None:
-                if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or line.endswith("…") or "listo" in line:
-                    GLib.idle_add(status.set_label, line[:90])
+                line = line.strip()
+                if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or line.endswith("…"):
+                    state["step"] = line[:70]
 
             def done(_box, error):
+                busy(False)
                 if error:
-                    ok.set_sensitive(True)
-                    name.set_sensitive(True)
                     status.add_css_class("warn")
                     status.set_label(error.splitlines()[0])
                     return
