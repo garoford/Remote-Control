@@ -301,5 +301,57 @@ class SetTabOwnerTests(unittest.TestCase):
         self.assertEqual((pins / "w1:p1").read_text(), "cuenta2\n")
 
 
+class PickLayoutTests(unittest.TestCase):
+    """Several herdr tabs with nearly the same shape: which one the page shows."""
+
+    BOXES = [
+        {"x": 26, "y": 1, "w": 67, "h": 34, "lines": ["Ran 6 shell commands"]},
+        {"x": 93, "y": 1, "w": 78, "h": 17, "lines": ["GNU nano 8.7.1 addons.txt"]},
+        {"x": 93, "y": 18, "w": 78, "h": 17, "lines": ["9 files changed, 579 insertions(+), 90 deletions(-)"]},
+    ]
+
+    def layout(self, tab, left, top):
+        panes = [
+            (f"{tab}:a", (0, 0, left, 34)),
+            (f"{tab}:b", (left, 0, 145 - left, top)),
+            (f"{tab}:c", (left, top, 145 - left, 34 - top)),
+        ]
+        return {"tab_id": tab, "panes": [{"pane_id": pid, "rect": dict(zip(("x", "y", "width", "height"), r))} for pid, r in panes]}
+
+    def candidates(self, *layouts):
+        out = []
+        for layout in layouts:
+            found = herdr._shape_fit(self.BOXES, herdr._layout_panes(layout))
+            if found:
+                out.append((layout, found[0], found[1]))
+        return out
+
+    def setUp(self) -> None:
+        herdr._last_tab.clear()
+
+    def test_scrollbar_glyph_is_dropped_from_lines(self) -> None:
+        boxes = herdr._clean_boxes([{"x": 0, "y": 0, "w": 9, "h": 9, "lines": ["9 files changed  \u2595", "\u2502abc def"]}])
+        self.assertEqual(boxes[0]["lines"], ["9 files changed", "abc def"])
+
+    def test_text_on_screen_decides(self) -> None:
+        cands = self.candidates(self.layout("w8:t1", 67, 17), self.layout("w2:t1", 73, 17))
+        self.assertEqual(len(cands), 2)
+        texts = {"w2:t1:b": "GNU nano 8.7.1 addons.txt more"}
+        with mock.patch.object(herdr, "_pane_text", lambda pid: texts.get(pid, "")):
+            self.assertEqual(herdr._pick_layout(self.BOXES, cands, "dabcdef0123"), ["w2:t1:a", "w2:t1:b", "w2:t1:c"])
+
+    def test_no_text_match_falls_back_to_closest_shape(self) -> None:
+        cands = self.candidates(self.layout("w2:t1", 73, 17), self.layout("w8:t1", 67, 17))
+        with mock.patch.object(herdr, "_pane_text", lambda pid: ""):
+            self.assertEqual(herdr._pick_layout(self.BOXES, cands, "dabcdef0123")[0], "w8:t1:a")
+
+    def test_same_shape_keeps_the_devices_last_tab(self) -> None:
+        cands = self.candidates(self.layout("w8:t1", 67, 17), self.layout("w9:t1", 67, 17))
+        with mock.patch.object(herdr, "_pane_text", lambda pid: ""):
+            self.assertIsNone(herdr._pick_layout(self.BOXES, cands, "dabcdef0123"))
+            herdr._last_tab["dabcdef0123"] = "w9:t1"
+            self.assertEqual(herdr._pick_layout(self.BOXES, cands, "dabcdef0123")[0], "w9:t1:a")
+
+
 if __name__ == "__main__":
     unittest.main()

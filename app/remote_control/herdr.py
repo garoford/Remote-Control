@@ -126,6 +126,13 @@ def tab_launch_context() -> tuple[Path, str, dict[str, str]]:
 MARK_BOXES = 32
 MARK_LINES = 8
 SHAPE_TOLERANCE = 0.06
+# Two layouts this much closer in shape than the next: the closest is the one.
+SHAPE_MARGIN = 0.02
+# herdr's scrollbar and frame glyphs at the ends of a line the page read.
+EDGE_GLYPHS_RE = re.compile(r"^[\u2500-\u259f\s]+|[\u2500-\u259f\s]+$")
+# Several tabs with the same shape and nothing on screen to tell them apart:
+# each device keeps the tab it was last found on.
+_last_tab: dict[str, str] = {}
 
 
 def _owners_file() -> Path:
@@ -170,7 +177,7 @@ def _clean_boxes(raw: object) -> list[dict]:
         if w < 3 or h < 3 or x < 0 or y < 0:
             return []
         lines = item.get("lines")
-        lines = [" ".join(str(t).split())[:200] for t in lines[:MARK_LINES]] if isinstance(lines, list) else []
+        lines = [EDGE_GLYPHS_RE.sub("", " ".join(str(t).split()))[:200] for t in lines[:MARK_LINES]] if isinstance(lines, list) else []
         boxes.append({"x": x, "y": y, "w": w, "h": h, "lines": [t for t in lines if len(t) >= 4]})
     return boxes
 
@@ -201,12 +208,19 @@ def _layout_panes(layout: dict) -> list[tuple[str, tuple[int, int, int, int]]]:
 
 def _shape_match(boxes: list[dict], panes: list[tuple[str, tuple]]) -> list[str] | None:
     """Pane id for each box when the layout has the same shape, else None."""
+    found = _shape_fit(boxes, panes)
+    return found[0] if found else None
+
+
+def _shape_fit(boxes: list[dict], panes: list[tuple[str, tuple]]) -> tuple[list[str], float] | None:
+    """Pane id for each box and how far off the shape is, None past the tolerance."""
     if len(panes) != len(boxes):
         return None
     seen = _norm([(b["x"], b["y"], b["w"], b["h"]) for b in boxes])
     want = _norm([rect for _, rect in panes])
     out: list[str] = []
     used: set[int] = set()
+    worst = 0.0
     for box in seen:
         best, best_d = -1, 9.0
         for i, rect in enumerate(want):
@@ -218,8 +232,42 @@ def _shape_match(boxes: list[dict], panes: list[tuple[str, tuple]]) -> list[str]
         if best < 0 or best_d > SHAPE_TOLERANCE:
             return None
         used.add(best)
+        worst = max(worst, best_d)
         out.append(panes[best][0])
-    return out
+    return out, worst
+
+
+def _line_seen(line: str, text: str) -> bool:
+    # A frame narrower than the pane cuts its lines: their start still counts.
+    return line in text or (len(line) >= 16 and line[:16] in text)
+
+
+def _pick_layout(boxes: list[dict], candidates: list[tuple[dict, list[str], float]], dev: str) -> list[str] | None:
+    """Which of the layouts with this shape the page is showing.
+
+    The text on screen first; then a shape clearly closer than the rest; then
+    the tab this device was last found on.
+    """
+    if len(candidates) == 1:
+        return candidates[0][1]
+    scored = []
+    for layout, ids, dist in candidates:
+        score = 0
+        for box, pid in zip(boxes, ids):
+            text = " ".join(_pane_text(pid).split())
+            score += sum(1 for line in box["lines"] if _line_seen(line, text))
+        scored.append((score, layout, ids))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored[0][0] > 0 and (len(scored) < 2 or scored[1][0] < scored[0][0]):
+        return scored[0][2]
+    by_shape = sorted(candidates, key=lambda item: item[2])
+    if by_shape[1][2] - by_shape[0][2] >= SHAPE_MARGIN:
+        return by_shape[0][1]
+    last = _last_tab.get(dev)
+    for layout, ids, _ in candidates:
+        if last and layout.get("tab_id") == last:
+            return ids
+    return None
 
 
 def _pane_text(pane_id: str) -> str:
@@ -264,24 +312,16 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     _write_missing_pins(fresh)
     candidates = []
     for layout in snap.get("layouts") or []:
-        if isinstance(layout, dict) and (ids := _shape_match(boxes, _layout_panes(layout))):
-            candidates.append((layout, ids))
-    if len(candidates) > 1:
-        # Same shape in several tabs: the text on screen says which one this is.
-        scored = []
-        for layout, ids in candidates:
-            score = 0
-            for box, pid in zip(boxes, ids):
-                text = _pane_text(pid)
-                score += sum(1 for line in box["lines"] if line in text)
-            scored.append((score, layout, ids))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        if scored[0][0] == 0 or (len(scored) > 1 and scored[1][0] == scored[0][0]):
-            return {"ok": True, "marks": []}
-        candidates = [(scored[0][1], scored[0][2])]
-    if not candidates:
+        if isinstance(layout, dict) and (found := _shape_fit(boxes, _layout_panes(layout))):
+            candidates.append((layout, found[0], found[1]))
+    dev = str(viewer.get("dev") or "") if isinstance(viewer, dict) else ""
+    ids = _pick_layout(boxes, candidates, dev) if candidates else None
+    if not ids:
         return {"ok": True, "marks": []}
-    _, ids = candidates[0]
+    if DEVICE_ID_RE.match(dev):
+        for layout, cand, _ in candidates:
+            if cand == ids and isinstance(layout.get("tab_id"), str):
+                _last_tab[dev] = layout["tab_id"]
     if isinstance(viewer, dict):
         _hold_owned(boxes, ids, fresh, viewer)
     return {"ok": True, "marks": [{"box": i, "pane": pid, "owner": fresh.get(pid, "")} for i, pid in enumerate(ids)]}
