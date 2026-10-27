@@ -69,6 +69,13 @@ La copia instalada se actualiza sola cuando `main` tiene un commit nuevo:
 
 No corta un túnel que ya esté en marcha. El código nuevo aplica al siguiente arranque.
 
+Para actualizar ya, sin esperar:
+
+```bash
+remote-control update                  # esta instalación y luego cada contenedor encendido (multi)
+remote-control update --no-containers  # solo esta instalación
+```
+
 Para desactivar el auto-update:
 
 ```bash
