@@ -95,8 +95,22 @@ class InsideTests(unittest.TestCase):
             self.assertFalse(multi.tunnel_status("backend")["running"])
 
     def test_tunnel_start_returns_the_url(self) -> None:
-        with mock.patch.object(multi, "run", lambda *a, **k: "algo\nhttps://abc.trycloudflare.com\n"):
+        running = multi.Box("backend", "fedora", "running", 17700, 0, "")
+        with mock.patch.object(multi, "run", lambda *a, **k: "algo\nhttps://abc.trycloudflare.com\n"), \
+             mock.patch.object(multi, "get", lambda name: running):
             self.assertEqual(multi.tunnel_start("backend"), "https://abc.trycloudflare.com")
+
+    def test_tunnel_off_stops_the_whole_container_and_on_starts_it(self) -> None:
+        calls = []
+        box = multi.Box("backend", "fedora", "exited", 17700, 0, "")
+        with mock.patch.object(multi, "run", lambda *a, **k: calls.append(("run", a[1:])) or "https://x.trycloudflare.com\n"), \
+             mock.patch.object(multi, "stop", lambda name: calls.append(("stop", name))), \
+             mock.patch.object(multi, "start", lambda name, log=None: calls.append(("start", name))), \
+             mock.patch.object(multi, "get", lambda name: box):
+            multi.tunnel_stop("backend")
+            self.assertEqual(multi.tunnel_start("backend"), "https://x.trycloudflare.com")
+        self.assertEqual([c[0] for c in calls], ["run", "stop", "start", "run"])
+        self.assertEqual(calls[0][1][-1], "stop")
 
     def test_commands_run_as_the_container_user(self) -> None:
         fake = FakePodman()

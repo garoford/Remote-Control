@@ -837,7 +837,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         card.append(title)
 
         body = Gtk.Label(
-            label="La URL pública dejará de funcionar.\nQuien esté conectado perderá el acceso.",
+            label="La URL pública dejará de funcionar y se cierran las terminales.\nVuelven como estaban al encenderlo.",
             justify=Gtk.Justification.CENTER,
             wrap=True,
         )
@@ -874,7 +874,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
 
         def work() -> None:
             try:
-                self.tunnel.stop()
+                self.tunnel.stop(close_sessions=True)
                 GLib.idle_add(self._on_stopped)
             except Exception as exc:
                 GLib.idle_add(self._on_stop_failed, str(exc))

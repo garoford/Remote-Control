@@ -28,7 +28,8 @@ def status(argv: list[str]) -> int:
 def stop(_argv: list[str]) -> int:
     from remote_control.tunnel import TunnelService
 
-    TunnelService().stop()
+    # Its terminals close too; the next start brings them back.
+    TunnelService().stop(close_sessions=True)
     print("apagado")
     return 0
 

@@ -597,7 +597,7 @@ class RemoteControlTUI(App):
                 self.stop_tunnel()
 
         self.push_screen(
-            Confirm("¿Apagar el túnel?", "La URL pública dejará de funcionar y quien esté conectado perderá el acceso.", "Apagar"),
+            Confirm("¿Apagar el túnel?", "La URL pública dejará de funcionar y se cierran las terminales. Vuelven como estaban al encenderlo.", "Apagar"),
             done,
         )
 
@@ -621,7 +621,7 @@ class RemoteControlTUI(App):
 
         def work() -> None:
             try:
-                self.tunnel.stop()
+                self.tunnel.stop(close_sessions=True)
                 self.call_from_thread(self.on_tunnel_done, None, None)
             except Exception as exc:
                 self.call_from_thread(self.on_tunnel_done, None, str(exc))

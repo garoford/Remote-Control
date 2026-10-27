@@ -23,6 +23,7 @@ from remote_control.agents import write_rc_command
 from remote_control.gate import write_runtime_gate
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
 from remote_control.workspaces import restore as restore_workspaces
+from remote_control.workspaces import snapshot as snapshot_workspaces
 
 URL_RE = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 REGISTERED_RE = re.compile(r"Registered tunnel connection")
@@ -322,9 +323,14 @@ class TunnelService:
         self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
         self.ttyd_port_file.unlink(missing_ok=True)
         self.proxy_port_file.unlink(missing_ok=True)
-        # Tabs keep running when only the web access goes down; workspaces.py
-        # brings them back after a PC restart.
+        # Switching the tunnel off closes the tabs too (nothing keeps using
+        # CPU and memory unseen): their folder, screen and conversation are
+        # saved first, and the next start brings them back (workspaces.py).
         if close_sessions:
+            try:
+                snapshot_workspaces("cf-remote")
+            except Exception:
+                pass
             subprocess.run(
                 ["tmux", "-L", "cf-remote", "kill-server"],
                 stdout=subprocess.DEVNULL,

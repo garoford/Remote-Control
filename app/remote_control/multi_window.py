@@ -572,7 +572,8 @@ class MultiWindow(Adw.ApplicationWindow):
         self.power_btn.set_label("Apagar contenedor" if b.running else "Encender contenedor")
         self.power_btn.set_sensitive(not busy)
         self._set_switch(self.switch, on)
-        self.switch.set_sensitive(b.running and not busy)
+        # Off: the tunnel and its container; on starts the container if needed.
+        self.switch.set_sensitive(not busy)
         self.auto_switch.set_sensitive(b.running and not busy)
         self.regen_btn.set_sensitive(b.running and not on and not busy)
         url = (self.tunnel.get("url") or "") if on else ""
@@ -637,7 +638,7 @@ class MultiWindow(Adw.ApplicationWindow):
         else:
             self._confirm(
                 "¿Apagar el túnel?",
-                f"La URL pública de {b.name} dejará de funcionar. Sus terminales siguen corriendo.",
+                f"La URL pública de {b.name} dejará de funcionar y se apaga el contenedor. Sus terminales vuelven al encenderlo.",
                 "Apagar",
                 lambda: self._do(b.name, lambda: multi.tunnel_stop(b.name), "Túnel apagado", lambda _r: self.tunnel.clear()),
             )

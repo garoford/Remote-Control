@@ -306,7 +306,7 @@ class MultiTUI(App):
         sw = self.query_one("#switch", Switch)
         with sw.prevent(Switch.Changed):
             sw.value = on
-        sw.disabled = busy or not b.running
+        sw.disabled = busy
         self.query_one("#autostart", Switch).disabled = busy or not b.running
         self.query_one("#regen", Button).disabled = busy or on or not b.running
         url = (self.tunnel.get("url") or "") if on else ""
@@ -508,7 +508,7 @@ class MultiTUI(App):
 
     def action_toggle_tunnel(self) -> None:
         b = self.box()
-        if b is None or not b.running or self.busy_name:
+        if b is None or self.busy_name:
             return
         if not self.tunnel.get("running"):
             self.act(lambda: multi.tunnel_start(b.name), "Túnel en línea", lambda url: self.tunnel.update(running=True, url=url))
@@ -518,7 +518,7 @@ class MultiTUI(App):
             if yes:
                 self.act(lambda: multi.tunnel_stop(b.name), "Túnel apagado", lambda _r: self.tunnel.clear())
 
-        self.push_screen(Confirm("¿Apagar el túnel?", f"La URL pública de {b.name} dejará de funcionar. Sus terminales siguen corriendo.", "Apagar"), done)
+        self.push_screen(Confirm("¿Apagar el túnel?", f"La URL pública de {b.name} dejará de funcionar y se apaga el contenedor. Sus terminales vuelven al encenderlo.", "Apagar"), done)
 
     def action_toggle_password(self) -> None:
         field = self.query_one("#password", Input)

@@ -343,7 +343,10 @@ def tunnel_status(name: str) -> dict:
 
 
 def tunnel_start(name: str) -> str:
-    """The URL once it is public (Remote Control's own start waits for it)."""
+    """The URL once it is public (Remote Control's own start waits for it).
+    A stopped container is started first."""
+    if not get(name).running:
+        start(name)
     out = run(name, RC_BIN, "start", timeout=300)
     urls = re.findall(r"https?://\S+", out)
     if not urls:
@@ -352,7 +355,13 @@ def tunnel_start(name: str) -> str:
 
 
 def tunnel_stop(name: str) -> None:
-    run(name, RC_BIN, "stop", timeout=60)
+    """The tunnel, and with it the whole container: nothing of it keeps
+    running unseen. Its tabs come back on the next start (workspaces.py)."""
+    try:
+        run(name, RC_BIN, "stop", timeout=60)
+    except MultiError:
+        pass
+    stop(name)
 
 
 def password(name: str, action: str = "show", value: str = "") -> str:
@@ -458,8 +467,6 @@ def cli(argv: list[str]) -> int:
         elif cmd == "tunnel":
             action = args[1] if len(args) > 1 else "status"
             if action == "on":
-                if not get(name).running:
-                    start(name, log=out)
                 print(tunnel_start(name))
             elif action == "off":
                 tunnel_stop(name)
