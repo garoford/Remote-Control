@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from remote_control import __version__, agent_context
+from remote_control import __version__, agent_context, domains
 from remote_control.agents import write_rc_command
 from remote_control.gate import write_runtime_gate
 from remote_control.mobile import TOUCH_BOOT_JS, subset_mobile_woff2
@@ -192,6 +192,11 @@ class TunnelService:
         self.proxy_pid_file = self.pid_dir / "proxy.pid"
         self.ttyd_port_file = self.pid_dir / "ttyd.port"
         self.proxy_port_file = self.pid_dir / "proxy.port"
+        # "direct" while serving your own domain without cloudflared (domains.py).
+        self.mode_file = self.pid_dir / "mode"
+        self._tls: tuple[Path, Path, int] | None = None
+        # Why your own domain is not in use this run (shown under the URL).
+        self.domain_warning = ""
         self.proxy_log = self.run_dir / "proxy.log"
         self.gate_file = self.run_dir / "gate.json"
         self._gate_path: Path | None = None
@@ -221,11 +226,11 @@ class TunnelService:
     def which(self, name: str) -> str | None:
         return shutil.which(name)
 
-    def missing_binaries(self) -> list[str]:
+    def missing_binaries(self, direct: bool = False) -> list[str]:
         missing: list[str] = []
         if not self.which("ttyd"):
             missing.append("ttyd")
-        if not self.which("cloudflared"):
+        if not direct and not self.which("cloudflared"):
             missing.append("cloudflared")
         if not self.which("tmux"):
             missing.append("tmux")
@@ -235,7 +240,8 @@ class TunnelService:
         ttyd_pid = self._alive_pid(self.ttyd_pid_file)
         cf_pid = self._alive_pid(self.cf_pid_file)
         proxy_pid = self._alive_pid(self.proxy_pid_file)
-        running = bool(ttyd_pid and cf_pid and proxy_pid)
+        direct = self.mode_file.is_file()
+        running = bool(ttyd_pid and proxy_pid and (cf_pid or direct))
         url = None
         if self.url_file.is_file():
             text = self.url_file.read_text(encoding="utf-8").strip()
@@ -253,7 +259,9 @@ class TunnelService:
         )
 
     def start(self, password: str | None = None) -> str:
-        missing = self.missing_binaries()
+        self.domain_warning = ""
+        domain, public, mode = self._domain_plan()
+        missing = self.missing_binaries(direct=mode == "direct")
         if missing:
             raise TunnelError(
                 "Falta instalar: " + ", ".join(missing) + "."
@@ -283,11 +291,17 @@ class TunnelService:
         self._prepare_ttyd_index()
         self._start_ttyd()
         self._prepare_gate(None if password == "" else password)
-        self._start_proxy()
-        self._start_cloudflared()
-        url = self._wait_for_url(timeout=60)
-        ensure_trycloudflare_route()
-        self._wait_until_public(url, timeout=90)
+        if mode == "direct":
+            assert domain is not None
+            url = self._start_direct(domain, public)
+        else:
+            self._start_proxy()
+            self._start_cloudflared()
+            url = self._wait_for_url(timeout=60)
+            ensure_trycloudflare_route()
+            self._wait_until_public(url, timeout=90)
+            if domain is not None:
+                url = self._redirect_domain(domain, url)
         self.url_file.write_text(url + "\n", encoding="utf-8")
         self.url_file.chmod(0o600)
         return url
@@ -316,6 +330,7 @@ class TunnelService:
             self.proxy_pid_file,
             self.url_file,
             self.gate_file,
+            self.mode_file,
         ):
             path.unlink(missing_ok=True)
         self._gate_path = None
@@ -431,7 +446,66 @@ class TunnelService:
         ]
         if self._gate_path is not None:
             cmd.extend(["--gate", str(self._gate_path)])
+        if self._tls is not None:
+            cert, key, port = self._tls
+            cmd.extend(["--public", f"0.0.0.0:{port}", "--tls-cert", str(cert), "--tls-key", str(key)])
         return cmd
+
+    # --- your own domain (domains.py) ---------------------------------------------
+
+    def _domain_plan(self) -> tuple[domains.DomainConfig | None, str | None, str]:
+        """(settings, public IP, "direct" or "tunnel"); no domain is the plain tunnel."""
+        cfg = domains.load_config()
+        if cfg is None:
+            return None, None, "tunnel"
+        problems = cfg.problems()
+        if problems:
+            self.domain_warning = "Dominio propio sin usar: " + "; ".join(problems)
+            return None, None, "tunnel"
+        public = domains.public_ipv4()
+        return cfg, public, domains.resolve_mode(cfg, public)
+
+    def _start_direct(self, cfg: domains.DomainConfig, public: str | None) -> str:
+        try:
+            cert, key = domains.serve_direct(cfg, public)
+        except Exception as exc:
+            raise TunnelError(f"Dominio propio ({cfg.host}): {exc}") from exc
+        port = self._pick_public_port()
+        self._tls = (cert, key, port)
+        try:
+            self._start_proxy()
+        finally:
+            self._tls = None
+        self.mode_file.write_text("direct\n", encoding="utf-8")
+        return f"https://{cfg.host}" + ("" if port == 443 else f":{port}") + "/"
+
+    def _redirect_domain(self, cfg: domains.DomainConfig, tunnel_url: str) -> str:
+        """Your name → this run's quick tunnel; the quick URL if the API says no.
+
+        http://: the registrars' redirect servers do not speak HTTPS (name.com
+        closes 443). That hop carries nothing: the 302 lands on the tunnel's
+        https:// address, where the password is asked.
+        """
+        try:
+            domains.serve_tunnel(cfg, tunnel_url)
+        except Exception as exc:
+            self.domain_warning = f"No se pudo redirigir {cfg.host}: {exc}"
+            return tunnel_url
+        # This PC may have asked for the name before it existed and cached the miss.
+        flush_resolved_cache()
+        return f"http://{cfg.host}/"
+
+    def _pick_public_port(self) -> int:
+        """443; 8443 when this user may not open ports below 1024."""
+        for port in (443, 8443):
+            with socket.socket() as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(("0.0.0.0", port))
+                    return port
+                except OSError:
+                    continue
+        raise TunnelError("No pude abrir el puerto 443 ni el 8443 para HTTPS.")
 
     def _start_proxy(self) -> None:
         pkg_root = Path(__file__).resolve().parent.parent

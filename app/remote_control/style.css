@@ -372,6 +372,92 @@ window.rc-window,
   background-color: #ff6b68;
 }
 
+/* Own domain dialog: opaque and in our palette, whatever the system theme */
+dialog.rc-sheet,
+dialog.rc-sheet floating-sheet,
+dialog.rc-sheet sheet,
+dialog.rc-sheet scrolledwindow,
+dialog.rc-sheet viewport {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: @rc_text;
+}
+
+dialog.rc-sheet sheet {
+  background-color: @rc_surface;
+  border-radius: 22px;
+  box-shadow: 0 18px 48px alpha(black, 0.55);
+}
+
+.rc-domain-dialog {
+  background-color: @rc_surface;
+  border-color: alpha(@rc_blue, 0.3);
+}
+
+.rc-domain-dialog dropdown > button label,
+.rc-domain-dialog dropdown > button arrow {
+  color: @rc_text;
+}
+
+.rc-domain-dialog dropdown > button:hover {
+  background-color: alpha(@rc_text, 0.06);
+}
+
+/* The dropdowns' lists */
+dialog.rc-sheet popover > contents,
+dialog.rc-sheet popover > arrow {
+  background-color: @rc_raised;
+  color: @rc_text;
+  border: 1px solid alpha(@rc_text, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px alpha(black, 0.5);
+}
+
+dialog.rc-sheet popover listview,
+dialog.rc-sheet popover scrolledwindow {
+  background-color: transparent;
+}
+
+dialog.rc-sheet popover row {
+  border-radius: 8px;
+  color: @rc_text;
+}
+
+dialog.rc-sheet popover row:hover {
+  background-color: alpha(@rc_blue, 0.14);
+}
+
+dialog.rc-sheet popover row:selected {
+  background-color: alpha(@rc_blue, 0.24);
+}
+
+dialog.rc-sheet popover row image {
+  color: @rc_blue;
+}
+
+.rc-domain-dialog dropdown > button {
+  min-height: 40px;
+  border-radius: 12px;
+  background-color: alpha(@rc_bg, 0.75);
+  border: 1px solid alpha(@rc_text, 0.1);
+  color: @rc_text;
+  box-shadow: none;
+}
+
+.rc-btn-save {
+  background-color: @rc_blue;
+  color: @rc_bg;
+  border-radius: 12px;
+  min-height: 40px;
+  font-weight: 700;
+}
+
+.rc-btn-save:hover {
+  background-color: alpha(@rc_blue, 0.85);
+}
+
+.rc-btn-save:focus-visible,
 .rc-btn-cancel:focus-visible,
 .rc-btn-stop:focus-visible {
   outline: 2px solid @rc_blue;

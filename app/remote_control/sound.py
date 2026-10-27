@@ -2,18 +2,22 @@
 
 Everything that runs in herdr or in a Remote Control tab plays its sounds on
 this machine: herdr's ding comes from each device's herdr client (one per
-device, all of them here), and a CLI in a pane plays where it runs. Here every
-new playback stream is checked against the process tree. When it comes from
-herdr or a Remote Control terminal it is moved to a silent sink, so it no
-longer plays on this machine's speakers, and recorded on its own
-(``pacat --monitor-stream``) for the pages it belongs to:
+device, all of them here), and a CLI in a pane plays where it runs. Those
+programs start with ``PULSE_SINK`` set to a silent sink (tmux's global
+environment, profiles.zsh), so they no longer play on this machine's
+speakers. Each stream that lands there is checked against the process tree
+and recorded on its own (``pacat --monitor-stream``) for the pages it
+belongs to:
 
 - a herdr client's sound (its ding): the device that client draws for;
 - a sound from inside a herdr pane or a tab: every device of its owner;
 - anything else of ours: every page listening.
 
-Pages listen on ``/rc-sound`` (server-sent events, proxy.py). Audio anywhere
-else on this machine (a browser, music) is never touched.
+Pages listen on ``/rc-sound`` (a WebSocket, proxy.py). Streams are never
+moved between sinks: WirePlumber would remember the move for that whole
+application (every Chrome, every paplay) from then on. Audio anywhere else
+on this machine (a browser, music), or a program started before this, plays
+as always.
 """
 
 from __future__ import annotations
@@ -194,6 +198,13 @@ class Watcher:
     def _tmux(self, *args: str) -> str:
         return _run("tmux", "-L", self.tmux_socket, *args)
 
+    def _sink_id(self) -> int | None:
+        for line in _run("pactl", "list", "short", "sinks").splitlines():
+            parts = line.split("\t")
+            if len(parts) > 1 and parts[1] == SINK and parts[0].isdigit():
+                return int(parts[0])
+        return None
+
     def _ensure_sink(self) -> None:
         if SINK in _run("pactl", "list", "short", "sinks"):
             return
@@ -277,13 +288,15 @@ class Watcher:
             return
         if pid <= 1:
             return
+        if stream.get("sink") != self._sink_id():
+            return
         target = route(pid, self._tmux_panes(), self._pane_of_shell, self._tab_option)
         if target is None:
-            return
+            # On the silent sink but not ours: everyone hears it rather than no one.
+            target = {"all": True}
         with self._lock:
             if index in self._recorders:
                 return
-            _run("pactl", "move-sink-input", str(index), SINK)
             try:
                 rec = subprocess.Popen(
                     ["pacat", "--record", "--raw", "--format=s16le", f"--rate={RATE}", "--channels=1",

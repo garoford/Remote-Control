@@ -47,6 +47,10 @@ def main(argv: list[str] | None = None) -> int:
         from remote_control.autostart import headless_start
 
         return headless_start()
+    if len(raw) > 1 and raw[1] == "domain":
+        from remote_control.domains import cli
+
+        return cli(raw[2:])
     if len(raw) > 1 and raw[1] == "autostart":
         from remote_control import autostart
 

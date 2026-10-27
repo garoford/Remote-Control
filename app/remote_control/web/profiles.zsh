@@ -34,6 +34,11 @@ _rc_cli() {
   # - a Remote Control tab: its owner, @rc_prof on its tmux session;
   # - any other terminal: the primary user.
   local id="" home="" pin=""
+  # Sounds of a Remote Control terminal go to its devices, not this
+  # computer's speakers (sound.py records that silent sink).
+  if [[ -n "${HERDR_PANE_ID-}" || "${TMUX-}" == */cf-remote,* ]]; then
+    local -x PULSE_SINK=rc_terminal_audio
+  fi
   if (( ${+RC_PROFILE} )); then
     id="$RC_PROFILE"
   elif [[ "${HERDR_PANE_ID-}" =~ '^w[0-9A-Za-z]+:p[0-9A-Za-z]+$' ]]; then

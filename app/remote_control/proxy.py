@@ -1360,6 +1360,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assets", required=True)
     parser.add_argument("--tmux-socket", default="cf-remote")
     parser.add_argument("--gate", default=None, help="runtime gate.json from tunnel start")
+    parser.add_argument("--public", default=None, help="HOST:PORT for HTTPS on your own domain (tls_front.py)")
+    parser.add_argument("--tls-cert", default=None)
+    parser.add_argument("--tls-key", default=None)
     args = parser.parse_args(argv)
 
     def split_addr(value: str) -> tuple[str, int]:
@@ -1387,6 +1390,13 @@ def main(argv: list[str] | None = None) -> int:
         tmux_socket=args.tmux_socket,
         gate_path=gate_path,
     )
+    if args.public:
+        from remote_control.tls_front import TlsFront, keep_domain
+
+        pub_host, pub_port = split_addr(args.public)
+        front = TlsFront((pub_host, pub_port), (listen_host, listen_port), Path(args.tls_cert), Path(args.tls_key))
+        front.start()
+        threading.Thread(target=keep_domain, args=(front,), daemon=True).start()
     try:
         sidecar.serve_forever()
     except KeyboardInterrupt:

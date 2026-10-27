@@ -17,9 +17,9 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Static, Switch
+from textual.widgets import Button, Footer, Input, Select, Static, Switch
 
-from . import autostart, control
+from . import autostart, control, domains
 from .gate import STRENGTH_LABEL, generate_password, password_strength, read_password, without_spaces, write_password
 from .tunnel import TunnelService
 
@@ -66,6 +66,175 @@ class Confirm(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
+
+
+class DomainScreen(ModalScreen[bool]):
+    """Your own domain (domains.py): key, then one of the account's domains."""
+
+    BINDINGS = [Binding("escape", "dismiss(False)", "Cancelar")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved = domains.load_config()
+        self.cfg = self.saved or domains.DomainConfig(provider="namecom")
+        self.zones: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        cfg = self.cfg
+        with VerticalScroll(id="domain"):
+            yield Static("Dominio propio", id="confirm-title")
+            yield Static(
+                "En un servidor con IP pública el dominio apunta directo a él, con HTTPS propio. "
+                "En una PC de casa redirige al túnel de Cloudflare.",
+                id="confirm-body",
+            )
+            yield Static("Proveedor", classes="label")
+            yield Select([(label, key) for key, label in domains.PROVIDERS.items()], value=cfg.provider, allow_blank=False, id="provider", compact=True)
+            # Every provider's fields; only the chosen one's are shown.
+            for provider, fields in domains.FIELDS.items():
+                for key, label, secret, _required in fields:
+                    value = cfg.creds.get(key, "") if provider == cfg.provider else ""
+                    yield Static(label, classes=f"label cred cred-{provider}")
+                    yield Input(value, password=secret, id=f"cred-{provider}-{key}", classes=f"cred cred-{provider}", compact=True)
+            with Horizontal(id="load-row"):
+                yield Button("Cargar mis dominios", id="domain-load", compact=True)
+            with Vertical(id="pick"):
+                yield Static("Dominio", classes="label")
+                yield Select([], prompt="Elige un dominio", id="zone", compact=True)
+                yield Static("Subdominio (vacío = el dominio mismo)", classes="label")
+                yield Input("rc", id="sub", compact=True)
+                yield Static("", id="preview")
+                yield Static("Modo", classes="label")
+                yield Select([(label, key) for key, label in domains.MODES.items()], value=cfg.mode, allow_blank=False, id="mode", compact=True)
+            yield Static("", id="domain-result")
+            with Horizontal(id="domain-buttons"):
+                yield Button("Quitar" if self.saved else "Cancelar", id="domain-remove", compact=True)
+                yield Button("Guardar", id="domain-save", classes="accent", compact=True)
+
+    def on_mount(self) -> None:
+        self.show_provider(self.cfg.provider)
+        saved = self.saved
+        if saved and saved.zone:
+            # Editing a saved one: its domain is there without asking the API again.
+            name = saved.host[: -len(saved.zone)].rstrip(".") if saved.host.endswith(saved.zone) else ""
+            self.query_one("#sub", Input).value = name
+            self.set_zones([saved.zone], saved.zone)
+        else:
+            self.set_zones([])
+
+    def show_provider(self, provider: str) -> None:
+        for widget in self.query(".cred"):
+            widget.display = widget.has_class(f"cred-{provider}")
+
+    def set_zones(self, zones: list[str], selected: str = "") -> None:
+        self.zones = zones
+        select = self.query_one("#zone", Select)
+        select.set_options([(z, z) for z in zones])
+        if selected in zones:
+            select.value = selected
+        elif zones:
+            select.value = zones[0]
+        self.query_one("#pick").display = bool(zones)
+        self.query_one("#domain-save", Button).disabled = not zones
+        self.paint_preview()
+
+    def chosen_host(self) -> str:
+        value = self.query_one("#zone", Select).value
+        if not self.zones or not isinstance(value, str):
+            return ""
+        return domains.compose_host(self.query_one("#sub", Input).value, value)
+
+    def paint_preview(self) -> None:
+        host = self.chosen_host()
+        self.query_one("#preview", Static).update(f"Quedará en {host}" if host else "")
+
+    def say(self, message: str, error: bool = False) -> None:
+        result = self.query_one("#domain-result", Static)
+        result.set_classes("error" if error else "")
+        result.update(message)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "provider":
+            self.show_provider(str(event.value))
+            # Another account: its domains have to be loaded again.
+            self.set_zones([])
+            self.say("")
+        elif event.select.id == "zone":
+            self.paint_preview()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "sub":
+            self.paint_preview()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "domain-remove":
+            if self.saved:
+                domains.clear_config()
+                self.app.notify("Dominio quitado: vuelve trycloudflare.com", timeout=4)
+            self.dismiss(bool(self.saved))
+        elif event.button.id == "domain-load":
+            self.load()
+        elif event.button.id == "domain-save":
+            self.save()
+
+    def creds(self, provider: str) -> dict[str, str]:
+        return {key: self.query_one(f"#cred-{provider}-{key}", Input).value.strip() for key, *_rest in domains.FIELDS[provider]}
+
+    def load(self) -> None:
+        provider = str(self.query_one("#provider", Select).value)
+        creds = self.creds(provider)
+        self.say("Consultando tu cuenta…")
+        self.query_one("#domain-load", Button).disabled = True
+
+        def work() -> None:
+            try:
+                zones = domains.account_domains(provider, creds)
+                self.app.call_from_thread(self.loaded, zones, "")
+            except Exception as exc:
+                self.app.call_from_thread(self.loaded, [], str(exc))
+
+        self.run_worker(work, thread=True, exclusive=True)
+
+    def loaded(self, zones: list[str], error: str) -> None:
+        self.query_one("#domain-load", Button).disabled = False
+        if error:
+            self.say(error, error=True)
+            return
+        current = self.query_one("#zone", Select).value
+        self.set_zones(zones, current if isinstance(current, str) else self.cfg.zone)
+        self.say(f"{len(zones)} dominio(s) en la cuenta.")
+
+    def save(self) -> None:
+        provider = str(self.query_one("#provider", Select).value)
+        zone = self.query_one("#zone", Select).value
+        new = domains.DomainConfig(
+            provider=provider,
+            host=self.chosen_host(),
+            zone=zone if isinstance(zone, str) else "",
+            creds=self.creds(provider),
+            mode=str(self.query_one("#mode", Select).value),
+            email=self.cfg.email,
+        )
+        self.say("Comprobando…")
+        self.query_one("#domain-save", Button).disabled = True
+
+        def work() -> None:
+            try:
+                message = domains.check(new)
+                domains.save_config(new)
+                self.app.call_from_thread(self.done, message, True)
+            except Exception as exc:
+                self.app.call_from_thread(self.done, str(exc), False)
+
+        self.run_worker(work, thread=True, exclusive=True)
+
+    def done(self, message: str, ok: bool) -> None:
+        self.query_one("#domain-save", Button).disabled = False
+        if ok:
+            self.app.notify(message, title="Dominio guardado", timeout=8)
+            self.dismiss(True)
+            return
+        self.say(message, error=True)
 
 
 class RemoteControlTUI(App):
@@ -140,6 +309,21 @@ class RemoteControlTUI(App):
     #confirm-buttons { height: auto; align-horizontal: right; }
     #confirm-buttons Button { margin-left: 1; }
     #yes { background: #ef5350; color: #011627; text-style: bold; }
+    #domain-row { height: auto; }
+    #domain-text { width: 1fr; height: auto; }
+    #domain-title { text-style: bold; }
+    #domain-info { color: #8a9bb3; }
+    #domain-row Button { margin-left: 1; }
+    #domain { width: 64; height: auto; max-height: 90%; padding: 1 2; background: #0b2942; border: round #82aaff; }
+    #domain Input { background: #011627; }
+    #domain Input:focus { background: #1d3b53; }
+    #domain-buttons { height: auto; align-horizontal: right; margin-top: 1; }
+    #domain-buttons Button { margin-left: 1; }
+    #domain-result { margin-top: 1; color: #8a9bb3; }
+    #load-row { height: auto; margin: 1 0; }
+    #pick { height: auto; }
+    #preview { color: #7fdbca; margin-top: 1; }
+    #domain-result.error { color: #ffeb95; }
     ModalScreen { align: center middle; background: #011627 70%; }
     Footer { background: ansi_default; }
     """
@@ -151,6 +335,7 @@ class RemoteControlTUI(App):
         Binding("c", "copy_url", "Copiar URL"),
         Binding("o", "open_url", "Abrir"),
         Binding("a", "toggle_autostart", "Inicio automático"),
+        Binding("d", "domain", "Dominio"),
         Binding("q", "quit", "Salir"),
     ]
 
@@ -195,6 +380,12 @@ class RemoteControlTUI(App):
                         with Horizontal(id="auto-row"):
                             yield Static("Iniciar con el sistema", id="auto-title")
                             yield Switch(value=autostart.is_enabled(), id="autostart", animate=False)
+                    with Vertical(id="domain-card", classes="card"):
+                        with Horizontal(id="domain-row"):
+                            with Vertical(id="domain-text"):
+                                yield Static("Dominio propio", id="domain-title")
+                                yield Static("", id="domain-info")
+                            yield Button("Configurar", id="domain-open", compact=True)
                     with Vertical(id="share", classes="card"):
                         yield Static("URL pública", classes="label")
                         with Horizontal(classes="row"):
@@ -237,6 +428,7 @@ class RemoteControlTUI(App):
         with field.prevent(Input.Changed):
             field.value = saved
         self.refresh_password()
+        self.refresh_domain()
         self.refresh_state()
         self.set_interval(2, self.refresh_state)
 
@@ -281,6 +473,14 @@ class RemoteControlTUI(App):
         lock.update("🔒 Con contraseña" if text else "🔓 Sin contraseña")
         lock.set_classes("chip" if text else "chip warn")
 
+    def refresh_domain(self) -> None:
+        cfg = domains.load_config()
+        if cfg is None:
+            text = "Sin configurar: se usa una URL de trycloudflare.com"
+        else:
+            text = f"{cfg.host} · {domains.PROVIDERS.get(cfg.provider, cfg.provider)} · {domains.MODES.get(cfg.mode, cfg.mode)}"
+        self.query_one("#domain-info", Static).update(text)
+
     def paint_qr(self) -> None:
         if not self.url:
             return
@@ -323,6 +523,7 @@ class RemoteControlTUI(App):
             "open-url": self.action_open_url,
             "copy-local": lambda: self.copy(control.local_url(self.tunnel.port), "URL local copiada"),
             "open-local": lambda: self.open_url(control.local_url(self.tunnel.port)),
+            "domain-open": self.action_domain,
         }
         handler = actions.get(event.button.id or "")
         if handler:
@@ -380,9 +581,19 @@ class RemoteControlTUI(App):
         self.busy = False
         if error:
             self.notify(error.strip().splitlines()[0], title="No se pudo", severity="error", timeout=8)
+        elif self.tunnel.domain_warning:
+            self.notify(self.tunnel.domain_warning, title="Dominio propio", severity="warning", timeout=10)
         self.refresh_state()
         if url:
             self.notify("Túnel en línea", timeout=3)
+
+    def action_domain(self) -> None:
+        def done(changed: bool | None) -> None:
+            self.refresh_domain()
+            if changed and self.running:
+                self.notify("Apaga y enciende el túnel para usar el dominio.", timeout=6)
+
+        self.push_screen(DomainScreen(), done)
 
     def action_toggle_autostart(self) -> None:
         self.query_one("#autostart", Switch).value = not autostart.is_enabled()

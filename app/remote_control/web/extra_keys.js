@@ -5070,7 +5070,8 @@
         soundState.gain = soundState.ctx.createGain();
         soundState.gain.gain.value = soundVolume() / 100;
         soundState.gain.connect(soundState.ctx.destination);
-      } catch (_) {
+      } catch (err) {
+        soundState.error = String((err && err.message) || err);
         soundState.ctx = null;
         return null;
       }
@@ -5078,13 +5079,26 @@
     return soundState.ctx;
   }
 
+  // Resolves once audio can play (or not), and tells the server how it went.
   function unlockAudio() {
     var ctx = audioCtx();
-    if (ctx && ctx.state === "suspended")
-      ctx
-        .resume()
-        .then(reportSound)
-        .catch(function () {});
+    if (!ctx) {
+      soundState.error = "sin AudioContext";
+      reportSound();
+      return Promise.resolve(null);
+    }
+    if (ctx.state === "running") return Promise.resolve(ctx);
+    return ctx
+      .resume()
+      .then(function () {
+        reportSound();
+        return ctx;
+      })
+      .catch(function (err) {
+        soundState.error = String((err && err.message) || err);
+        reportSound();
+        return null;
+      });
   }
 
   // How this page is doing with the sounds, for the server's log
@@ -5101,6 +5115,8 @@
           played: soundState.played,
           vol: soundVolume(),
           hidden: document.hidden,
+          error: soundState.error || "",
+          rate: soundState.ctx ? soundState.ctx.sampleRate : 0,
         })
       );
     } catch (_) {}
@@ -5307,8 +5323,11 @@
     test.textContent = "Probar sonido";
     test.disabled = !on;
     test.addEventListener("click", function () {
-      unlockAudio();
-      setTimeout(ding, 60);
+      unlockAudio().then(function (ctx) {
+        if (!ctx) showToast("El navegador no deja reproducir audio en esta página");
+        ding();
+        setTimeout(reportSound, 600);
+      });
     });
     card.appendChild(test);
     box.appendChild(card);

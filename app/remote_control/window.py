@@ -22,7 +22,7 @@ from remote_control.gate import (
     without_spaces,
     write_password,
 )
-from remote_control import autostart, control
+from remote_control import autostart, control, domains
 from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
@@ -89,6 +89,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         canvas.append(self._build_url_card())
         canvas.append(self._build_qr_card())
         canvas.append(self._build_autostart())
+        canvas.append(self._build_domain())
         canvas.append(self._build_error())
 
         self.set_content(toolbar)
@@ -250,6 +251,259 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             return True
         self._toast("Se encenderá al iniciar sesión" if state else "Ya no se enciende al iniciar sesión")
         return False
+
+    # --- your own domain (domains.py) -----------------------------------------
+
+    def _build_domain(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        box.add_css_class("rc-card")
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        texts.set_hexpand(True)
+        texts.set_valign(Gtk.Align.CENTER)
+        title = Gtk.Label(label="Dominio propio", xalign=0)
+        title.add_css_class("rc-card-title")
+        texts.append(title)
+        self.domain_label = Gtk.Label(xalign=0, wrap=True)
+        self.domain_label.add_css_class("rc-hint-text")
+        texts.append(self.domain_label)
+        box.append(texts)
+        self.domain_btn = Gtk.Button(icon_name="emblem-system-symbolic")
+        self.domain_btn.set_tooltip_text("Configurar dominio")
+        self.domain_btn.add_css_class("rc-icon-btn")
+        self.domain_btn.set_valign(Gtk.Align.CENTER)
+        self.domain_btn.connect("clicked", lambda *_: self._show_domain_dialog())
+        box.append(self.domain_btn)
+        self._paint_domain()
+        return box
+
+    def _paint_domain(self) -> None:
+        cfg = domains.load_config()
+        if cfg is None:
+            self.domain_label.set_label("Sin configurar: se usa una URL de trycloudflare.com")
+            return
+        provider = domains.PROVIDERS.get(cfg.provider, cfg.provider)
+        self.domain_label.set_label(f"{cfg.host} · {provider} · {domains.MODES.get(cfg.mode, cfg.mode)}")
+
+    def _show_domain_dialog(self) -> None:
+        saved = domains.load_config()
+        cfg = saved or domains.DomainConfig(provider="namecom")
+        dialog = Adw.Dialog()
+        dialog.set_content_width(380)
+        dialog.set_follows_content_size(True)
+        # Our own colors, not the system theme's (style.css).
+        dialog.add_css_class("rc-sheet")
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.add_css_class("rc-dialog")
+        card.add_css_class("rc-domain-dialog")
+        card.set_size_request(360, -1)
+
+        title = Gtk.Label(label="Dominio propio")
+        title.add_css_class("rc-dialog-title")
+        card.append(title)
+        intro = Gtk.Label(
+            label="En un servidor con IP pública el dominio apunta directo a él, con HTTPS propio. "
+            "En una PC de casa redirige al túnel de Cloudflare.",
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+        )
+        intro.add_css_class("rc-dialog-body")
+        card.append(intro)
+
+        def field(label: str, widget: Gtk.Widget) -> Gtk.Widget:
+            wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            name = Gtk.Label(label=label, xalign=0)
+            name.add_css_class("rc-field-label")
+            wrap.append(name)
+            wrap.append(widget)
+            return wrap
+
+        # 1. Provider and its key.
+        provider_ids = list(domains.PROVIDERS)
+        provider = Gtk.DropDown.new_from_strings(list(domains.PROVIDERS.values()))
+        provider.set_selected(provider_ids.index(cfg.provider) if cfg.provider in provider_ids else 0)
+        card.append(field("Proveedor", provider))
+
+        creds_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.append(creds_box)
+        entries: dict[str, Gtk.Entry] = {}
+
+        load = Gtk.Button(label="Cargar mis dominios")
+        load.add_css_class("rc-btn-cancel")
+        card.append(load)
+
+        # 2. Which of the account's domains, and the name under it.
+        pick_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.append(pick_box)
+        zones: list[str] = []
+        zone_list = Gtk.StringList()
+        zone = Gtk.DropDown(model=zone_list)
+        pick_box.append(field("Dominio", zone))
+        sub = Gtk.Entry(placeholder_text="vacío = el dominio mismo")
+        sub.add_css_class("rc-field")
+        sub.add_css_class("rc-mono")
+        pick_box.append(field("Subdominio", sub))
+        preview = Gtk.Label(xalign=0, wrap=True)
+        preview.add_css_class("rc-hint-text")
+        pick_box.append(preview)
+
+        mode_ids = list(domains.MODES)
+        mode = Gtk.DropDown.new_from_strings(list(domains.MODES.values()))
+        mode.set_selected(mode_ids.index(cfg.mode) if cfg.mode in mode_ids else 0)
+        pick_box.append(field("Modo", mode))
+
+        result = Gtk.Label(wrap=True, xalign=0)
+        result.add_css_class("rc-hint-text")
+        result.set_visible(False)
+        card.append(result)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        buttons.set_homogeneous(True)
+        buttons.set_margin_top(6)
+        remove = Gtk.Button(label="Quitar" if saved else "Cancelar")
+        remove.add_css_class("rc-btn-cancel")
+        buttons.append(remove)
+        save = Gtk.Button(label="Guardar")
+        save.add_css_class("rc-btn-save")
+        buttons.append(save)
+        card.append(buttons)
+
+        def say(message: str, warn: bool = False) -> None:
+            result.set_label(message)
+            result.set_visible(bool(message))
+            if warn:
+                result.add_css_class("warn")
+            else:
+                result.remove_css_class("warn")
+
+        def chosen_host() -> str:
+            if not zones:
+                return ""
+            return domains.compose_host(sub.get_text(), zones[zone.get_selected()])
+
+        def paint_preview(*_args) -> None:
+            host = chosen_host()
+            preview.set_label(f"Quedará en {host}" if host else "")
+
+        def set_zones(items: list[str], selected: str = "") -> None:
+            zones[:] = items
+            zone_list.splice(0, zone_list.get_n_items(), items)
+            if selected in items:
+                zone.set_selected(items.index(selected))
+            pick_box.set_visible(bool(items))
+            save.set_sensitive(bool(items))
+            paint_preview()
+
+        def paint_creds(*_args) -> None:
+            # Keep what was typed when switching providers back and forth.
+            for key, entry in entries.items():
+                cfg.creds[key] = entry.get_text()
+            entries.clear()
+            child = creds_box.get_first_child()
+            while child is not None:
+                creds_box.remove(child)
+                child = creds_box.get_first_child()
+            for key, label, secret, _required in domains.FIELDS[provider_ids[provider.get_selected()]]:
+                entry = Gtk.Entry(text=cfg.creds.get(key, ""))
+                entry.add_css_class("rc-field")
+                entry.add_css_class("rc-mono")
+                if secret:
+                    entry.set_visibility(False)
+                    entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+                entries[key] = entry
+                creds_box.append(field(label, entry))
+
+        def on_provider(*_args) -> None:
+            paint_creds()
+            # Another account: its domains have to be loaded again.
+            set_zones([])
+            say("")
+
+        def on_load(*_args) -> None:
+            pid = provider_ids[provider.get_selected()]
+            creds = {key: entry.get_text().strip() for key, entry in entries.items()}
+            load.set_sensitive(False)
+            say("Consultando tu cuenta…")
+
+            def work() -> None:
+                try:
+                    items = domains.account_domains(pid, creds)
+                    GLib.idle_add(loaded, items, "")
+                except Exception as exc:
+                    GLib.idle_add(loaded, [], str(exc))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def loaded(items: list[str], error: str) -> bool:
+            load.set_sensitive(True)
+            if error:
+                say(error, warn=True)
+                return False
+            set_zones(items, zones[zone.get_selected()] if zones else cfg.zone)
+            say(f"{len(items)} dominio(s) en la cuenta.")
+            return False
+
+        def on_remove(*_args) -> None:
+            if domains.load_config():
+                domains.clear_config()
+                self._toast("Dominio quitado: vuelve trycloudflare.com")
+                self._paint_domain()
+            dialog.close()
+
+        def on_save(*_args) -> None:
+            new = domains.DomainConfig(
+                provider=provider_ids[provider.get_selected()],
+                host=chosen_host(),
+                zone=zones[zone.get_selected()],
+                creds={key: entry.get_text().strip() for key, entry in entries.items()},
+                mode=mode_ids[mode.get_selected()],
+                email=cfg.email,
+            )
+            save.set_sensitive(False)
+            say("Comprobando…")
+
+            def work() -> None:
+                try:
+                    message = domains.check(new)
+                    domains.save_config(new)
+                    GLib.idle_add(done, message, True)
+                except Exception as exc:
+                    GLib.idle_add(done, str(exc), False)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def done(message: str, ok: bool) -> bool:
+            save.set_sensitive(True)
+            if ok:
+                self._paint_domain()
+                running = self.tunnel.status().running
+                self._toast("Dominio guardado" + (": apaga y enciende el túnel para usarlo" if running else ""), timeout=4)
+                dialog.close()
+                return False
+            say(message, warn=True)
+            return False
+
+        paint_creds()
+        # Editing a saved one: its domain is there without asking the API again.
+        if saved and saved.zone:
+            set_zones([saved.zone], saved.zone)
+            sub.set_text(saved.host[: -len(saved.zone)].rstrip(".") if saved.host.endswith(saved.zone) else "")
+        else:
+            sub.set_text("rc")
+            set_zones([])
+        provider.connect("notify::selected", on_provider)
+        zone.connect("notify::selected", paint_preview)
+        sub.connect("changed", paint_preview)
+        load.connect("clicked", on_load)
+        remove.connect("clicked", on_remove)
+        save.connect("clicked", on_save)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(760)
+        scroll.set_child(card)
+        dialog.set_child(scroll)
+        dialog.present(self)
 
     # --- URLs (shown while the tunnel is up) ---------------------------------
 
@@ -414,6 +668,8 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         else:
             self._set_status("busy", "Túnel ok · DNS…")
             self._toast("URL lista; el DNS de esta PC aún no")
+        if self.tunnel.domain_warning:
+            self._set_error(self.tunnel.domain_warning)
         return False
 
     def _on_start_failed(self, message: str) -> bool:
