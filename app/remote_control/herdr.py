@@ -257,9 +257,11 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     if len(fresh) != len(live) or len(owners) != len(fresh):
         active = read_active()
         for pid in live - fresh.keys():
-            fresh[pid] = active
+            # A CLI started there first already noted its owner (profiles.zsh).
+            fresh[pid] = _read_pin(pid, active)
         _save_owners(fresh)
         _drop_dead_pins(live)
+    _write_missing_pins(fresh)
     candidates = []
     for layout in snap.get("layouts") or []:
         if isinstance(layout, dict) and (ids := _shape_match(boxes, _layout_panes(layout))):
@@ -397,10 +399,10 @@ def _drop_dead_holds(live: set[str]) -> None:
 
 
 # --- changing whose a pane is ----------------------------------------------------
-# Clicking a pane's mark picks another profile for it. The pick is pinned in
-# pane-profile/<pane id>, which the shell wrapper (web/profiles.zsh) reads
-# through HERDR_PANE_ID: every CLI started in that pane then runs with that
-# profile's account, whichever device typed last. A Claude waiting for input
+# Clicking a pane's mark picks another profile for it. Every pane's owner is
+# kept in pane-profile/<pane id>, which the shell wrapper (web/profiles.zsh)
+# reads through HERDR_PANE_ID: every CLI started in that pane runs with its
+# owner's account, whichever device typed last. A Claude waiting for input
 # in the pane comes back right away with the new account, in the same chat
 # (rc_sharechats.py links it into every profile).
 
@@ -414,14 +416,35 @@ def _pins_dir() -> Path:
     return base_dir() / "pane-profile"
 
 
+def _read_pin(pane: str, default: str) -> str:
+    try:
+        return (_pins_dir() / pane).read_text(encoding="utf-8").strip()
+    except OSError:
+        return default
+
+
+def _write_missing_pins(owners: dict[str, str]) -> None:
+    """Every known pane's owner, where the shell wrapper reads it."""
+    try:
+        _pins_dir().mkdir(parents=True, exist_ok=True)
+        have = {p.name for p in _pins_dir().iterdir()}
+    except OSError:
+        return
+    for pane, prof in owners.items():
+        if pane not in have and PANE_RE.match(pane):
+            try:
+                (_pins_dir() / pane).write_text(prof + "\n", encoding="utf-8")
+            except OSError:
+                pass
+
+
 def _drop_dead_pins(live: set[str]) -> None:
     try:
         pins = list(_pins_dir().iterdir())
     except OSError:
         return
     for pin in pins:
-        # Tab pins (set_tab_owner) are not herdr panes.
-        if PANE_RE.match(pin.name) and pin.name not in live:
+        if not PANE_RE.match(pin.name) or pin.name not in live:
             try:
                 pin.unlink()
             except OSError:
@@ -531,8 +554,8 @@ def set_pane_owner(pane: object, prof: object) -> dict:
 # A plain tab (no herdr) has one owner: @rc_prof on its tmux session. Its
 # devices size the tab, everyone else attaches with ignore-size and sees it
 # scaled (tab_session.sh), and its CLIs run with the owner's account
-# (pane-profile/<tab>, read by web/profiles.zsh). tab_session.sh notes each
-# client's profile in @rc_cprof_<tty> so their flags can follow the change.
+# (web/profiles.zsh reads @rc_prof). tab_session.sh notes each client's
+# profile in @rc_cprof_<tty> so their flags can follow the change.
 
 # Output within this many seconds: the CLI in the tab is busy, leave it be.
 TAB_BUSY_S = 4
@@ -540,18 +563,6 @@ TAB_BUSY_S = 4
 
 def _client_key(client: str) -> str:
     return "@rc_cprof_" + re.sub(r"[^a-z0-9]", "_", client)
-
-
-def _sweep_tab_pins(live: set[str]) -> None:
-    from .history import TAB_RE
-
-    try:
-        pins = list(_pins_dir().iterdir())
-    except OSError:
-        return
-    for pin in pins:
-        if TAB_RE.match(pin.name) and pin.name not in live:
-            pin.unlink(missing_ok=True)
 
 
 def set_tab_owner(tab: object, prof: object) -> dict:
@@ -573,13 +584,6 @@ def set_tab_owner(tab: object, prof: object) -> dict:
     if parts[1] == "herdr":
         return {"ok": False, "error": "En herdr se cambia el usuario de cada panel"}
     _tmux(TMUX_SOCKET, "set-option", "-t", f"={tab}:", "@rc_prof", "p" + prof)
-    try:
-        _pins_dir().mkdir(parents=True, exist_ok=True)
-        (_pins_dir() / tab).write_text(prof + "\n", encoding="utf-8")
-    except OSError:
-        return {"ok": False, "error": "No se pudo guardar"}
-    listing = _tmux(TMUX_SOCKET, "list-sessions", "-F", "#{session_name}", text=True)
-    _sweep_tab_pins(set(listing.stdout.split()) if listing.returncode == 0 else {tab})
     # The new owner's devices size the tab; everyone else's only watch it.
     clients = _tmux(TMUX_SOCKET, "list-clients", "-t", f"={tab}", "-F", "#{client_name}\t#{client_width}\t#{client_height}", text=True)
     owner_size = None

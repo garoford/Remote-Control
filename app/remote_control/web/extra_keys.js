@@ -6759,6 +6759,20 @@
 
   var UI_TINT_KEYS = ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb", "--rc-blue", "--rc-blue-rgb", "--rc-teal", "--rc-teal-rgb", "--rc-on", "--rc-on-rgb"];
 
+  // With the theme's own background, or a grey one, the accent has no hue to
+  // take: it is the text color (black on light, white on dark), not Night
+  // Owl's blue and jade.
+  var MONO_ACCENT = { light: [17, 18, 20], dark: [242, 243, 245] };
+
+  function setAccents(style, accent, accent2) {
+    style.setProperty("--rc-blue", rgbHex(accent));
+    style.setProperty("--rc-blue-rgb", accent.join(" "));
+    style.setProperty("--rc-teal", rgbHex(accent2));
+    style.setProperty("--rc-teal-rgb", accent2.join(" "));
+    style.setProperty("--rc-on", rgbHex(accent2));
+    style.setProperty("--rc-on-rgb", accent2.join(" "));
+  }
+
   // The accent (marks, active tab, buttons, chips) always follows the chosen
   // color or image. "Color adaptativo" also tints the surfaces (bars, panels).
   function paintUiTint() {
@@ -6769,6 +6783,8 @@
       UI_TINT_KEYS.forEach(function (k) {
         style.removeProperty(k);
       });
+      var mono = MONO_ACCENT[themeMode() === "light" ? "light" : "dark"];
+      setAccents(style, mono, mono);
       return null;
     }
     var base = rgbHsl(hexRgb(t.tint));
@@ -6785,24 +6801,19 @@
       var ls = sat < 0.08 ? 0.08 : Math.max(0.6, Math.min(sat, 0.85));
       surf = [hslRgb(hue, ls, 0.76), hslRgb(hue, ls, 0.8), hslRgb(hue, ls, 0.7)];
       var as = acc[1] < 0.12 ? 0 : Math.max(0.5, acc[1]);
-      accent = as ? hslRgb(acc[0], as, 0.42) : [47, 127, 208];
-      accent2 = as ? hslRgb(acc2Hue, as, 0.36) : [42, 162, 152];
+      accent = as ? hslRgb(acc[0], as, 0.42) : MONO_ACCENT.light;
+      accent2 = as ? hslRgb(acc2Hue, as, 0.36) : MONO_ACCENT.light;
     } else {
       var ds = Math.min(sat, 0.55);
       surf = [hslRgb(hue, ds, 0.075), hslRgb(hue, ds, 0.13), hslRgb(hue, ds, 0.2)];
       var das = acc[1] < 0.12 ? 0 : Math.max(0.55, acc[1]);
-      accent = das ? hslRgb(acc[0], das, 0.7) : [130, 170, 255];
-      accent2 = das ? hslRgb(acc2Hue, das, 0.72) : [127, 219, 202];
+      accent = das ? hslRgb(acc[0], das, 0.7) : MONO_ACCENT.dark;
+      accent2 = das ? hslRgb(acc2Hue, das, 0.72) : MONO_ACCENT.dark;
     }
     var set = function (k, v) {
       style.setProperty(k, v);
     };
-    set("--rc-blue", rgbHex(accent));
-    set("--rc-blue-rgb", accent.join(" "));
-    set("--rc-teal", rgbHex(accent2));
-    set("--rc-teal-rgb", accent2.join(" "));
-    set("--rc-on", rgbHex(accent2));
-    set("--rc-on-rgb", accent2.join(" "));
+    setAccents(style, accent, accent2);
     if (!surfaces) {
       ["--rc-text", "--rc-text-rgb", "--rc-muted", "--rc-shade", "--rc-bg", "--rc-surface", "--rc-raised", "--rc-surface-rgb"].forEach(function (k) {
         style.removeProperty(k);
@@ -7052,6 +7063,70 @@
   // {catalog: id} or {video: id}. It becomes the background once ready.
   var bgWant = null;
   var bgUpload = null;
+  // Preset clips per category: pages of 4 x 2, the last slot of the last
+  // page is "Cargar más" (another block from backgrounds.discover_more).
+  var BG_PAGE = 8;
+  // Clips per "Cargar más" (backgrounds.MORE_BLOCK).
+  var BG_PAGE_MORE = 9;
+  var bgMore = {};
+  var bgPage = {};
+  var bgLoadingMore = {};
+
+  function loadMoreClips(group) {
+    if (bgLoadingMore[group]) return;
+    bgLoadingMore[group] = true;
+    paintSettings();
+    fetch("/rc-bg/more", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group: group }), cache: "no-store" })
+      .then(function (resp) {
+        return resp.json().catch(function () {
+          return {};
+        });
+      })
+      .then(function (r) {
+        bgLoadingMore[group] = false;
+        if (!r || !r.ok) {
+          showToast((r && r.error) || "No se pudieron cargar más fondos");
+          paintSettings();
+          return;
+        }
+        takeBgVideos(r);
+        var added = Array.isArray(r.added) ? r.added : [];
+        if (!added.length) showToast("No hay más fondos en esta categoría");
+        else {
+          // Open the page where the new block starts.
+          var items = bgCatalog.filter(function (c) {
+            return c.group === group;
+          });
+          var at = items.findIndex(function (c) {
+            return c.id === added[0];
+          });
+          if (at >= 0) bgPage[group] = Math.floor(at / BG_PAGE);
+        }
+        paintSettings();
+      })
+      .catch(function () {
+        bgLoadingMore[group] = false;
+        showToast("Sin conexión");
+        paintSettings();
+      });
+  }
+
+  function moreTile(group) {
+    var busy = !!bgLoadingMore[group];
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "rc-look-tile is-upload is-more" + (busy ? " is-busy" : "");
+    b.title = "Buscar " + BG_PAGE_MORE + " fondos más";
+    b.innerHTML =
+      '<span class="rc-look-up-icon"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>';
+    b.appendChild(document.createElement("span")).textContent = busy ? "Buscando…" : "Cargar más";
+    b.disabled = busy;
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      loadMoreClips(group);
+    });
+    return b;
+  }
   var GEAR_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 1.8h2.8l.4 1.8 1.2.7 1.8-.6 1.4 2.4-1.4 1.3v1.2l1.4 1.3-1.4 2.4-1.8-.6-1.2.7-.4 1.8H6.6l-.4-1.8-1.2-.7-1.8.6-1.4-2.4 1.4-1.3V7.4L1.8 6.1l1.4-2.4 1.8.6 1.2-.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
   var CHECK_ICON =
@@ -7080,6 +7155,7 @@
     if (!payload) return;
     if (Array.isArray(payload.videos)) bgVideos = payload.videos;
     if (Array.isArray(payload.catalog)) bgCatalog = payload.catalog;
+    if (payload.catalogMore && typeof payload.catalogMore === "object") bgMore = payload.catalogMore;
     if (bgWant) {
       var hit = null;
       var failed = "";
@@ -7678,17 +7754,62 @@
       ["anime", "Anime"],
       ["naturaleza", "Naturaleza"],
     ].forEach(function (group) {
+      var key = group[0];
       var items = bgCatalog.filter(function (c) {
-        return c.group === group[0];
+        return c.group === key;
       });
       if (!items.length) return;
-      var sub = document.createElement("div");
-      sub.className = "rc-look-subtitle";
-      sub.textContent = group[1];
-      anim.appendChild(sub);
+      var slots = items.slice();
+      if (bgMore[key] !== false) slots.push(null);
+      var pages = Math.max(1, Math.ceil(slots.length / BG_PAGE));
+      if (bgPage[key] === undefined) {
+        // First look: the page holding this profile's clip.
+        var mine = items.findIndex(function (c) {
+          return look.kind === "video" && !!c.video && c.video === look.value;
+        });
+        bgPage[key] = mine >= 0 ? Math.floor(mine / BG_PAGE) : 0;
+      }
+      var page = Math.min(Math.max(0, bgPage[key]), pages - 1);
+      bgPage[key] = page;
+      var head = document.createElement("div");
+      head.className = "rc-look-subtitle";
+      head.appendChild(document.createElement("span")).textContent = group[1];
+      if (pages > 1) {
+        var pager = document.createElement("span");
+        pager.className = "rc-look-pager";
+        var prev = document.createElement("button");
+        prev.type = "button";
+        prev.textContent = "‹";
+        prev.setAttribute("aria-label", "Página anterior de " + group[1]);
+        prev.disabled = page === 0;
+        var count = document.createElement("span");
+        count.textContent = page + 1 + " / " + pages;
+        var next = document.createElement("button");
+        next.type = "button";
+        next.textContent = "›";
+        next.setAttribute("aria-label", "Página siguiente de " + group[1]);
+        next.disabled = page >= pages - 1;
+        prev.addEventListener("click", function () {
+          bgPage[key] = page - 1;
+          paintSettings();
+        });
+        next.addEventListener("click", function () {
+          bgPage[key] = page + 1;
+          paintSettings();
+        });
+        pager.appendChild(prev);
+        pager.appendChild(count);
+        pager.appendChild(next);
+        head.appendChild(pager);
+      }
+      anim.appendChild(head);
       var grid = document.createElement("div");
-      grid.className = "rc-look-grid is-images";
-      items.forEach(function (c) {
+      grid.className = "rc-look-grid is-images is-paged";
+      slots.slice(page * BG_PAGE, page * BG_PAGE + BG_PAGE).forEach(function (c) {
+        if (c === null) {
+          grid.appendChild(moreTile(key));
+          return;
+        }
         var on = look.kind === "video" && !!c.video && look.value === c.video;
         var tile = lookTile("is-image is-video", c.title, on, function () {
           pickCatalogVideo(c);

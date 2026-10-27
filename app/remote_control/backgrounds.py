@@ -21,6 +21,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MAX_BYTES = 15 * 1024 * 1024
@@ -170,6 +171,67 @@ CATALOG = (
     _mixkit("tormenta", "Tormenta", "naturaleza", 47948, 720),
     _mixkit("mar", "Mar turquesa", "naturaleza", 42498, 1080),
 )
+# "Cargar más" hands out the anime clips in blocks from this vetted bank
+# (Pixabay blocks servers from its search; its CDN serves the files fine).
+# Landscape, no letterbox, no franchise characters.
+ANIME_POOL = (
+    _pixabay("anime-90408", "Tren al atardecer", "2021/10/01/90408-626004752"),
+    _pixabay("anime-91562", "Lago al atardecer", "2021/10/10/91562-629172467"),
+    _pixabay("anime-138370", "Danza en el estanque", "2022/11/09/138370-769235235"),
+    _pixabay("anime-143782", "Pausa de estudio", "2022/12/21/143782-784138267"),
+    _pixabay("anime-179909", "Cuarto de artista", "2023/09/10/179909-862981824"),
+    _pixabay("anime-202600", "Paraguas en la lluvia", "2024/03/01/202600-918484146"),
+    _pixabay("anime-204056", "Música y apuntes", "2024/03/13/204056-923134012"),
+    _pixabay("anime-205733", "Lluvia de otoño", "2024/03/26/205733-927672950"),
+    _pixabay("anime-214500", "Estudio nocturno", "2024/05/30/214500"),
+    _pixabay("anime-215407", "Lámpara y lluvia", "2024/06/05/215407"),
+    _pixabay("anime-229513", "Noche estrellada", "2024/09/03/229513"),
+    _pixabay("anime-265641", "Linterna", "2025/03/18/265641"),
+    _pixabay("anime-267772", "Audífonos", "2025/03/26/267772"),
+    _pixabay("anime-270470", "Bajo un paraguas", "2025/04/07/270470"),
+    _pixabay("anime-270562", "Programando", "2025/04/07/270562"),
+    _pixabay("anime-285203", "Muro de grafiti", "2025/06/11/285203"),
+    _pixabay("anime-285225", "Calle del Fuji", "2025/06/11/285225"),
+    _pixabay("anime-285240", "Cielo nocturno", "2025/06/11/285240"),
+    _pixabay("anime-285242", "Paseo al atardecer", "2025/06/11/285242"),
+    _pixabay("anime-285245", "Contemplación", "2025/06/11/285245"),
+    _pixabay("anime-285246", "Vista estrellada", "2025/06/11/285246"),
+    _pixabay("anime-270983", "Cabaña acogedora", "2025/04/09/270983"),
+    _pixabay("anime-309388", "Tarde con un gato", "2025/10/12/309388"),
+    _pixabay("anime-248092", "Juegos retro", "2024/12/21/248092"),
+    _pixabay("anime-265816", "Estudio con laptop", "2025/03/18/265816"),
+    _pixabay("anime-265815", "Audífonos de noche", "2025/03/18/265815"),
+    _pixabay("anime-323002", "Mirada al atardecer", "2025/12/19/323002"),
+    _pixabay("anime-243342", "Café nevado", "2024/11/26/243342"),
+    _pixabay("anime-379720", "Laptop y gato", "2026/09/29/379720"),
+    _pixabay("anime-379718", "Estudio bajo la lluvia", "2026/09/29/379718"),
+    _pixabay("anime-376049", "Tormenta en la ventana", "2026/09/13/376049"),
+    _pixabay("anime-376046", "Trabajo en pareja", "2026/09/13/376046"),
+    _pixabay("anime-204238", "Habitación soleada", "2024/03/15/204238-923909572"),
+    _pixabay("anime-270507", "Soñando despierto", "2025/04/07/270507"),
+    _pixabay("anime-104373", "Luna brillante", "2022/01/14/104373-666197752"),
+    _pixabay("anime-247183", "Navidad lofi", "2024/12/17/247183"),
+    _pixabay("anime-296693", "Guitarra en la nieve", "2025/08/11/296693"),
+    _pixabay("anime-359835", "Siesta con gato", "2026/06/21/359835"),
+    _pixabay("anime-246242", "Gato junto al fuego", "2024/12/11/246242"),
+    _pixabay("anime-376431", "Balcón de noche", "2026/09/15/376431"),
+    _pixabay("anime-379717", "Estudio con gato", "2026/09/29/379717"),
+    _pixabay("anime-376047", "Atardecer en el escritorio", "2026/09/13/376047"),
+    _pixabay("anime-376044", "Noche de trabajo lluviosa", "2026/09/13/376044"),
+    _pixabay("anime-330219", "Restaurante al atardecer", "2026/01/25/330219"),
+    _pixabay("anime-376051", "Restaurante del lago", "2026/09/13/376051"),
+    _pixabay("anime-331618", "Café de noche", "2026/02/01/331618"),
+)
+# "Cargar más" for the rest searches Mixkit, tag after tag, page after page.
+MIXKIT_TAGS = {
+    "lofi": ("rain-window", "night-city", "rain", "city-lights", "coffee-shop", "neon-lights"),
+    "naturaleza": ("nature", "forest", "ocean", "clouds", "waterfall", "mountain", "beach", "sunset", "snow", "river"),
+}
+MORE_BLOCK = 9
+# Pages read per "Cargar más" at most: a tag full of clips we already have
+# should not keep the request going for long.
+MORE_MAX_PAGES = 6
+MIXKIT_PAGES_PER_TAG = 5
 USER_AGENT = "Mozilla/5.0 Remote-Control"
 THUMB_MAX_BYTES = 20 * 1024 * 1024
 # JPEG wants full-range color; some clips (Pixabay's) are tagged limited range.
@@ -184,7 +246,143 @@ _thumb_lock = threading.Lock()
 
 
 def _catalog_item(cid: str) -> tuple | None:
-    return next((item for item in CATALOG if item[0] == cid), None)
+    return next((item for item in _all_clips() if item[0] == cid), None)
+
+
+# --- more clips on demand ("Cargar más") -------------------------------------------
+# discovered.json: {"items": [[id, title, group, url, thumb], ...],
+#                   "cursor": {group: [tag index, page]}, "done": [group, ...]}
+_discover_lock = threading.Lock()
+
+
+def _discovered() -> dict:
+    try:
+        data = json.loads((folder() / "discovered.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    items = [tuple(i) for i in data.get("items") or [] if isinstance(i, list) and len(i) == 5 and all(isinstance(x, str) for x in i)]
+    cursor = data.get("cursor") if isinstance(data.get("cursor"), dict) else {}
+    done = [g for g in data.get("done") or [] if isinstance(g, str)]
+    return {"items": items, "cursor": cursor, "done": done}
+
+
+def _save_discovered(data: dict) -> None:
+    base = folder()
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = base / ".discovered.json.tmp"
+    tmp.write_text(json.dumps({"items": [list(i) for i in data["items"]], "cursor": data["cursor"], "done": data["done"]}), encoding="utf-8")
+    os.replace(tmp, base / "discovered.json")
+
+
+def _all_clips() -> list[tuple]:
+    return list(CATALOG) + _discovered()["items"]
+
+
+def more_available() -> dict[str, bool]:
+    done = set(_discovered()["done"])
+    groups = {item[2] for item in CATALOG}
+    return {g: g not in done for g in sorted(groups)}
+
+
+def mixkit_cards(html: str) -> list[tuple[str, str, bool]]:
+    """(id, title, landscape) of each clip on a Mixkit listing page."""
+    cards = []
+    for chunk in html.split('data-item-grid--video-player-item-id-value="')[1:]:
+        vid = chunk.split('"', 1)[0]
+        if not vid.isdigit():
+            continue
+        # Masonry pages have an overlay title; grid pages only the link and the alt text.
+        title = (
+            re.search(r'overlay-video-title">\s*(.*?)\s*<', chunk, re.S)
+            or re.search(r'overlay-link">\s*(.*?)\s*</a>', chunk, re.S)
+            or re.search(r'alt="([^"]+?)\.?"', chunk)
+        )
+        size = re.search(r'width="(\d+)" height="(\d+)"', chunk)
+        landscape = not size or int(size.group(1)) > int(size.group(2)) * 1.3
+        cards.append((vid, html_unescape(title.group(1)) if title else f"Clip {vid}", landscape))
+    return cards
+
+
+def html_unescape(text: str) -> str:
+    import html
+
+    return " ".join(html.unescape(text).split())[:60]
+
+
+def _mixkit_video_url(vid: str) -> str:
+    """The best of 1080p / 720p that exists for a Mixkit clip, or ""."""
+    for res in (1080, 720):
+        url = f"https://assets.mixkit.co/videos/{vid}/{vid}-{res}.mp4"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="HEAD")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                size = int(resp.headers.get("Content-Length") or 0)
+            if 0 < size <= VIDEO_MAX_BYTES:
+                return url
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def _fetch_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read(4 * 1024 * 1024).decode("utf-8", "replace")
+
+
+def discover_more(group: str) -> dict:
+    """Add the next MORE_BLOCK clips of a group to the catalog."""
+    if group not in more_available():
+        raise BackgroundError("Esa categoría no existe")
+    with _discover_lock:
+        data = _discovered()
+        known = {item[3] for item in list(CATALOG) + data["items"]} | {item[0] for item in list(CATALOG) + data["items"]}
+        added: list[tuple] = []
+        if group == "anime":
+            for item in ANIME_POOL:
+                if len(added) >= MORE_BLOCK:
+                    break
+                if item[0] not in known and item[3] not in known:
+                    added.append(item)
+            left = [i for i in ANIME_POOL if i[0] not in known and i not in added]
+            if not left and group not in data["done"]:
+                data["done"].append(group)
+        else:
+            tags = MIXKIT_TAGS.get(group, ())
+            tag_i, page = (data["cursor"].get(group) or [0, 1])[:2]
+            pages = 0
+            while len(added) < MORE_BLOCK and tag_i < len(tags) and pages < MORE_MAX_PAGES:
+                pages += 1
+                try:
+                    cards = mixkit_cards(_fetch_text(f"https://mixkit.co/free-stock-video/{tags[tag_i]}/?page={page}"))
+                except OSError:
+                    cards = []
+                fresh = [c for c in cards if c[2] and f"mk-{c[0]}" not in known]
+                while fresh and len(added) < MORE_BLOCK:
+                    batch, fresh = fresh[: MORE_BLOCK - len(added) + 3], fresh[MORE_BLOCK - len(added) + 3 :]
+                    # Which resolution each clip has: HEAD requests, side by side.
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        urls = list(pool.map(_mixkit_video_url, [c[0] for c in batch]))
+                    for (vid, title, _), url in zip(batch, urls):
+                        if len(added) >= MORE_BLOCK:
+                            break
+                        if not url or url in known:
+                            continue
+                        item = (f"mk-{vid}", title, group, url, f"https://assets.mixkit.co/videos/{vid}/{vid}-thumb-360-0.jpg")
+                        added.append(item)
+                        known.update((item[0], url))
+                if not cards or (len(added) < MORE_BLOCK and page >= MIXKIT_PAGES_PER_TAG):
+                    tag_i, page = tag_i + 1, 1
+                elif len(added) < MORE_BLOCK:
+                    page += 1
+            data["cursor"][group] = [tag_i, page]
+            if tag_i >= len(tags) and group not in data["done"]:
+                data["done"].append(group)
+        data["items"].extend(added)
+        _save_discovered(data)
+    return {"ok": True, "added": [item[0] for item in added]}
 
 
 def sniff_video(head: bytes) -> str:
@@ -295,7 +493,7 @@ def catalog() -> list[dict]:
     """The preset clips: {id, title, group, video, state, progress}."""
     mapping = _catalog_map()
     out = []
-    for cid, title, group, _url, _thumb in CATALOG:
+    for cid, title, group, _url, _thumb in _all_clips():
         entry = {"id": cid, "title": title, "group": group, "video": "", "state": "", "progress": 0.0}
         with _jobs_lock:
             downloading = _downloads.get(cid)

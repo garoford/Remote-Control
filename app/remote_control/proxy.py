@@ -845,6 +845,14 @@ class Sidecar:
 
     # --- terminal backgrounds ------------------------------------------------
 
+    def _backgrounds_payload(self) -> dict:
+        return {
+            "images": backgrounds.list_images(),
+            "videos": backgrounds.list_videos(),
+            "catalog": backgrounds.catalog(),
+            "catalogMore": backgrounds.more_available(),
+        }
+
     def _serve_backgrounds(
         self, conn: socket.socket, method: str, name: str, body: bytes, query: dict, headers: dict[str, str]
     ) -> None:
@@ -852,9 +860,20 @@ class Sidecar:
             return (query.get(key) or [""])[0]
 
         if not name and method == "GET":
-            self._json(
-                conn, {"images": backgrounds.list_images(), "videos": backgrounds.list_videos(), "catalog": backgrounds.catalog()}
-            )
+            self._json(conn, self._backgrounds_payload())
+            return
+        if name == "more" and method == "POST":
+            try:
+                req = json.loads(body.decode("utf-8") or "{}")
+                group = str(req.get("group") or "") if isinstance(req, dict) else ""
+                result = backgrounds.discover_more(group)
+            except (UnicodeDecodeError, ValueError):
+                self._json(conn, {"ok": False, "error": "bad request"}, "400 Bad Request")
+                return
+            except backgrounds.BackgroundError as exc:
+                self._json(conn, {"ok": False, "error": str(exc)}, "400 Bad Request")
+                return
+            self._json(conn, {**result, **self._backgrounds_payload()})
             return
         if name == "upload" and method == "PUT":
             try:
@@ -905,11 +924,7 @@ class Sidecar:
             return
         if name and method == "DELETE":
             ok = delete_background(name)
-            self._json(
-                conn,
-                {"ok": ok, "images": backgrounds.list_images(), "videos": backgrounds.list_videos(), "catalog": backgrounds.catalog()},
-                "200 OK" if ok else "404 Not Found",
-            )
+            self._json(conn, {"ok": ok, **self._backgrounds_payload()}, "200 OK" if ok else "404 Not Found")
             return
         if name and method in ("GET", "HEAD"):
             path = backgrounds.path_of(name)

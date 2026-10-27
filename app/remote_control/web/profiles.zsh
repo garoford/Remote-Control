@@ -23,21 +23,30 @@ export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
 _rc_cli() {
   local cli="$1"
   shift
-  # An explicit RC_PROFILE wins, empty included (the primary user): an agent
-  # launching another one picks its account (agent_context.py), and a CLI's
-  # own shells keep the account it runs with.
-  # Next, a herdr pane or a tab someone gave to a profile (the menu on its
-  # mark or dot, herdr.py).
-  local id="${RC_PROFILE-}" home="" pin=""
-  if [[ -n "${HERDR_PANE_ID-}" ]]; then
+  # The account is the terminal's owner's, never the device that typed last
+  # (that only decides who owns the terminals a device opens):
+  # - an explicit RC_PROFILE, empty included (the primary user): an agent
+  #   launching another one picks its account (agent_context.py), and a
+  #   CLI's own shells keep the account it runs with;
+  # - a herdr pane: its owner, the profile on its mark (pane-profile/<pane>,
+  #   herdr.py). A pane with no owner yet is brand new: it belongs to the
+  #   profile that just opened it, the active one, noted here for good;
+  # - a Remote Control tab: its owner, @rc_prof on its tmux session;
+  # - any other terminal: the primary user.
+  local id="" home="" pin=""
+  if (( ${+RC_PROFILE} )); then
+    id="$RC_PROFILE"
+  elif [[ "${HERDR_PANE_ID-}" =~ '^w[0-9A-Za-z]+:p[0-9A-Za-z]+$' ]]; then
     pin="$_RC_BASE/pane-profile/$HERDR_PANE_ID"
+    if [[ -f "$pin" ]]; then
+      IFS= read -r id < "$pin"
+    else
+      [[ -r "$_RC_ACTIVE" ]] && IFS=$'\t' read -r id home < "$_RC_ACTIVE"
+      mkdir -p "${pin:h}" 2>/dev/null && print -r -- "$id" > "$pin" 2>/dev/null
+    fi
   elif [[ "${TMUX-}" == */cf-remote,* ]]; then
-    pin="$_RC_BASE/pane-profile/$(tmux display-message -p '#S' 2>/dev/null)"
-  fi
-  if (( ! ${+RC_PROFILE} )) && [[ -f "$pin" && -r "$pin" ]]; then
-    IFS= read -r id < "$pin"
-  elif (( ! ${+RC_PROFILE} )) && [[ -r "$_RC_ACTIVE" ]]; then
-    IFS=$'\t' read -r id home < "$_RC_ACTIVE"
+    id="$(tmux show-options -qv @rc_prof 2>/dev/null)"
+    id="${id#p}"
   fi
   if [[ -n "$id" ]]; then
     home="$_RC_BASE/profiles/$id"

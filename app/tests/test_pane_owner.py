@@ -130,23 +130,32 @@ class WrapperPinTests(unittest.TestCase):
         (self.base / "pane-profile" / "w1:p2").write_text("\n")
         self.assertEqual(self.run_claude("w1:p2"), f"|{self.home}")
 
-    def test_pinned_tab(self) -> None:
+    def fake_tmux(self, owner: str) -> None:
         fake = self.home / "bin" / "tmux"
-        fake.write_text('#!/bin/sh\necho rcabcdefghij\n')
+        fake.write_text(f'#!/bin/sh\n[ "$1 $2 $3" = "show-options -qv @rc_prof" ] && echo {owner}\n')
         fake.chmod(0o755)
-        (self.base / "pane-profile").mkdir()
-        (self.base / "pane-profile" / "rcabcdefghij").write_text("cuenta2\n")
+
+    def test_tab_runs_as_its_owner(self) -> None:
+        self.fake_tmux("pcuenta2")
         self.assertEqual(self.run_claude("", "/tmp/tmux-1000/cf-remote,123,0"), f"cuenta2|{self.base}/profiles/cuenta2")
-        # Another tmux server is not a Remote Control tab.
-        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/default,123,0"), f"otro|{self.base}/profiles/otro")
+        self.fake_tmux("p")
+        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/cf-remote,123,0"), f"|{self.home}")
 
-    def test_unpinned_pane_follows_the_active_profile(self) -> None:
+    def test_device_that_typed_last_does_not_pick_the_account(self) -> None:
+        # The active profile is "otro"; a tab owned by the primary stays primary.
+        self.fake_tmux("p")
+        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/cf-remote,123,0"), f"|{self.home}")
+        # A terminal outside Remote Control is the primary user's.
+        self.assertEqual(self.run_claude(""), f"|{self.home}")
+        self.assertEqual(self.run_claude("", "/tmp/tmux-1000/default,123,0"), f"|{self.home}")
+
+    def test_new_pane_belongs_to_whoever_opened_it_for_good(self) -> None:
         self.assertEqual(self.run_claude("w1:p5"), f"otro|{self.base}/profiles/otro")
-        self.assertEqual(self.run_claude(""), f"otro|{self.base}/profiles/otro")
+        self.assertEqual((self.base / "pane-profile" / "w1:p5").read_text(), "otro\n")
+        # Someone else typing later does not move it.
+        (self.base / "profile-active").write_text("cuenta2\t\n")
+        self.assertEqual(self.run_claude("w1:p5"), f"otro|{self.base}/profiles/otro")
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class FakeProc:
@@ -257,7 +266,6 @@ class SetTabOwnerTests(unittest.TestCase):
             res = herdr.set_tab_owner(self.TAB, "cuenta2")
         self.assertEqual(res, {"ok": True, "restarted": False})
         self.assertIn(("set-option", "-t", f"={self.TAB}:", "@rc_prof", "pcuenta2"), self.calls)
-        self.assertEqual((self.base / "pane-profile" / self.TAB).read_text(), "cuenta2\n")
         self.assertIn(("refresh-client", "-t", "/dev/pts/6", "-f", "!ignore-size"), self.calls)
         self.assertIn(("refresh-client", "-t", "/dev/pts/7", "-f", "ignore-size"), self.calls)
         # A client of unknown profile is left as it was.
@@ -282,11 +290,16 @@ class SetTabOwnerTests(unittest.TestCase):
         kill.assert_not_called()
         self.assertIn("trabajando", res["note"])
 
-    def test_old_tab_pins_are_swept_but_herdr_pins_stay(self) -> None:
+    def test_marks_note_every_known_panes_owner(self) -> None:
+        herdr._write_missing_pins({"w1:p1": "cuenta2", "w1:p2": "", "rcabcdefghij": "x"})
+        # A CLI already noted the owner of a brand-new pane: that wins.
+        (self.base / "pane-profile" / "w1:p3").write_text("cuenta2\n")
+        self.assertEqual(herdr._read_pin("w1:p3", ""), "cuenta2")
+        self.assertEqual(herdr._read_pin("w1:p9", "dflt"), "dflt")
         pins = self.base / "pane-profile"
-        pins.mkdir()
-        (pins / "rczzzzzzzzzz").write_text("\n")
-        (pins / "w1:p1").write_text("\n")
-        with mock.patch.object(herdr, "_foreground_pgid", lambda pid: None):
-            herdr.set_tab_owner(self.TAB, "")
-        self.assertEqual(sorted(p.name for p in pins.iterdir()), [self.TAB, "w1:p1"])
+        self.assertEqual(sorted(p.name for p in pins.iterdir()), ["w1:p1", "w1:p2", "w1:p3"])
+        self.assertEqual((pins / "w1:p1").read_text(), "cuenta2\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

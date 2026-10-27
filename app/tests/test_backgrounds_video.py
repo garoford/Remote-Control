@@ -174,6 +174,69 @@ class ThumbTests(VideoBase):
         self.assertEqual(list(self.folder.iterdir()), [])
 
 
+def mixkit_page(*cards):
+    out = []
+    for vid, title, w, h in cards:
+        out.append(
+            f'<div data-item-grid--video-player-item-id-value="{vid}"><img src="x" width="{w}" height="{h}">'
+            f'<span class="item-grid-video-player__overlay-video-title">\n  {title}\n</span></div>'
+        )
+    return "".join(out)
+
+
+class DiscoverTests(VideoBase):
+    def test_reads_titles_from_grid_pages_too(self) -> None:
+        html = (
+            '<div data-item-grid--video-player-item-id-value="28085"><img alt="Heavy rain from an open window." width="460" height="259">'
+            '<a href="/x" class="item-grid-video-player__overlay-link">\n Heavy rain from an open window\n</a></div>'
+            '<div data-item-grid--video-player-item-id-value="9"><img alt="Only alt text." width="460" height="259"></div>'
+        )
+        self.assertEqual([c[1] for c in backgrounds.mixkit_cards(html)], ["Heavy rain from an open window", "Only alt text"])
+
+    def test_reads_mixkit_cards(self) -> None:
+        html = mixkit_page(("4331", "Traffic on a rainy night", 460, 259), ("77", "Tall &amp; thin", 259, 460))
+        self.assertEqual(backgrounds.mixkit_cards(html), [("4331", "Traffic on a rainy night", True), ("77", "Tall & thin", False)])
+
+    def test_anime_comes_in_blocks_until_the_bank_runs_out(self) -> None:
+        seen = []
+        while backgrounds.more_available()["anime"]:
+            added = backgrounds.discover_more("anime")["added"]
+            self.assertLessEqual(len(added), backgrounds.MORE_BLOCK)
+            self.assertTrue(added)
+            seen += added
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(len(seen), len(backgrounds.ANIME_POOL))
+        self.assertEqual(backgrounds.discover_more("anime")["added"], [])
+        ids = {c["id"] for c in backgrounds.catalog()}
+        self.assertTrue(set(seen) <= ids)
+        # Discovered clips work like the built-in ones.
+        self.assertIsNotNone(backgrounds._catalog_item(seen[0]))
+
+    def test_mixkit_pages_skip_known_and_portrait_clips(self) -> None:
+        pages = {
+            "https://mixkit.co/free-stock-video/rain-window/?page=1": mixkit_page(
+                ("28085", "Already in the catalog", 460, 259), ("1", "One", 460, 259), ("2", "Portrait", 259, 460)
+            ),
+            "https://mixkit.co/free-stock-video/rain-window/?page=2": mixkit_page(*[(str(i), f"Clip {i}", 460, 259) for i in range(10, 30)]),
+        }
+        urls = {"28085": "https://assets.mixkit.co/videos/28085/28085-720.mp4"}
+        with (
+            mock.patch.object(backgrounds, "_fetch_text", lambda url: pages.get(url, "")),
+            mock.patch.object(backgrounds, "_mixkit_video_url", lambda vid: urls.get(vid, f"https://assets.mixkit.co/videos/{vid}/{vid}-1080.mp4")),
+        ):
+            first = backgrounds.discover_more("lofi")["added"]
+            second = backgrounds.discover_more("lofi")["added"]
+        self.assertEqual(first, ["mk-1"] + [f"mk-{i}" for i in range(10, 18)])
+        self.assertEqual(second[:3], ["mk-18", "mk-19", "mk-20"])
+        self.assertNotIn("mk-2", first + second)
+        item = backgrounds._catalog_item("mk-1")
+        self.assertEqual(item[2:], ("lofi", "https://assets.mixkit.co/videos/1/1-1080.mp4", "https://assets.mixkit.co/videos/1/1-thumb-360-0.jpg"))
+
+    def test_unknown_group(self) -> None:
+        with self.assertRaises(backgrounds.BackgroundError):
+            backgrounds.discover_more("nope")
+
+
 class EncoderTests(unittest.TestCase):
     def test_preference_order(self) -> None:
         listing = " V....D libopenh264  OpenH264\n V....D h264_nvenc  NVENC\n V....D libvpx-vp9  VP9\n"

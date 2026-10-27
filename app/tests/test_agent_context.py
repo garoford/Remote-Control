@@ -97,8 +97,9 @@ class WrapperProfileTests(unittest.TestCase):
         out = subprocess.run(["zsh", "-f", "-c", script], env=env, capture_output=True, text=True, check=True)
         return out.stdout
 
-    def test_without_rc_profile_follows_the_device_that_typed_last(self) -> None:
-        self.assertEqual(self.home_seen(None).split("\n")[:2], [str(self.home / ".local/share/remote-control/profiles/rosa"), "rosa"])
+    def test_device_that_typed_last_does_not_pick_the_account(self) -> None:
+        # Outside a Remote Control tab or herdr pane there is no owner: the primary.
+        self.assertEqual(self.home_seen(None).split("\n")[:2], [str(self.home), ""])
 
     def test_empty_rc_profile_forces_the_primary(self) -> None:
         self.assertEqual(self.home_seen("").split("\n")[:2], [str(self.home), ""])

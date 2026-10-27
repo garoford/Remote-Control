@@ -3010,12 +3010,77 @@ html.rc-touch .rc-look-del {
 }
 
 .rc-look-subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin: 14px 0 8px;
   color: var(--rc-muted);
   font-size: 11.5px;
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+/* Preset clips: pages of 4 x 2 (2 x 4 on a phone). */
+.rc-look-grid.is-paged {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 560px) {
+  .rc-look-grid.is-paged {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.rc-look-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.rc-look-pager button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.12);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rc-text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rc-look-pager button:hover:not(:disabled) {
+  background: rgb(var(--rc-blue-rgb) / 0.12);
+}
+
+.rc-look-pager button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.rc-look-tile.is-more.is-busy .rc-look-up-icon {
+  animation: rc-more-spin 900ms linear infinite;
+}
+
+@keyframes rc-more-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rc-look-tile.is-more.is-busy .rc-look-up-icon {
+    animation: none;
+  }
 }
 
 /* Sliders */
