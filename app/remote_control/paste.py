@@ -69,14 +69,9 @@ def sniff_ext(body: bytes, content_type: str = "") -> str | None:
 
 
 def paste_dir(home: Path | None = None) -> Path:
-    home = home or Path.home()
-    pictures = home / "Pictures"
-    if pictures.is_dir():
-        return pictures / "Remote Control"
-    downloads = home / "Downloads"
-    if downloads.is_dir():
-        return downloads / "Remote Control"
-    return home / ".cache" / "cf-quick-tunnel" / "pastes"
+    """Where pasted and attached files land: ~/Remote Control, whatever they
+    are (not only pictures) and whatever the desktop's language or folders."""
+    return (home or Path.home()) / "Remote Control"
 
 
 def parse_paste_name(name: str) -> str:

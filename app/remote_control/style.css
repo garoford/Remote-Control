@@ -372,6 +372,86 @@ window.rc-window,
   background-color: #ff6b68;
 }
 
+/* Multi: a destructive action that is not the confirmation itself */
+.rc-btn-danger {
+  background-color: alpha(@rc_red, 0.12);
+  color: @rc_red;
+  border-radius: 12px;
+  min-height: 40px;
+  font-weight: 700;
+}
+
+.rc-btn-danger:hover {
+  background-color: alpha(@rc_red, 0.2);
+}
+
+/* Multi: the containers' sidebar */
+.rc-sidebar {
+  padding: 14px 10px;
+}
+
+.rc-box-list,
+.rc-box-list > row {
+  background: transparent;
+  background-color: transparent;
+}
+
+.rc-box-list > row {
+  border-radius: 12px;
+  margin: 2px 0;
+}
+
+.rc-box-list > row:hover {
+  background-color: alpha(@rc_text, 0.05);
+}
+
+.rc-box-list > row:selected {
+  background-color: alpha(@rc_blue, 0.16);
+}
+
+.rc-box-row {
+  padding: 8px 8px;
+}
+
+.rc-box-name {
+  color: @rc_text;
+  font-weight: 700;
+}
+
+.rc-box-dot {
+  font-size: 12px;
+  color: @rc_muted;
+}
+
+.rc-box-dot.on {
+  color: @rc_green;
+}
+
+/* Own domain card: dimmed until its checks pass */
+.rc-domain-off .rc-card-title,
+.rc-domain-off .rc-hint-text {
+  opacity: 0.55;
+}
+
+.rc-domain-state {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background-color: alpha(@rc_text, 0.08);
+  color: @rc_muted;
+}
+
+.rc-domain-state.on {
+  background-color: alpha(@rc_green, 0.14);
+  color: @rc_green;
+}
+
+.rc-domain-state.busy {
+  background-color: alpha(@rc_blue, 0.14);
+  color: @rc_blue;
+}
+
 /* Own domain dialog: opaque and in our palette, whatever the system theme */
 dialog.rc-sheet,
 dialog.rc-sheet floating-sheet,
@@ -472,6 +552,16 @@ toast {
 }
 
 /* QR of the public URL */
+
+.rc-qr-empty {
+  color: alpha(@rc_muted, 0.8);
+  padding: 24px;
+}
+
+.rc-qr-empty image {
+  color: alpha(@rc_muted, 0.6);
+}
+
 .rc-qr {
   padding: 12px;
   border-radius: 16px;

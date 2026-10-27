@@ -31,7 +31,14 @@ def _run_gui(gtk_argv: list[str]) -> int:
             style.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
             window = self.props.active_window
             if window is None:
-                window = RemoteControlWindow(application=self)
+                from remote_control import multi
+
+                if multi.enabled():
+                    from remote_control.multi_window import MultiWindow
+
+                    window = MultiWindow(application=self)
+                else:
+                    window = RemoteControlWindow(application=self)
             window.present()
 
     return RemoteControlApp().run(gtk_argv)
@@ -47,6 +54,19 @@ def main(argv: list[str] | None = None) -> int:
         from remote_control.autostart import headless_start
 
         return headless_start()
+    if len(raw) > 1 and raw[1] == "router":
+        from remote_control.router import main as router_main
+
+        return router_main(raw[2:])
+    if len(raw) > 1 and raw[1] == "multi":
+        from remote_control.multi import cli as multi_cli
+
+        return multi_cli(raw[2:])
+    if len(raw) > 1:
+        from remote_control.commands import COMMANDS
+
+        if raw[1] in COMMANDS:
+            return COMMANDS[raw[1]](raw[2:])
     if len(raw) > 1 and raw[1] == "domain":
         from remote_control.domains import cli
 

@@ -5,6 +5,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -72,14 +73,39 @@ class HostTests(unittest.TestCase):
         for bad in ("midominio", "-a.com", "a..com", "1.2.3.4", "a b.com", "ñ.com"):
             self.assertFalse(domains.valid_host(bad), bad)
 
-    def test_mode(self) -> None:
-        cfg = domains.DomainConfig(provider="namecom", host="rc.a.com", mode="auto")
-        with mock.patch.object(domains, "local_addresses", lambda: {"127.0.0.1", "203.0.113.7"}):
-            self.assertEqual(domains.resolve_mode(cfg, "203.0.113.7"), "direct")
-        with mock.patch.object(domains, "local_addresses", lambda: {"127.0.0.1", "192.168.1.5"}):
-            self.assertEqual(domains.resolve_mode(cfg, "203.0.113.7"), "tunnel")
-            cfg.mode = "direct"
-            self.assertEqual(domains.resolve_mode(cfg, "203.0.113.7"), "direct")
+    def test_a_server_with_its_own_public_ip_can(self) -> None:
+        with mock.patch.object(domains, "local_addresses", lambda: {"127.0.0.1", "203.0.113.7"}), \
+             mock.patch.object(domains, "port_open_outside", side_effect=AssertionError("no check needed")):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertTrue(reach.ok)
+
+    def test_a_pc_can_when_its_router_forwards_443_to_us(self) -> None:
+        port = _free_port()
+
+        def outside(ext, _public):
+            # The checker reaches our listener only through "443".
+            if ext != 443:
+                return False
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            time.sleep(0.8)
+            return True
+
+        with mock.patch.object(domains, "local_addresses", lambda: {"192.168.1.5"}), \
+             mock.patch.object(domains, "local_https_port", lambda: port), \
+             mock.patch.object(domains, "port_open_outside", outside):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertEqual((reach.ok, reach.local_port, reach.public_port), (True, port, 443))
+
+    def test_an_open_port_that_is_not_us_does_not_count(self) -> None:
+        port = _free_port()
+        with mock.patch.object(domains, "local_addresses", lambda: {"192.168.1.5"}), \
+             mock.patch.object(domains, "local_https_port", lambda: port), \
+             mock.patch.object(domains, "port_open_outside", lambda ext, public: True), \
+             mock.patch.object(domains, "lan_route", lambda: ("192.168.1.5", "192.168.1.1")):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertFalse(reach.ok)
+        self.assertIn(f"192.168.1.5:{port}", reach.why)
+        self.assertIn("192.168.1.1", reach.why)
 
     def test_config_is_private_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,6 +139,38 @@ class NameComTests(unittest.TestCase):
         self.assertEqual(put[2]["Authorization"], "Basic " + base64.b64encode(b"me:tok").decode())
         self.assertTrue(put[1].startswith("https://api.name.com/core/v1/domains/a.com/records/7"))
 
+    def test_redirect_keeps_name_coms_own_a_record(self) -> None:
+        fwd = {"urlForwarding": [{"id": 3, "host": "rc.a.com", "forwardsTo": "https://old/"}]}
+        http, patch = fake({
+            ("GET", "/url/forwarding"): (200, json.dumps(fwd).encode()),
+            ("GET", "/records"): (200, b'{"records": [{"id": 9, "host": "rc", "type": "A", "answer": "75.126.100.14"}]}'),
+            ("PATCH", "/urlforwarding/a.com/3"): (200, b"{}"),
+        })
+        with patch:
+            domains.NameCom("me", "tok").redirect("a.com", "rc", "https://new/")
+        self.assertEqual([c[0] for c in http.calls if c[0] not in ("GET",)], ["PATCH"])
+
+    def test_redirect_without_its_a_record_starts_over(self) -> None:
+        state = {"a": False}
+
+        def records(_body):
+            rows = [{"id": 9, "host": "rc", "type": "A", "answer": "75.126.100.14"}] if state["a"] else []
+            return 200, json.dumps({"records": rows}).encode()
+
+        def create(_body):
+            state["a"] = True
+            return 200, b"{}"
+
+        http, patch = fake({
+            ("GET", "/url/forwarding"): (200, b'{"urlForwarding": [{"id": 3, "host": "rc"}]}'),
+            ("GET", "/records"): records,
+            ("DELETE", "/urlforwarding/a.com/3"): (200, b"{}"),
+            ("POST", "/url/forwarding"): create,
+        })
+        with patch:
+            domains.NameCom("me", "tok").redirect("a.com", "rc", "https://new/")
+        self.assertEqual([c[0] for c in http.calls if c[0] != "GET"], ["DELETE", "POST"])
+
     def test_forward_creates_a_302(self) -> None:
         http, patch = fake({
             ("GET", "/url/forwarding"): (200, b'{"urlForwarding": []}'),
@@ -120,7 +178,7 @@ class NameComTests(unittest.TestCase):
             ("POST", "/url/forwarding"): (200, b"{}"),
         })
         with patch:
-            domains.NameCom("me", "tok").redirect("a.com", "rc", "https://x.trycloudflare.com/")
+            domains.NameCom("me", "tok").forward("a.com", "rc", "https://x.trycloudflare.com/")
         post = next(c for c in http.calls if c[0] == "POST")
         self.assertEqual(json.loads(post[3]), {"forwardsTo": "https://x.trycloudflare.com/", "type": "302", "host": "rc"})
 
@@ -307,18 +365,20 @@ class TunnelCommandTests(unittest.TestCase):
         svc._tls = None
         self.assertNotIn("--public", svc._proxy_cmd())
 
-    def test_a_failed_redirect_keeps_the_quick_url(self) -> None:
+    def test_the_domain_is_used_only_when_reachable(self) -> None:
         from remote_control.tunnel import TunnelService
 
         svc = TunnelService()
-        cfg = domains.DomainConfig(provider="godaddy", host="rc.a.com", creds={"key": "k"})
-        with mock.patch.object(domains, "serve_tunnel", side_effect=domains.DomainError("sin cliente")):
-            url = svc._redirect_domain(cfg, "https://x.trycloudflare.com")
-        self.assertEqual(url, "https://x.trycloudflare.com")
-        self.assertIn("sin cliente", svc.domain_warning)
-        with mock.patch.object(domains, "serve_tunnel"), mock.patch("remote_control.tunnel.flush_resolved_cache"):
-            self.assertEqual(svc._redirect_domain(cfg, "https://x.trycloudflare.com"), "http://rc.a.com/")
-
+        cfg = domains.DomainConfig(provider="namecom", host="rc.a.com", zone="a.com", creds={"user": "u", "token": "t"})
+        with mock.patch.object(domains, "load_config", lambda: cfg), \
+             mock.patch.object(domains, "public_ipv4", lambda: "203.0.113.7"), \
+             mock.patch.object(domains, "direct_reach", lambda public: domains.Reach(False, "Abre el puerto 443", 8443)):
+            self.assertEqual(svc._domain_plan(), (None, "203.0.113.7", "tunnel"))
+        self.assertIn("rc.a.com en pausa", svc.domain_warning)
+        with mock.patch.object(domains, "load_config", lambda: cfg), \
+             mock.patch.object(domains, "public_ipv4", lambda: "203.0.113.7"), \
+             mock.patch.object(domains, "direct_reach", lambda public: domains.Reach(True, "", 8443)):
+            self.assertEqual(svc._domain_plan(), (cfg, "203.0.113.7", "direct"))
 
 if __name__ == "__main__":
     unittest.main()

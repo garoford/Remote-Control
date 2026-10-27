@@ -1,16 +1,151 @@
 #!/usr/bin/env bash
 # Install Remote Control from GitHub. Safe to re-run.
 # curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/refs/heads/main/install.sh | bash
+# Asks Normal or Multi in a terminal; pick it ahead with  | bash -s -- --multi  (or --normal).
 set -euo pipefail
 
 REPO_URL="${REMOTE_CONTROL_REPO_URL:-https://github.com/garoford/Remote-Control.git}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/remote-control"
 SRC="$SHARE/src"
 
-log() { printf '%s\n' "$*"; }
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# --- look ----------------------------------------------------------------
+# A terminal gets colors, a spinner per step and a summary; the commands'
+# own output goes to a log. Piped or redirected (a server's log), plain lines.
+UI=0
+[[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]] && UI=1
+if ((UI)); then
+  B=$'\e[1m' D=$'\e[2m' R=$'\e[0m' TEAL=$'\e[38;2;33;199;168m' BLUE=$'\e[38;2;130;170;255m'
+  GREEN=$'\e[38;2;34;218;110m' YELLOW=$'\e[38;2;255;235;149m' RED=$'\e[38;2;239;83;80m' MUTED=$'\e[38;2;138;155;179m'
+else
+  B="" D="" R="" TEAL="" BLUE="" GREEN="" YELLOW="" RED="" MUTED=""
+fi
 
-warn() { printf 'aviso: %s\n' "$*" >&2; }
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/remote-control"
+LOG="$LOG_DIR/install.log"
+mkdir -p "$LOG_DIR"
+: >"$LOG"
+# What a step leaves for the screen (it runs in a subshell): a note, warnings,
+# the reason it stopped, values for later steps.
+STATE="$(mktemp -d)"
+KEEPALIVE=""
+cleanup() {
+  [[ -n "$KEEPALIVE" ]] && kill "$KEEPALIVE" 2>/dev/null
+  ((UI)) && printf '\e[?25h'
+  rm -rf "$STATE"
+}
+trap cleanup EXIT
+
+log() { printf '%s\n' "$*"; }
+warn() {
+  printf 'aviso: %s\n' "$*" >>"$LOG"
+  printf '%s\n' "$*" >>"$STATE/warns"
+}
+IN_STEP=0
+die() {
+  printf 'error: %s\n' "$*" >>"$LOG"
+  if ((IN_STEP)); then
+    printf '%s\n' "$*" >"$STATE/die"
+  else
+    printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2
+  fi
+  exit 1
+}
+# Why a step had nothing to do ("ya estaba"), shown beside its check mark.
+note() { printf '%s' "$*" >"$STATE/note"; }
+
+STEP=0
+STEPS=0
+SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+banner() {
+  local distro=""
+  [[ -r /etc/os-release ]] && distro="$(. /etc/os-release && printf '%s' "${NAME:-} ${VERSION_ID:-}")"
+  if ((UI)); then
+    printf '\n  %s%s ▶_ %s  %sRemote Control%s\n' "$B" "$TEAL" "$R" "$B" "$R"
+    printf '        %sinstalador · %s · %s%s\n\n' "$MUTED" "${distro:-linux}" "${PM:-?}" "$R"
+  else
+    printf 'Remote Control: instalador (%s, %s)\n' "${distro:-linux}" "${PM:-?}"
+  fi
+}
+
+# step "Title" function: runs it with its output in the log, a spinner meanwhile.
+step() {
+  local title="$1" fn="$2" rc=0 pid i=0 start=$SECONDS secs note="" w
+  STEP=$((STEP + 1))
+  rm -f "$STATE/note" "$STATE/warns" "$STATE/die"
+  printf '\n== [%d/%d] %s ==\n' "$STEP" "$STEPS" "$title" >>"$LOG"
+  local from
+  from="$(wc -l <"$LOG")"
+  local num
+  num="$(printf '%s[%d/%d]%s' "$D" "$STEP" "$STEPS" "$R")"
+  ((UI)) || printf '[%d/%d] %s… ' "$STEP" "$STEPS" "$title"
+  # In the background so `set -e` still applies inside the step.
+  ( set -e; IN_STEP=1; "$fn" ) >>"$LOG" 2>&1 </dev/null &
+  pid=$!
+  if ((UI)); then
+    printf '\e[?25l'
+    while kill -0 "$pid" 2>/dev/null; do
+      printf '\r  %s %s%s%s %s %s%ds%s\e[K' "$num" "$BLUE" "${SPIN[i++ % ${#SPIN[@]}]}" "$R" "$title" "$MUTED" $((SECONDS - start)) "$R"
+      sleep 0.1
+    done
+  fi
+  wait "$pid" || rc=$?
+  secs=$((SECONDS - start))
+  [[ -f "$STATE/note" ]] && note="$(<"$STATE/note")"
+  [[ -z "$note" ]] && ((secs)) && note="${secs}s"
+  local mark color
+  if ((rc)); then
+    mark="✗" color="$RED"
+  elif [[ -s "$STATE/warns" ]]; then
+    mark="!" color="$YELLOW"
+  else
+    mark="✓" color="$GREEN"
+  fi
+  if ((UI)); then
+    # Padded by characters, not bytes (printf %-30s miscounts "Módulos").
+    local pad=$((30 - ${#title}))
+    ((pad < 1)) && pad=1
+    printf '\r  %s %s%s%s %s%*s %s%s%s\e[K\n' "$num" "$color" "$mark" "$R" "$title" "$pad" "" "$MUTED" "$note" "$R"
+    printf '\e[?25h'
+  else
+    local word="ok"
+    [[ $mark == ! ]] && word="con avisos"
+    [[ $mark == ✗ ]] && word="falló"
+    printf '%s%s\n' "$word" "${note:+ ($note)}"
+  fi
+  if [[ -s "$STATE/warns" ]]; then
+    while IFS= read -r w; do
+      printf '        %s↳ %s%s\n' "$YELLOW" "$w" "$R"
+      printf '%s\n' "$w" >>"$STATE/all-warns"
+    done <"$STATE/warns"
+  fi
+  if ((rc)); then
+    local why="falló (código $rc)"
+    [[ -s "$STATE/die" ]] && why="$(<"$STATE/die")"
+    printf '\n  %s%s✗ No se pudo terminar:%s %s\n\n' "$B" "$RED" "$R" "$why"
+    printf '  %sLo último de este paso (log completo: %s):%s\n' "$MUTED" "$LOG" "$R"
+    local line
+    tail -n "+$((from + 1))" "$LOG" | tail -n 12 | while IFS= read -r line; do printf '    %s%s%s\n' "$D" "$line" "$R"; done
+    printf '\n'
+    exit 1
+  fi
+}
+
+# Packages need root: ask once, visibly, before any spinner; then keep the
+# sudo ticket alive so no prompt hides behind one.
+ask_sudo() {
+  ((EUID == 0)) && return 0
+  need_cmd sudo || return 0
+  sudo -n true 2>/dev/null && return 0
+  printf '  %s🔑 Hace falta tu contraseña para instalar paquetes del sistema.%s\n' "$YELLOW" "$R"
+  if sudo -v; then
+    (while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done) &
+    KEEPALIVE=$!
+    printf '\n'
+  else
+    printf '  %sSin sudo: se intentará lo que no lo necesita.%s\n\n' "$MUTED" "$R"
+  fi
+}
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -83,12 +218,12 @@ deps_ok() {
 # name that does not exist in this distro release.
 install_pkgs() {
   if deps_ok; then
+    note "ya estaban"
     return
   fi
   local p
   case "$PM" in
     dnf)
-      log "Instalando paquetes (dnf)…"
       if dnf --version 2>/dev/null | grep -q dnf5; then
         as_root dnf install -y --skip-unavailable "${PKGS_dnf[@]}" || warn "dnf no instaló todo"
       else
@@ -96,20 +231,17 @@ install_pkgs() {
       fi
       ;;
     apt-get)
-      log "Instalando paquetes (apt)…"
       as_root apt-get update -q || true
       for p in "${PKGS_apt[@]}"; do
         as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$p" >/dev/null || warn "apt: no pude instalar $p"
       done
       ;;
     pacman)
-      log "Instalando paquetes (pacman)…"
       for p in "${PKGS_pacman[@]}"; do
         as_root pacman -S --needed --noconfirm "$p" >/dev/null || warn "pacman: no pude instalar $p"
       done
       ;;
     zypper)
-      log "Instalando paquetes (zypper)…"
       for p in "${PKGS_zypper[@]}"; do
         as_root zypper --non-interactive install "$p" >/dev/null || warn "zypper: no pude instalar $p"
       done
@@ -130,7 +262,7 @@ quiet_ttyd_service() {
   ((HAD_TTYD)) && return 0
   need_cmd systemctl || return 0
   systemctl is-enabled ttyd.service >/dev/null 2>&1 || systemctl is-active ttyd.service >/dev/null 2>&1 || return 0
-  log "Apagando ttyd.service (vino con el paquete ttyd; Remote Control usa su propio ttyd)…"
+  log "Apagando ttyd.service (vino con el paquete ttyd; Remote Control usa su propio ttyd)"
   as_root systemctl disable --now ttyd.service >/dev/null 2>&1 || warn "no pude apagar ttyd.service"
 }
 
@@ -164,21 +296,27 @@ install_binary() {
 }
 
 install_ttyd() {
-  need_cmd ttyd && return
+  quiet_ttyd_service
+  if need_cmd ttyd; then
+    note "ya estaba"
+    return
+  fi
   local arch
   case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64 ;;
     aarch64 | arm64) arch=aarch64 ;;
     *) arch="$(uname -m)" ;;
   esac
-  log "Instalando ttyd (release de GitHub)…"
   install_binary ttyd "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.$arch" || true
+  need_cmd ttyd || [[ -x "$HOME/.local/bin/ttyd" ]] || warn "ttyd no quedó instalado"
 }
 
 # Not in Fedora or Debian repos: Cloudflare's own repo, else its release.
 install_cloudflared() {
-  need_cmd cloudflared && return
-  log "Instalando cloudflared…"
+  if need_cmd cloudflared; then
+    note "ya estaba"
+    return
+  fi
   case "$PM" in
     dnf)
       curl -fsSL https://pkg.cloudflare.com/cloudflared.repo | as_root tee /etc/yum.repos.d/cloudflared.repo >/dev/null \
@@ -196,14 +334,15 @@ install_cloudflared() {
   need_cmd cloudflared && return
   install_binary cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(uname_arch)" || true
+  need_cmd cloudflared || [[ -x "$HOME/.local/bin/cloudflared" ]] || warn "cloudflared no quedó instalado"
 }
 
 # herdr: workspaces for AI agents (its official installer, to ~/.local/bin).
 install_herdr() {
   if need_cmd herdr || [[ -x "$HOME/.local/bin/herdr" ]]; then
+    note "ya estaba"
     return
   fi
-  log "Instalando herdr…"
   curl -fsSL https://herdr.dev/install.sh | sh || warn "no pude instalar herdr"
 }
 
@@ -216,8 +355,11 @@ install_py_fallbacks() {
   python3 -c "import textual, segno" >/dev/null 2>&1 || pip+=(textual segno)
   # Let's Encrypt for your own domain (acme.py).
   python3 -c "import cryptography" >/dev/null 2>&1 || pip+=(cryptography)
-  ((${#pip[@]})) || return 0
-  log "Instalando con pip: ${pip[*]}"
+  if ((${#pip[@]} == 0)); then
+    note "ya estaban"
+    return 0
+  fi
+  note "${pip[*]}"
   python3 -m pip install --user --quiet "${pip[@]}" 2>/dev/null \
     || python3 -m pip install --user --quiet --break-system-packages "${pip[@]}" \
     || warn "pip no pudo instalar ${pip[*]}"
@@ -242,8 +384,16 @@ hook_shells() {
   fi
 }
 
-report() {
-  local c missing="" optional=""
+# One line of the summary box: label padded by characters (not bytes, "Túnel").
+row() {
+  local label="$1"
+  shift
+  printf '  %s  %s%*s %s\n' "${TEAL}│${R}" "$label" $((15 - ${#label})) "" "$*"
+}
+
+# The end: what is there, what is missing, how to start.
+summary() {
+  local c missing="" optional="" w
   for c in tmux ttyd cloudflared; do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || missing+=" $c"
   done
@@ -252,14 +402,45 @@ report() {
   for c in herdr zsh wl-copy dig convert; do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || optional+=" $c"
   done
-  python3 -c "import brotli, fontTools, PIL, textual, segno" >/dev/null 2>&1 || optional+=" (módulos python)"
-  log ""
-  if [[ -n "$missing" ]]; then
-    warn "faltan dependencias necesarias:$missing"
+  python3 -c "import brotli, fontTools, PIL, textual, segno, cryptography" >/dev/null 2>&1 || optional+=" (módulos python)"
+  local onpath=1
+  [[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || onpath=0
+  if ((UI)); then
+    local bar="${TEAL}│${R}"
+    printf '\n  %s╭─%s %s%sListo%s %s─────────────────────────────────────────────%s\n' "$TEAL" "$R" "$B" "$GREEN" "$R" "$TEAL" "$R"
+    printf '  %s\n' "$bar"
+    row "Abrir" "${B}${TEAL}remote-control${R}"
+    if [[ "$MODE" == multi ]]; then
+      row "Modo" "${TEAL}multi${R}  ${MUTED}(contenedores desde la ventana o  remote-control multi)${R}"
+      [[ -f "$STATE/first" ]] && row "Su túnel" "${TEAL}remote-control multi tunnel principal on${R}"
+    fi
+    row "Por SSH" "${TEAL}remote-control cli${R}  ${MUTED}(servidor, sin escritorio)${R}"
+    ((onpath)) || row "PATH" "${YELLOW}abre otra terminal o corre${R}  exec \$SHELL -l"
+    printf '  %s\n' "$bar"
+    if [[ -n "$missing" ]]; then
+      row "Faltan" "${RED}✗${R}$missing"
+    else
+      row "Dependencias" "${GREEN}✓ todas instaladas${R}"
+    fi
+    [[ -z "$optional" ]] || row "Opcionales" "${YELLOW}!${R}$optional"
+    row "Auto-update" "${MUTED}cada 3 min y al abrir la app${R}"
+    row "Log" "${MUTED}$LOG${R}"
+    printf '  %s\n' "$bar"
+    printf '  %s╰────────────────────────────────────────────────────────%s\n\n' "$TEAL" "$R"
   else
-    log "Dependencias: todas instaladas."
+    log ""
+    if [[ -n "$missing" ]]; then log "aviso: faltan dependencias necesarias:$missing"; else log "Dependencias: todas instaladas."; fi
+    [[ -z "$optional" ]] || log "aviso: faltan opcionales:$optional"
+    log "Listo. Arranca con:  remote-control   (por SSH: remote-control cli)"
+    if [[ "$MODE" == multi ]]; then
+      log "Modo multi: contenedores desde la ventana o  remote-control multi"
+      [[ -f "$STATE/first" ]] && log "Túnel del contenedor «principal»:  remote-control multi tunnel principal on"
+    fi
+    ((onpath)) || log "En esta terminal aún no está en PATH: abre otra o corre  exec \$SHELL -l"
+    log "Auto-update: cada 3 min + al abrir/enfocar la app."
+    log "Para pararlo:  systemctl --user disable --now remote-control-update.timer"
+    log "Log: $LOG"
   fi
-  [[ -z "$optional" ]] || warn "faltan opcionales:$optional"
 }
 
 checkout_src() {
@@ -279,7 +460,8 @@ checkout_src() {
     git -C "$SRC" remote set-url origin "$(git -C "$here" remote get-url origin)"
     git -C "$SRC" fetch --quiet origin main 2>/dev/null || true
     # Prefer the working tree we launched from.
-    TREE="$here"
+    printf '%s' "$here" >"$STATE/tree"
+    note "desde ${here/#"$HOME"/\~}"
     return
   fi
 
@@ -296,27 +478,84 @@ checkout_src() {
     mkdir -p "$SHARE"
     git clone --branch main --single-branch "$REPO_URL" "$SRC"
   fi
-  TREE="$SRC"
+  printf '%s' "$SRC" >"$STATE/tree"
+  note "$(git -C "$SRC" log -1 --format='%h · %cr' 2>/dev/null)"
 }
 
-install_pkgs
-quiet_ttyd_service
-install_ttyd
-install_cloudflared
-install_herdr
-install_py_fallbacks
-TREE=""
-checkout_src
-[[ -f "$TREE/app/install.sh" ]] || die "No encuentro app/install.sh en $TREE"
-bash "$TREE/app/install.sh"
-hook_shells
-report
+install_app() {
+  local tree
+  tree="$(<"$STATE/tree")"
+  [[ -f "$tree/app/install.sh" ]] || die "No encuentro app/install.sh en $tree"
+  bash "$tree/app/install.sh"
+}
 
-log ""
-log "Listo. Arranca con:  remote-control"
-[[ ":$PATH:" == *":$HOME/.local/bin:"* ]] \
-  || log "En esta terminal aún no está en PATH: abre otra o corre  exec \$SHELL -l"
-log "Sin escritorio (servidor): abre el CLI."
-log ""
-log "Auto-update: cada 3 min + al abrir/enfocar la app."
-log "Para pararlo:  systemctl --user disable --now remote-control-update.timer"
+# Normal: Remote Control on this system. Multi: isolated containers (multi.py),
+# each with its own tunnel, managed from the window or `remote-control multi`.
+MODE="${REMOTE_CONTROL_MODE:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --multi) MODE=multi ;;
+    --normal) MODE=normal ;;
+  esac
+done
+
+choose_mode() {
+  [[ -n "$MODE" ]] && return
+  MODE=normal
+  ((UI)) && [[ -r /dev/tty ]] || return 0
+  local pick
+  printf '  %s¿Cómo lo instalo?%s\n\n' "$B" "$R"
+  printf '    %s1%s  %sNormal%s   conecta y comparte\n' "$TEAL" "$R" "$B" "$R"
+  printf '    %s2%s  %sMulti%s    Podman, %srecomendado para servidores%s\n\n' "$TEAL" "$R" "$B" "$R" "$GREEN" "$R"
+  printf '  Elige %s[1]%s: ' "$MUTED" "$R"
+  read -r pick </dev/tty || pick=""
+  [[ "$pick" == 2 || "${pick,,}" == multi ]] && MODE=multi
+  printf '\n'
+}
+
+install_podman() {
+  if need_cmd podman; then
+    note "ya estaba"
+    return
+  fi
+  case "$PM" in
+    dnf) as_root dnf install -y podman ;;
+    apt-get) as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -q podman ;;
+    pacman) as_root pacman -S --needed --noconfirm podman ;;
+    zypper) as_root zypper --non-interactive install podman ;;
+  esac
+  need_cmd podman || die "no pude instalar Podman"
+}
+
+# The window and the CLI manage containers; the first one is made now
+# (the first image takes a few minutes: a whole Linux with what it needs).
+first_container() {
+  local rc="$HOME/.local/bin/remote-control"
+  "$rc" multi on
+  if [[ -n "$("$rc" multi list | grep -v '^Sin contenedores')" ]]; then
+    note "ya había contenedores"
+    return
+  fi
+  "$rc" multi create principal --base fedora
+  touch "$STATE/first"
+  note "principal"
+}
+
+banner
+choose_mode
+deps_ok && need_cmd ttyd && need_cmd cloudflared && { [[ "$MODE" != multi ]] || need_cmd podman; } || ask_sudo
+STEPS=8
+[[ "$MODE" == multi ]] && STEPS=10
+step "Paquetes del sistema" install_pkgs
+step "ttyd" install_ttyd
+step "cloudflared" install_cloudflared
+step "herdr" install_herdr
+step "Módulos de Python" install_py_fallbacks
+step "Código de Remote Control" checkout_src
+step "App y lanzador" install_app
+step "PATH y perfiles de la shell" hook_shells
+if [[ "$MODE" == multi ]]; then
+  step "Podman" install_podman
+  step "Primer contenedor" first_container
+fi
+summary

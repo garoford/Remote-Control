@@ -27,11 +27,16 @@ from remote_control.tunnel import TunnelService, host_resolves
 from remote_control.updater import check_and_apply, running_from_install
 
 
+# Width of the right column (the QR, and the domain card under it).
+QR_COLUMN = 320
+
+
 class RemoteControlWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.set_title("Remote Control")
-        self.set_default_size(400, 890)
+        # Two columns like `remote-control cli`: controls left, QR right.
+        self.set_default_size(820, -1)
         self.set_resizable(False)
         self.add_css_class("rc-window")
 
@@ -57,7 +62,9 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
             provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            # Above the user's own ~/.config/gtk-4.0/gtk.css: a full theme
+            # there would otherwise repaint our cards and dialogs.
+            Gtk.STYLE_PROVIDER_PRIORITY_USER + 1,
         )
 
     def _build(self) -> None:
@@ -84,12 +91,29 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         scroll.set_child(canvas)
         self.toasts.set_child(scroll)
 
+        # A dashboard: the tunnel across the top, what you share in the
+        # middle (links and password beside the QR), settings at the bottom.
         canvas.append(self._build_hero())
-        canvas.append(self._build_password())
-        canvas.append(self._build_url_card())
-        canvas.append(self._build_qr_card())
-        canvas.append(self._build_autostart())
-        canvas.append(self._build_domain())
+
+        middle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        links = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        links.set_hexpand(True)
+        links.append(self._build_url_card())
+        links.append(self._build_password())
+        middle.append(links)
+        middle.append(self._build_qr_card())
+        canvas.append(middle)
+
+        settings = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        # Same split as the row above: the edges line up.
+        autostart_card = self._build_autostart()
+        autostart_card.set_hexpand(True)
+        settings.append(autostart_card)
+        domain_card = self._build_domain()
+        domain_card.set_size_request(QR_COLUMN, -1)
+        domain_card.set_hexpand(False)
+        settings.append(domain_card)
+        canvas.append(settings)
         canvas.append(self._build_error())
 
         self.set_content(toolbar)
@@ -107,12 +131,16 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         badge.set_valign(Gtk.Align.CENTER)
         icon = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
         icon.set_pixel_size(22)
-        icon.set_hexpand(True)
+        # Centered in a fixed square (an expanding icon stretched it into a bar).
         icon.set_halign(Gtk.Align.CENTER)
+        icon.set_valign(Gtk.Align.CENTER)
+        badge.set_size_request(46, 46)
+        badge.set_halign(Gtk.Align.START)
+        badge.set_homogeneous(True)
         badge.append(icon)
         top.append(badge)
 
-        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         texts.set_hexpand(True)
         texts.set_valign(Gtk.Align.CENTER)
         title = Gtk.Label(label="Túnel web", xalign=0)
@@ -149,7 +177,8 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.lock_label = Gtk.Label(label="Con contraseña")
         self.lock_chip.append(self.lock_label)
         chips.append(self.lock_chip)
-        self.hero.append(chips)
+        # Beside the badge, under the title: the hero is one row across the top.
+        texts.append(chips)
         return self.hero
 
     # --- password ------------------------------------------------------------
@@ -257,13 +286,24 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _build_domain(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.add_css_class("rc-card")
+        # Looks switched off until the checks pass (_paint_domain).
+        box.add_css_class("rc-domain-off")
+        self.domain_card = box
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         texts.set_hexpand(True)
         texts.set_valign(Gtk.Align.CENTER)
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         title = Gtk.Label(label="Dominio propio", xalign=0)
         title.add_css_class("rc-card-title")
-        texts.append(title)
+        head.append(title)
+        self.domain_state = Gtk.Label(label="No disponible")
+        self.domain_state.add_css_class("rc-domain-state")
+        self.domain_state.set_valign(Gtk.Align.CENTER)
+        head.append(self.domain_state)
+        texts.append(head)
         self.domain_label = Gtk.Label(xalign=0, wrap=True)
+        # Wraps inside the column instead of widening it.
+        self.domain_label.set_max_width_chars(28)
         self.domain_label.add_css_class("rc-hint-text")
         texts.append(self.domain_label)
         box.append(texts)
@@ -276,15 +316,55 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._paint_domain()
         return box
 
+    def _set_domain_state(self, kind: str, text: str, detail: str) -> bool:
+        """kind: on (in use), busy (checking) or off (looks disabled)."""
+        for cls in ("on", "busy", "off"):
+            self.domain_state.remove_css_class(cls)
+        self.domain_state.add_css_class(kind)
+        self.domain_state.set_label(text)
+        self.domain_label.set_label(detail)
+        if kind == "on":
+            self.domain_card.remove_css_class("rc-domain-off")
+        else:
+            self.domain_card.add_css_class("rc-domain-off")
+        return False
+
     def _paint_domain(self) -> None:
+        """Active only once the settings are complete and this machine is
+        reachable from the internet (domains.direct_reach); off until then."""
         cfg = domains.load_config()
-        if cfg is None:
-            self.domain_label.set_label("Sin configurar: se usa una URL de trycloudflare.com")
+        if cfg is None or not cfg.host:
+            self._set_domain_state("off", "No disponible", "Sin configurar")
+            return
+        problems = cfg.problems()
+        if problems:
+            self._set_domain_state("off", "No disponible", problems[0])
             return
         provider = domains.PROVIDERS.get(cfg.provider, cfg.provider)
-        self.domain_label.set_label(f"{cfg.host} · {provider} · {domains.MODES.get(cfg.mode, cfg.mode)}")
+        self._set_domain_state("busy", "Comprobando…", f"{cfg.host} · {provider}")
+        self._domain_check = getattr(self, "_domain_check", 0) + 1
+        ticket = self._domain_check
 
-    def _show_domain_dialog(self) -> None:
+        def work() -> None:
+            try:
+                reach = domains.direct_reach(domains.public_ipv4())
+            except Exception as exc:
+                reach = domains.Reach(False, str(exc), domains.FALLBACK_PORT)
+            GLib.idle_add(done, reach)
+
+        def done(reach: domains.Reach) -> bool:
+            if ticket != self._domain_check:
+                return False  # a newer check is running
+            if reach.ok:
+                return self._set_domain_state("on", "Disponible", f"{cfg.host} · {provider}")
+            return self._set_domain_state("off", "No disponible", reach.why)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_domain_dialog(self, account_only: bool = False, on_saved=None) -> None:
+        """The provider account and this machine's name. ``account_only`` (the
+        multi window, multi_window.py): just the account and its domain; each
+        container picks its own name there."""
         saved = domains.load_config()
         cfg = saved or domains.DomainConfig(provider="namecom")
         dialog = Adw.Dialog()
@@ -298,17 +378,9 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         card.add_css_class("rc-domain-dialog")
         card.set_size_request(360, -1)
 
-        title = Gtk.Label(label="Dominio propio")
+        title = Gtk.Label(label="Cuenta de dominios" if account_only else "Dominio propio")
         title.add_css_class("rc-dialog-title")
         card.append(title)
-        intro = Gtk.Label(
-            label="En un servidor con IP pública el dominio apunta directo a él, con HTTPS propio. "
-            "En una PC de casa redirige al túnel de Cloudflare.",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
-        intro.add_css_class("rc-dialog-body")
-        card.append(intro)
 
         def field(label: str, widget: Gtk.Widget) -> Gtk.Widget:
             wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -342,15 +414,43 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         sub = Gtk.Entry(placeholder_text="vacío = el dominio mismo")
         sub.add_css_class("rc-field")
         sub.add_css_class("rc-mono")
-        pick_box.append(field("Subdominio", sub))
+        sub_field = field("Subdominio", sub)
+        pick_box.append(sub_field)
         preview = Gtk.Label(xalign=0, wrap=True)
         preview.add_css_class("rc-hint-text")
         pick_box.append(preview)
+        sub_field.set_visible(not account_only)
+        preview.set_visible(not account_only)
 
-        mode_ids = list(domains.MODES)
-        mode = Gtk.DropDown.new_from_strings(list(domains.MODES.values()))
-        mode.set_selected(mode_ids.index(cfg.mode) if cfg.mode in mode_ids else 0)
-        pick_box.append(field("Modo", mode))
+        # The domain is served here (no redirect), so it can only be saved once
+        # this machine is known to be reachable from the internet.
+        reach_ok = [account_only]
+        reach_label = Gtk.Label(label="Comprobando si tu PC es alcanzable desde internet…", xalign=0, wrap=True)
+        reach_label.add_css_class("rc-hint-text")
+        reach_label.set_max_width_chars(44)
+        reach_label.set_visible(not account_only)
+        card.append(reach_label)
+
+        def reached(reach: domains.Reach) -> bool:
+            reach_ok[0] = reach.ok
+            if reach.ok:
+                reach_label.set_label(f"✓ {reach.why}.")
+                reach_label.remove_css_class("warn")
+            else:
+                reach_label.set_label(f"No disponible: {reach.why}.")
+                reach_label.add_css_class("warn")
+            paint_save()
+            return False
+
+        def probe() -> None:
+            try:
+                reach = domains.direct_reach(domains.public_ipv4())
+            except Exception as exc:
+                reach = domains.Reach(False, str(exc), domains.FALLBACK_PORT)
+            GLib.idle_add(reached, reach)
+
+        if not account_only:
+            threading.Thread(target=probe, daemon=True).start()
 
         result = Gtk.Label(wrap=True, xalign=0)
         result.add_css_class("rc-hint-text")
@@ -379,7 +479,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         def chosen_host() -> str:
             if not zones:
                 return ""
-            return domains.compose_host(sub.get_text(), zones[zone.get_selected()])
+            return domains.compose_host("" if account_only else sub.get_text(), zones[zone.get_selected()])
 
         def paint_preview(*_args) -> None:
             host = chosen_host()
@@ -391,8 +491,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             if selected in items:
                 zone.set_selected(items.index(selected))
             pick_box.set_visible(bool(items))
-            save.set_sensitive(bool(items))
+            paint_save()
             paint_preview()
+
+        def paint_save() -> None:
+            save.set_sensitive(bool(zones) and reach_ok[0])
 
         def paint_creds(*_args) -> None:
             # Keep what was typed when switching providers back and forth.
@@ -446,17 +549,22 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         def on_remove(*_args) -> None:
             if domains.load_config():
                 domains.clear_config()
-                self._toast("Dominio quitado: vuelve trycloudflare.com")
-                self._paint_domain()
+                self._toast("Cuenta quitada" if account_only else "Dominio quitado: vuelve trycloudflare.com")
+                if on_saved:
+                    on_saved()
+                else:
+                    self._paint_domain()
             dialog.close()
 
         def on_save(*_args) -> None:
             new = domains.DomainConfig(
                 provider=provider_ids[provider.get_selected()],
-                host=chosen_host(),
+                # Account only: never the bare domain as this machine's name;
+                # keep the one it had, if any, else none.
+                host=(saved.host if saved and saved.zone == zones[zone.get_selected()] else "") if account_only else chosen_host(),
                 zone=zones[zone.get_selected()],
                 creds={key: entry.get_text().strip() for key, entry in entries.items()},
-                mode=mode_ids[mode.get_selected()],
+                mode="direct",
                 email=cfg.email,
             )
             save.set_sensitive(False)
@@ -475,6 +583,11 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         def done(message: str, ok: bool) -> bool:
             save.set_sensitive(True)
             if ok:
+                if on_saved:
+                    on_saved()
+                    self._toast("Cuenta guardada", timeout=4)
+                    dialog.close()
+                    return False
                 self._paint_domain()
                 running = self.tunnel.status().running
                 self._toast("Dominio guardado" + (": apaga y enciende el túnel para usarlo" if running else ""), timeout=4)
@@ -491,6 +604,8 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         else:
             sub.set_text("rc")
             set_zones([])
+        # Set before "changed" is connected below.
+        paint_preview()
         provider.connect("notify::selected", on_provider)
         zone.connect("notify::selected", paint_preview)
         sub.connect("changed", paint_preview)
@@ -500,7 +615,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_propagate_natural_height(True)
-        scroll.set_max_content_height(760)
+        scroll.set_max_content_height(880)
         scroll.set_child(card)
         dialog.set_child(scroll)
         dialog.present(self)
@@ -530,14 +645,14 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _build_url_card(self) -> Gtk.Widget:
         self.url_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         self.url_card.add_css_class("rc-card")
-        self.url_card.set_visible(False)
+        self.url_card.set_vexpand(True)
 
         head = Gtk.Label(label="Compartir", xalign=0)
         head.add_css_class("rc-card-title")
         self.url_card.append(head)
 
         self.url_entry = Gtk.Entry()
-        self.url_entry.set_placeholder_text("https://….trycloudflare.com")
+        self.url_entry.set_placeholder_text("Aparece al encender el túnel")
         self.url_card.append(
             self._url_row(
                 "URL pública",
@@ -565,21 +680,42 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _build_qr_card(self) -> Gtk.Widget:
         self.qr_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.qr_card.add_css_class("rc-card")
-        self.qr_card.set_visible(False)
+        self.qr_card.add_css_class("rc-qr-card")
+        # Same width on and off, so the window keeps its shape.
+        self.qr_card.set_size_request(QR_COLUMN, -1)
+        self.qr_card.set_hexpand(False)
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         title = Gtk.Label(label="Abrir en el celular", xalign=0)
         title.add_css_class("rc-card-title")
         title.set_hexpand(True)
         head.append(title)
         self.qr_card.append(head)
+        # The column stays put: with the tunnel off it says how to get the QR.
+        self.qr_stack = Gtk.Stack()
+        self.qr_stack.set_vexpand(True)
+        self.qr_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         frame = Gtk.Box()
         frame.add_css_class("rc-qr")
         frame.set_halign(Gtk.Align.CENTER)
+        frame.set_valign(Gtk.Align.CENTER)
         self.qr_picture = Gtk.Picture()
-        self.qr_picture.set_size_request(190, 190)
+        self.qr_picture.set_size_request(196, 196)
         self.qr_picture.set_can_shrink(True)
         frame.append(self.qr_picture)
-        self.qr_card.append(frame)
+        self.qr_stack.add_named(frame, "qr")
+        empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        empty.add_css_class("rc-qr-empty")
+        empty.set_valign(Gtk.Align.CENTER)
+        icon = Gtk.Image.new_from_icon_name("phone-symbolic")
+        icon.set_pixel_size(40)
+        empty.append(icon)
+        self.qr_empty_label = Gtk.Label(label="Enciende el túnel para ver el QR", wrap=True, justify=Gtk.Justification.CENTER)
+        self.qr_empty_label.set_max_width_chars(24)
+        self.qr_empty_label.add_css_class("rc-hint-text")
+        empty.append(self.qr_empty_label)
+        self.qr_stack.add_named(empty, "empty")
+        self.qr_stack.set_visible_child_name("empty")
+        self.qr_card.append(self.qr_stack)
         self._qr_for = ""
         return self.qr_card
 
@@ -587,16 +723,19 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         """Show the QR card while the tunnel is up (and segno is installed)."""
         url = self._current_url
         if not url:
-            self.qr_card.set_visible(False)
+            self.qr_empty_label.set_label("Enciende el túnel para ver el QR")
+            self.qr_stack.set_visible_child_name("empty")
             return
         if self._qr_for != url:
-            png = control.qr_png(url, scale=8)
+            # Its natural size is the picture's: scale 5 ≈ 200 px.
+            png = control.qr_png(url, scale=5)
             if png is None:
-                self.qr_card.set_visible(False)
+                self.qr_empty_label.set_label("Instala 'segno' para ver el QR")
+                self.qr_stack.set_visible_child_name("empty")
                 return
             self.qr_picture.set_paintable(Gdk.Texture.new_from_bytes(GLib.Bytes.new(png)))
             self._qr_for = url
-        self.qr_card.set_visible(True)
+        self.qr_stack.set_visible_child_name("qr")
 
     def _local_url(self) -> str:
         return f"http://localhost:{self.tunnel.port}/"
@@ -660,7 +799,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self._current_url = url
         self.url_entry.set_text(url)
         self.url_entry.select_region(0, -1)
-        self.url_card.set_visible(True)
         self._paint_qr()
         self._set_switch(True)
         if self._local_dns_ok(url):
@@ -670,13 +808,14 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._toast("URL lista; el DNS de esta PC aún no")
         if self.tunnel.domain_warning:
             self._set_error(self.tunnel.domain_warning)
+        self._paint_domain()
         return False
 
     def _on_start_failed(self, message: str) -> bool:
         self._busy = False
         self.switch.set_sensitive(True)
         self._current_url = None
-        self.url_card.set_visible(False)
+        self.url_entry.set_text("")
         self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
@@ -747,7 +886,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
         self.switch.set_sensitive(True)
         self._current_url = None
         self.url_entry.set_text("")
-        self.url_card.set_visible(False)
         self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
@@ -798,7 +936,6 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             changed = status.url != self._current_url
             self._current_url = status.url
             self.url_entry.set_text(status.url)
-            self.url_card.set_visible(True)
             self._paint_qr()
             if self._local_dns_ok(status.url):
                 self._set_status("on", "En línea")
@@ -810,7 +947,7 @@ class RemoteControlWindow(Adw.ApplicationWindow):
             self._set_password_locked(True)
             return
         self._current_url = None
-        self.url_card.set_visible(False)
+        self.url_entry.set_text("")
         self._paint_qr()
         self._set_status("off", "Apagado")
         self._set_switch(False)
@@ -879,6 +1016,9 @@ class RemoteControlWindow(Adw.ApplicationWindow):
     def _set_password_locked(self, locked: bool) -> None:
         self.password_entry.set_sensitive(not locked)
         self.regen_btn.set_sensitive(not locked)
+        # The domain is chosen at start: not while the tunnel runs.
+        self.domain_btn.set_sensitive(not locked)
+        self.domain_btn.set_tooltip_text("Apaga el túnel para cambiar el dominio" if locked else "Configurar dominio")
 
     def _set_switch(self, active: bool) -> None:
         self._syncing_switch = True

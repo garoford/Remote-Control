@@ -31,7 +31,9 @@ import ipaddress
 import json
 import os
 import shutil
+import socket
 import subprocess
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,14 +56,15 @@ FIELDS = {
     "godaddy": [
         ("key", "API key o token personal (PAT)", True, True),
         ("secret", "API secret (vacío si usas un PAT)", True, False),
-        ("customer", "Nº de cliente (solo para el modo túnel)", False, False),
     ],
     "namecheap": [
         ("user", "Usuario de Namecheap", False, True),
         ("key", "API key", True, True),
     ],
 }
-MODES = {"auto": "Automático", "direct": "Directo (servidor)", "tunnel": "Túnel (PC)"}
+# Kept in the settings file for older versions; the domain is always served
+# directly now (direct_reach decides whether it can be).
+MODES = {"auto": "Automático", "direct": "Directo", "tunnel": "Túnel"}
 FORWARD_TYPES = ("A", "AAAA", "CNAME")
 
 
@@ -91,7 +94,9 @@ class DomainConfig:
         for key, label, _secret, required in FIELDS[self.provider]:
             if required and not self.creds.get(key):
                 out.append(f"falta {label}")
-        if not valid_host(self.host):
+        # An account without a name for this machine (multi: each container
+        # has its own, router.py) is fine.
+        if self.host and not valid_host(self.host):
             out.append("el dominio no es válido (ej. rc.midominio.com)")
         if self.mode not in MODES:
             out.append("modo desconocido")
@@ -220,6 +225,10 @@ class Provider:
     def unforward(self, zone: str, name: str) -> None:
         raise NotImplementedError
 
+    def records_at(self, zone: str, name: str) -> list[tuple[str, str]]:
+        """(type, value) of every record ``name`` already has (to not take a used one)."""
+        raise NotImplementedError
+
     # The two ways to serve the name (module docstring).
 
     def point(self, zone: str, name: str, ip: str) -> None:
@@ -293,6 +302,13 @@ class NameCom(Provider):
         for row in self._records(zone, name, rtype):
             self._call("DELETE", f"/domains/{zone}/records/{row['id']}", "borrar el registro", ok404=True)
 
+    def records_at(self, zone: str, name: str) -> list[tuple[str, str]]:
+        rows = self._pages(f"/domains/{zone}/records", "records", "leer los registros")
+        found = [(r.get("type", ""), r.get("answer", "")) for r in rows if (r.get("host") or "") == name]
+        if self._forwarding(zone, name):
+            found.append(("URL", "redirección"))
+        return found
+
     def _forwarding(self, zone: str, name: str) -> dict | None:
         rows = self._pages(f"/domains/{zone}/url/forwarding", "urlForwarding", "leer las redirecciones")
         fqdn = f"{name}.{zone}" if name else zone
@@ -313,6 +329,22 @@ class NameCom(Provider):
         row = self._forwarding(zone, name)
         if row and row.get("id") is not None:
             self._call("DELETE", f"/urlforwarding/{zone}/{row['id']}", "quitar la redirección", ok404=True)
+
+    def redirect(self, zone: str, name: str, url: str) -> None:
+        """name.com points the name at its redirect servers with an A record of
+        its own, made only when the forwarding is created. So: a forwarding
+        whose A is there only changes its target; anything else starts over,
+        and name.com makes that A again."""
+        row = self._forwarding(zone, name)
+        if row and row.get("id") is not None and self._records(zone, name, "A"):
+            self._call("PATCH", f"/urlforwarding/{zone}/{row['id']}", "cambiar la redirección", {"forwardsTo": url, "type": "302"})
+            return
+        self.unforward(zone, name)
+        for rtype in FORWARD_TYPES:
+            self.delete_record(zone, name, rtype)
+        self._call("POST", f"/domains/{zone}/url/forwarding", "crear la redirección", {"forwardsTo": url, "type": "302", "host": name})
+        if not self._records(zone, name, "A"):
+            raise DomainError(f"name.com creó la redirección pero no el registro A de {name or zone}")
 
 
 class GoDaddy(Provider):
@@ -354,6 +386,13 @@ class GoDaddy(Provider):
 
     def delete_record(self, zone: str, name: str, rtype: str) -> None:
         self._call("DELETE", f"/v1/domains/{zone}/records/{rtype}/{name or '@'}", "borrar el registro", ok404=True)
+
+    def records_at(self, zone: str, name: str) -> list[tuple[str, str]]:
+        found = []
+        for rtype in ("A", "AAAA", "CNAME", "MX", "TXT"):
+            _status, data = self._call("GET", f"/v1/domains/{zone}/records/{rtype}/{name or '@'}", "leer los registros", ok404=True)
+            found += [(rtype, str(d.get("data", ""))) for d in data or [] if isinstance(d, dict)]
+        return found
 
     def _forward_path(self, zone: str, name: str) -> str:
         fqdn = f"{name}.{zone}" if name else zone
@@ -467,6 +506,10 @@ class Namecheap(Provider):
             kept.append({"Name": name, **add})
         self._set_hosts(zone, kept, email_type)
 
+    def records_at(self, zone: str, name: str) -> list[tuple[str, str]]:
+        hosts, _email = self._hosts(zone)
+        return [(h["Type"], h["Address"]) for h in hosts if h["Name"] == (name or "@")]
+
     def set_record(self, zone: str, name: str, rtype: str, value: str, ttl: int = 300) -> None:
         self._replace(zone, name, (rtype,), {"Type": rtype, "Address": value, "TTL": str(max(60, ttl))})
 
@@ -541,10 +584,104 @@ def has_own_public_ip(public: str | None) -> bool:
     return bool(public) and public in local_addresses()
 
 
-def resolve_mode(cfg: DomainConfig, public: str | None) -> str:
-    if cfg.mode in ("direct", "tunnel"):
-        return cfg.mode
-    return "direct" if has_own_public_ip(public) else "tunnel"
+PORT_CHECK = "https://ifconfig.co/port/{port}"
+# Where the direct mode listens when 443 is not ours to open (a normal user
+# may not bind below 1024): the router forwards its 443 here.
+FALLBACK_PORT = 8443
+
+
+def local_https_port() -> int:
+    """443 when this user may open it (root, a server), else FALLBACK_PORT."""
+    for port in (443, FALLBACK_PORT):
+        with socket.socket() as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    return FALLBACK_PORT
+
+
+def port_open_outside(port: int, public: str | None) -> bool:
+    """Can the internet open ``port`` on our public IP? (ifconfig.co tries it.)"""
+    try:
+        status, raw = _http("GET", PORT_CHECK.format(port=port), {"Accept": "application/json"})
+        data = json.loads(raw)
+    except (DomainError, ValueError):
+        return False
+    if status != 200 or not isinstance(data, dict):
+        return False
+    return bool(data.get("reachable")) and (not public or data.get("ip") == public)
+
+
+def lan_route() -> tuple[str, str]:
+    """(this PC's LAN address, the router's), for the port forwarding hint."""
+    ip = shutil.which("ip")
+    if not ip:
+        return "", ""
+    try:
+        out = subprocess.run([ip, "-j", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=5, check=False).stdout
+        route = (json.loads(out or "[]") or [{}])[0]
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return "", ""
+    return route.get("prefsrc", ""), route.get("gateway", "")
+
+
+@dataclass
+class Reach:
+    """Whether the direct mode can work here, and on which ports."""
+
+    ok: bool
+    why: str
+    local_port: int
+    # The port people connect to (443 unless only the fallback is forwarded).
+    public_port: int = 443
+
+
+def direct_reach(public: str | None) -> Reach:
+    """A server (own public IP) can always; a PC only when its router forwards
+    443 (or 8443) to it, checked from outside while we listen on our port."""
+    local = local_https_port()
+    if has_own_public_ip(public):
+        return Reach(True, f"Servidor con IP pública ({public})", local, local)
+    if not public:
+        return Reach(False, "No hay conexión para comprobar el puerto", local)
+    hits = []
+    listener = None
+    try:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("0.0.0.0", local))
+        listener.listen(8)
+        listener.settimeout(0.5)
+
+        def accept() -> None:
+            while listener is not None and listener.fileno() >= 0:
+                try:
+                    conn, _addr = listener.accept()
+                except OSError:
+                    continue
+                hits.append(1)
+                conn.close()
+
+        threading.Thread(target=accept, daemon=True).start()
+    except OSError:
+        # Taken: our own direct mode is already serving it.
+        listener = None
+    try:
+        for outside in (443, FALLBACK_PORT):
+            hits.clear()
+            # Open, and (when we listen) it was us who answered, not another box.
+            if port_open_outside(outside, public) and (listener is None or hits):
+                where = "443" if outside == 443 else f"{outside} (la URL lleva :{outside})"
+                return Reach(True, f"El puerto {where} de tu router llega a esta PC", local, outside)
+    finally:
+        if listener is not None:
+            listener.close()
+    pc, router = lan_route()
+    target = f"{pc}:{local}" if pc else f"esta PC, puerto {local}"
+    return Reach(False, f"Abre el puerto 443 de tu router{f' ({router})' if router else ''} hacia {target}", local)
 
 
 def account_domains(provider: str, creds: dict) -> list[str]:
@@ -572,11 +709,7 @@ def check(cfg: DomainConfig) -> str:
     if cfg.zone and cfg.zone not in zones:
         raise DomainError(f"{cfg.zone} no está en esta cuenta")
     cfg.zone = zone
-    public = public_ipv4()
-    mode = resolve_mode(cfg, public)
-    if mode == "direct":
-        return f"Clave OK ({zone}). Modo directo: {cfg.host} → {public or 'IP pública'} con HTTPS propio."
-    return f"Clave OK ({zone}). Modo túnel: {cfg.host} redirige al túnel de Cloudflare."
+    return f"Clave OK ({zone})."
 
 
 # --- on start (tunnel.py) and while running (proxy.py) ----------------------------------
@@ -608,24 +741,20 @@ def serve_direct(cfg: DomainConfig, public: str | None, log=lambda _msg: None) -
     )
 
 
-def serve_tunnel(cfg: DomainConfig, tunnel_url: str) -> None:
-    """The name redirects to the quick tunnel's address of this run."""
-    prov = provider_for(cfg)
-    zone, name = locate(cfg, prov)
-    prov.redirect(zone, name, tunnel_url.rstrip("/") + "/")
-
 
 # --- `remote-control domain` (a server over SSH has no window) -----------------------
 
 CLI_USAGE = """uso: remote-control domain [show | check | off | set OPCIONES]
 
   set --provider namecom|godaddy|namecheap [--host rc.midominio.com]
-      [--mode auto|direct|tunnel] [--email tu@correo]
+      [--email tu@correo]
       Sin --host muestra los dominios de la cuenta para elegir uno.
       name.com:  --user USUARIO   (pide el token)
-      GoDaddy:   (pide la key y el secret; --customer Nº para el modo túnel)
+      GoDaddy:   (pide la key y el secret)
       Namecheap: --user USUARIO   (pide la API key)
   Las claves se piden sin eco para que no queden en el historial.
+  Solo se guarda si esta máquina es alcanzable desde internet: un servidor
+  con IP pública, o una PC con el puerto 443 del router abierto hacia ella.
   Se aplica al encender el túnel (remote-control start).
 """
 
@@ -652,7 +781,7 @@ def cli(argv: list[str]) -> int:
         if cfg is None:
             print("Sin dominio propio (URL de trycloudflare.com).")
             return 0
-        print(f"Proveedor: {PROVIDERS.get(cfg.provider, cfg.provider)}\nDominio:   {cfg.host}\nModo:      {MODES.get(cfg.mode, cfg.mode)}")
+        print(f"Proveedor: {PROVIDERS.get(cfg.provider, cfg.provider)}\nDominio:   {cfg.host}")
         for key, label, secret, _req in FIELDS.get(cfg.provider, []):
             if cfg.creds.get(key):
                 print(f"{label}: {_masked(cfg.creds[key]) if secret else cfg.creds[key]}")
@@ -667,14 +796,15 @@ def cli(argv: list[str]) -> int:
         except DomainError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        return 0
+        reach = direct_reach(public_ipv4())
+        print(("✓ " if reach.ok else "No disponible: ") + reach.why)
+        return 0 if reach.ok else 1
     if cmd != "set":
         print(CLI_USAGE, file=sys.stderr)
         return 2
     parser = argparse.ArgumentParser(prog="remote-control domain set")
     parser.add_argument("--provider", required=True, choices=list(PROVIDERS))
     parser.add_argument("--host", default="")
-    parser.add_argument("--mode", default="auto", choices=list(MODES))
     parser.add_argument("--email", default="")
     for key in sorted({k for fields in FIELDS.values() for k, _l, _s, _r in fields}):
         parser.add_argument(f"--{key}", default="")
@@ -702,11 +832,15 @@ def cli(argv: list[str]) -> int:
         zone = zones[int(pick) - 1]
         sub = input(f"Subdominio (@ = {zone} mismo) [rc]: ").strip() or "rc"
         host = compose_host("" if sub == "@" else sub, zone)
-    cfg = DomainConfig(provider=args.provider, host=host, zone=zone, creds=creds, mode=args.mode, email=args.email)
+    cfg = DomainConfig(provider=args.provider, host=host, zone=zone, creds=creds, mode="direct", email=args.email)
     try:
         message = check(cfg)
     except DomainError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    reach = direct_reach(public_ipv4())
+    if not reach.ok:
+        print(f"error: esta máquina no es alcanzable desde internet. {reach.why}.", file=sys.stderr)
         return 1
     save_config(cfg)
     print(message)

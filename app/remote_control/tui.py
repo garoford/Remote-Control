@@ -78,16 +78,12 @@ class DomainScreen(ModalScreen[bool]):
         self.saved = domains.load_config()
         self.cfg = self.saved or domains.DomainConfig(provider="namecom")
         self.zones: list[str] = []
+        self.reach_ok = False
 
     def compose(self) -> ComposeResult:
         cfg = self.cfg
         with VerticalScroll(id="domain"):
             yield Static("Dominio propio", id="confirm-title")
-            yield Static(
-                "En un servidor con IP pública el dominio apunta directo a él, con HTTPS propio. "
-                "En una PC de casa redirige al túnel de Cloudflare.",
-                id="confirm-body",
-            )
             yield Static("Proveedor", classes="label")
             yield Select([(label, key) for key, label in domains.PROVIDERS.items()], value=cfg.provider, allow_blank=False, id="provider", compact=True)
             # Every provider's fields; only the chosen one's are shown.
@@ -104,14 +100,35 @@ class DomainScreen(ModalScreen[bool]):
                 yield Static("Subdominio (vacío = el dominio mismo)", classes="label")
                 yield Input("rc", id="sub", compact=True)
                 yield Static("", id="preview")
-                yield Static("Modo", classes="label")
-                yield Select([(label, key) for key, label in domains.MODES.items()], value=cfg.mode, allow_blank=False, id="mode", compact=True)
+            # Served here, no redirect: it can be saved only once reachable.
+            yield Static("Comprobando si tu PC es alcanzable desde internet…", id="reach")
             yield Static("", id="domain-result")
             with Horizontal(id="domain-buttons"):
                 yield Button("Quitar" if self.saved else "Cancelar", id="domain-remove", compact=True)
                 yield Button("Guardar", id="domain-save", classes="accent", compact=True)
 
+    def probe(self) -> None:
+        def work() -> None:
+            try:
+                reach = domains.direct_reach(domains.public_ipv4())
+            except Exception as exc:
+                reach = domains.Reach(False, str(exc), domains.FALLBACK_PORT)
+            self.app.call_from_thread(self.reached, reach)
+
+        self.run_worker(work, thread=True, group="reach")
+
+    def reached(self, reach: domains.Reach) -> None:
+        self.reach_ok = reach.ok
+        label = self.query_one("#reach", Static)
+        label.set_classes("" if reach.ok else "error")
+        label.update(f"✓ {reach.why}." if reach.ok else f"No disponible: {reach.why}.")
+        self.paint_save()
+
+    def paint_save(self) -> None:
+        self.query_one("#domain-save", Button).disabled = not (self.zones and self.reach_ok)
+
     def on_mount(self) -> None:
+        self.probe()
         self.show_provider(self.cfg.provider)
         saved = self.saved
         if saved and saved.zone:
@@ -135,7 +152,7 @@ class DomainScreen(ModalScreen[bool]):
         elif zones:
             select.value = zones[0]
         self.query_one("#pick").display = bool(zones)
-        self.query_one("#domain-save", Button).disabled = not zones
+        self.paint_save()
         self.paint_preview()
 
     def chosen_host(self) -> str:
@@ -212,7 +229,7 @@ class DomainScreen(ModalScreen[bool]):
             host=self.chosen_host(),
             zone=zone if isinstance(zone, str) else "",
             creds=self.creds(provider),
-            mode=str(self.query_one("#mode", Select).value),
+            mode="direct",
             email=self.cfg.email,
         )
         self.say("Comprobando…")
@@ -229,7 +246,7 @@ class DomainScreen(ModalScreen[bool]):
         self.run_worker(work, thread=True, exclusive=True)
 
     def done(self, message: str, ok: bool) -> None:
-        self.query_one("#domain-save", Button).disabled = False
+        self.paint_save()
         if ok:
             self.app.notify(message, title="Dominio guardado", timeout=8)
             self.dismiss(True)
@@ -311,7 +328,9 @@ class RemoteControlTUI(App):
     #yes { background: #ef5350; color: #011627; text-style: bold; }
     #domain-row { height: auto; }
     #domain-text { width: 1fr; height: auto; }
-    #domain-title { text-style: bold; }
+    #domain-title { width: auto; text-style: bold; margin-right: 1; }
+    #domain-head { height: 1; }
+    #domain-card.dim #domain-title, #domain-card.dim #domain-info { color: #5f7187; }
     #domain-info { color: #8a9bb3; }
     #domain-row Button { margin-left: 1; }
     #domain { width: 64; height: auto; max-height: 90%; padding: 1 2; background: #0b2942; border: round #82aaff; }
@@ -323,6 +342,8 @@ class RemoteControlTUI(App):
     #load-row { height: auto; margin: 1 0; }
     #pick { height: auto; }
     #preview { color: #7fdbca; margin-top: 1; }
+    #reach { color: #7fdbca; }
+    #reach.error { color: #ffeb95; }
     #domain-result.error { color: #ffeb95; }
     ModalScreen { align: center middle; background: #011627 70%; }
     Footer { background: ansi_default; }
@@ -383,7 +404,9 @@ class RemoteControlTUI(App):
                     with Vertical(id="domain-card", classes="card"):
                         with Horizontal(id="domain-row"):
                             with Vertical(id="domain-text"):
-                                yield Static("Dominio propio", id="domain-title")
+                                with Horizontal(id="domain-head"):
+                                    yield Static("Dominio propio", id="domain-title")
+                                    yield Static("No disponible", id="domain-state", classes="chip off")
                                 yield Static("", id="domain-info")
                             yield Button("Configurar", id="domain-open", compact=True)
                     with Vertical(id="share", classes="card"):
@@ -456,6 +479,8 @@ class RemoteControlTUI(App):
         switch.disabled = self.busy or (self.inside and self.running)
         self.query_one("#password", Input).disabled = self.running or self.busy
         self.query_one("#regen", Button).disabled = self.running or self.busy
+        # The domain is chosen at start: not while the tunnel runs.
+        self.query_one("#domain-open", Button).disabled = self.running or self.busy
         self.query_one("#share").display = self.running
         self.query_one("#cols").set_class(not self.running, "off")
         if self.running and self.url:
@@ -473,13 +498,39 @@ class RemoteControlTUI(App):
         lock.update("🔒 Con contraseña" if text else "🔓 Sin contraseña")
         lock.set_classes("chip" if text else "chip warn")
 
+    def set_domain_state(self, kind: str, text: str, detail: str) -> None:
+        """kind: on (in use), busy (checking) or off (looks disabled)."""
+        state = self.query_one("#domain-state", Static)
+        state.set_classes(f"chip {kind}")
+        state.update(text)
+        self.query_one("#domain-info", Static).update(detail)
+        self.query_one("#domain-card").set_class(kind != "on", "dim")
+
     def refresh_domain(self) -> None:
+        """Active only once the settings are complete and this machine is
+        reachable from the internet (domains.direct_reach); off until then."""
         cfg = domains.load_config()
-        if cfg is None:
-            text = "Sin configurar: se usa una URL de trycloudflare.com"
-        else:
-            text = f"{cfg.host} · {domains.PROVIDERS.get(cfg.provider, cfg.provider)} · {domains.MODES.get(cfg.mode, cfg.mode)}"
-        self.query_one("#domain-info", Static).update(text)
+        if cfg is None or not cfg.host:
+            self.set_domain_state("off", "No disponible", "Sin configurar")
+            return
+        problems = cfg.problems()
+        if problems:
+            self.set_domain_state("off", "No disponible", problems[0])
+            return
+        detail = f"{cfg.host} · {domains.PROVIDERS.get(cfg.provider, cfg.provider)}"
+        self.set_domain_state("busy", "Comprobando…", detail)
+
+        def work() -> None:
+            try:
+                reach = domains.direct_reach(domains.public_ipv4())
+            except Exception as exc:
+                reach = domains.Reach(False, str(exc), domains.FALLBACK_PORT)
+            if reach.ok:
+                self.call_from_thread(self.set_domain_state, "on", "Disponible", detail)
+            else:
+                self.call_from_thread(self.set_domain_state, "off", "No disponible", reach.why)
+
+        self.run_worker(work, thread=True, group="domain-check", exclusive=True)
 
     def paint_qr(self) -> None:
         if not self.url:
@@ -579,6 +630,7 @@ class RemoteControlTUI(App):
 
     def on_tunnel_done(self, url: str | None, error: str | None) -> None:
         self.busy = False
+        self.refresh_domain()
         if error:
             self.notify(error.strip().splitlines()[0], title="No se pudo", severity="error", timeout=8)
         elif self.tunnel.domain_warning:
@@ -588,6 +640,9 @@ class RemoteControlTUI(App):
             self.notify("Túnel en línea", timeout=3)
 
     def action_domain(self) -> None:
+        if self.running or self.busy:
+            self.notify("Apaga el túnel para cambiar el dominio.", severity="warning")
+            return
         def done(changed: bool | None) -> None:
             self.refresh_domain()
             if changed and self.running:
@@ -656,5 +711,12 @@ class RemoteControlTUI(App):
 
 
 def run() -> int:
-    RemoteControlTUI().run()
+    from . import multi
+
+    if multi.enabled():
+        from .multi_tui import MultiTUI
+
+        MultiTUI().run()
+    else:
+        RemoteControlTUI().run()
     return 0

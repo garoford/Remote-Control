@@ -25,12 +25,11 @@ class PasteImageTests(unittest.TestCase):
     def test_sniff_rejects_text(self) -> None:
         self.assertIsNone(sniff_ext(b"hello", "text/plain"))
 
-    def test_prefers_pictures(self) -> None:
+    def test_lands_in_its_own_folder_in_home(self) -> None:
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "Pictures").mkdir()
-            (home / "Downloads").mkdir()
-            self.assertEqual(paste_dir(home), home / "Pictures" / "Remote Control")
+            self.assertEqual(paste_dir(home), home / "Remote Control")
 
     def test_parse_name(self) -> None:
         self.assertEqual(parse_paste_name("paste-ab12cd34.webp"), "paste-ab12cd34.webp")

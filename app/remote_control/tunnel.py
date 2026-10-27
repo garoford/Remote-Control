@@ -195,6 +195,7 @@ class TunnelService:
         # "direct" while serving your own domain without cloudflared (domains.py).
         self.mode_file = self.pid_dir / "mode"
         self._tls: tuple[Path, Path, int] | None = None
+        self._reach: domains.Reach | None = None
         # Why your own domain is not in use this run (shown under the URL).
         self.domain_warning = ""
         self.proxy_log = self.run_dir / "proxy.log"
@@ -260,8 +261,11 @@ class TunnelService:
 
     def start(self, password: str | None = None) -> str:
         self.domain_warning = ""
-        domain, public, mode = self._domain_plan()
-        missing = self.missing_binaries(direct=mode == "direct")
+        # A multi container with its own domain: the host's router (router.py)
+        # brings HTTPS to this proxy, so no cloudflared here.
+        routed = self._routed_url()
+        domain, public, mode = (None, None, "routed") if routed else self._domain_plan()
+        missing = self.missing_binaries(direct=mode != "tunnel")
         if missing:
             raise TunnelError(
                 "Falta instalar: " + ", ".join(missing) + "."
@@ -291,7 +295,12 @@ class TunnelService:
         self._prepare_ttyd_index()
         self._start_ttyd()
         self._prepare_gate(None if password == "" else password)
-        if mode == "direct":
+        if mode == "routed":
+            assert routed is not None
+            self._start_proxy()
+            self.mode_file.write_text("direct\n", encoding="utf-8")
+            url = routed
+        elif mode == "direct":
             assert domain is not None
             url = self._start_direct(domain, public)
         else:
@@ -300,8 +309,6 @@ class TunnelService:
             url = self._wait_for_url(timeout=60)
             ensure_trycloudflare_route()
             self._wait_until_public(url, timeout=90)
-            if domain is not None:
-                url = self._redirect_domain(domain, url)
         self.url_file.write_text(url + "\n", encoding="utf-8")
         self.url_file.chmod(0o600)
         return url
@@ -436,7 +443,9 @@ class TunnelService:
             "-m",
             "remote_control.proxy",
             "--listen",
-            f"127.0.0.1:{self.port}",
+            # In a multi container (multi.py) every interface of the container:
+            # Podman publishes its port on this machine's loopback only.
+            f"{os.environ.get('RC_LISTEN_HOST', '127.0.0.1')}:{self.port}",
             "--upstream",
             f"127.0.0.1:{self.ttyd_port}",
             "--assets",
@@ -453,59 +462,46 @@ class TunnelService:
 
     # --- your own domain (domains.py) ---------------------------------------------
 
+    def _routed_url(self) -> str | None:
+        """The URL the host's router serves this container on (router.py), if any."""
+        try:
+            text = domains.config_path().with_name("public-url").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return text if text.startswith("https://") else None
+
     def _domain_plan(self) -> tuple[domains.DomainConfig | None, str | None, str]:
         """(settings, public IP, "direct" or "tunnel"); no domain is the plain tunnel."""
         cfg = domains.load_config()
-        if cfg is None:
+        if cfg is None or not cfg.host:
+            # No account, or one without a name for this machine (multi).
             return None, None, "tunnel"
         problems = cfg.problems()
         if problems:
             self.domain_warning = "Dominio propio sin usar: " + "; ".join(problems)
             return None, None, "tunnel"
         public = domains.public_ipv4()
-        return cfg, public, domains.resolve_mode(cfg, public)
+        self._reach = domains.direct_reach(public)
+        if not self._reach.ok:
+            # Served here or not at all: no redirect to the quick tunnel.
+            self.domain_warning = f"{cfg.host} en pausa ({self._reach.why}): se usa la URL de trycloudflare.com"
+            return None, public, "tunnel"
+        return cfg, public, "direct"
 
     def _start_direct(self, cfg: domains.DomainConfig, public: str | None) -> str:
         try:
             cert, key = domains.serve_direct(cfg, public)
         except Exception as exc:
             raise TunnelError(f"Dominio propio ({cfg.host}): {exc}") from exc
-        port = self._pick_public_port()
-        self._tls = (cert, key, port)
+        reach = self._reach or domains.Reach(True, "", domains.local_https_port())
+        self._tls = (cert, key, reach.local_port)
         try:
             self._start_proxy()
         finally:
             self._tls = None
         self.mode_file.write_text("direct\n", encoding="utf-8")
+        port = reach.public_port
         return f"https://{cfg.host}" + ("" if port == 443 else f":{port}") + "/"
-
-    def _redirect_domain(self, cfg: domains.DomainConfig, tunnel_url: str) -> str:
-        """Your name → this run's quick tunnel; the quick URL if the API says no.
-
-        http://: the registrars' redirect servers do not speak HTTPS (name.com
-        closes 443). That hop carries nothing: the 302 lands on the tunnel's
-        https:// address, where the password is asked.
-        """
-        try:
-            domains.serve_tunnel(cfg, tunnel_url)
-        except Exception as exc:
-            self.domain_warning = f"No se pudo redirigir {cfg.host}: {exc}"
-            return tunnel_url
-        # This PC may have asked for the name before it existed and cached the miss.
-        flush_resolved_cache()
-        return f"http://{cfg.host}/"
-
-    def _pick_public_port(self) -> int:
-        """443; 8443 when this user may not open ports below 1024."""
-        for port in (443, 8443):
-            with socket.socket() as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    sock.bind(("0.0.0.0", port))
-                    return port
-                except OSError:
-                    continue
-        raise TunnelError("No pude abrir el puerto 443 ni el 8443 para HTTPS.")
 
     def _start_proxy(self) -> None:
         pkg_root = Path(__file__).resolve().parent.parent
