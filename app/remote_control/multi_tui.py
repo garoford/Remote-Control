@@ -57,7 +57,7 @@ class CreateScreen(ModalScreen[str | None]):
         self.query_one("#new-ok", Button).disabled = True
 
         def log(line: str) -> None:
-            if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or "listo" in line:
+            if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or line.endswith("…") or "listo" in line:
                 self.app.call_from_thread(result.update, line[:80])
 
         def work() -> None:

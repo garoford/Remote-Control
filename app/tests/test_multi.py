@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -111,6 +112,13 @@ class InsideTests(unittest.TestCase):
             self.assertEqual(multi.tunnel_start("backend"), "https://x.trycloudflare.com")
         self.assertEqual([c[0] for c in calls], ["run", "stop", "start", "run"])
         self.assertEqual(calls[0][1][-1], "stop")
+
+    def test_the_container_gets_the_pcs_terminal(self) -> None:
+        script = (Path(multi.__file__).with_name("container_setup.sh")).read_text()
+        for need in ("oh-my-posh", "night-owl.omp.json", "zsh-autosuggestions", "zsh-syntax-highlighting",
+                     "zsh-history-substring-search", "zsh-completions", "fzf", "bat", "nvm", "bun.sh",
+                     "claude.ai/install.sh", "@openai/codex", "cursor.com/install", ".config/remote-control/zshrc"):
+            self.assertIn(need, script, need)
 
     def test_commands_run_as_the_container_user(self) -> None:
         fake = FakePodman()

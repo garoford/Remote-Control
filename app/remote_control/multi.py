@@ -333,6 +333,16 @@ def install_rc(name: str, log=lambda _line: None) -> None:
     run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local", user="root")
     run(name, "chmod", "755", RC_BIN)
     log("Remote Control listo")
+    setup_env(name, log)
+
+
+def setup_env(name: str, log=lambda _line: None) -> None:
+    """The PC's terminal inside: zsh, Oh My Posh, plugins, tools, Node, Bun and
+    the AI CLIs (container_setup.sh). Skips what is there: quick on updates."""
+    script = f"{HOME}/.local/share/remote-control/remote_control/container_setup.sh"
+    out = run(name, "bash", script, timeout=1800, check=False)
+    for line in out.splitlines():
+        log(line)
 
 
 def tunnel_status(name: str) -> dict:

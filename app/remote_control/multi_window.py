@@ -779,7 +779,7 @@ class MultiWindow(Adw.ApplicationWindow):
             status.set_label("Creando… la primera vez arma la imagen y puede tardar unos minutos.")
 
             def log(line: str) -> None:
-                if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or "listo" in line:
+                if line.startswith(("STEP", "Creando", "Copiando", "Preparando")) or line.endswith("…") or "listo" in line:
                     GLib.idle_add(status.set_label, line[:90])
 
             def done(_box, error):
