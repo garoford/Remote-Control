@@ -8,6 +8,8 @@ set -euo pipefail
 REPO_URL="${REMOTE_CONTROL_REPO_URL:-https://github.com/garoford/Remote-Control.git}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/remote-control"
 SRC="$SHARE/src"
+# web_ports (install) and u_services (uninstall): VPS ports 80/443 without root.
+SYSCTL_PORTS=/etc/sysctl.d/99-remote-control-ports.conf
 
 # --- look ----------------------------------------------------------------
 # A terminal gets colors, a spinner per step and a summary; the commands'
@@ -566,6 +568,11 @@ u_services() {
   rm -f "$units"/remote-control-update.service "$units"/remote-control-update.timer "$units"/remote-control-router.service
   need_cmd systemctl && systemctl --user daemon-reload 2>/dev/null || true
   rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/dev.garoford.RemoteControl-autostart.desktop"
+  # The VPS port setting (web_ports) goes back to the system default.
+  if [[ -f "$SYSCTL_PORTS" ]]; then
+    as_root rm -f "$SYSCTL_PORTS" && as_root sysctl -q -w net.ipv4.ip_unprivileged_port_start=1024 \
+      || warn "no pude quitar $SYSCTL_PORTS"
+  fi
   # The *.trycloudflare.com DNS route (tunnel.py) is system-wide.
   local dropin=/etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf
   if [[ -f "$dropin" ]]; then
@@ -638,7 +645,7 @@ uninstall() {
     [[ "${answer,,}" == si || "${answer,,}" == sí ]] || { printf '\n  Cancelado: no se borró nada.\n\n'; exit 1; }
     printf '\n'
   fi
-  [[ -f /etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf ]] && ask_sudo
+  [[ -f /etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf || -f "$SYSCTL_PORTS" ]] && ask_sudo
   STEPS=6
   step "Túnel y sesiones" u_stop
   step "Dominio propio" u_dns
@@ -701,6 +708,32 @@ install_podman() {
   need_cmd podman || die "no pude instalar Podman"
 }
 
+# On a VPS (its public IP on its own interface) your own domain is served
+# right here (router.py): https://name/ needs 443 and http:// needs 80, which
+# a normal user may not open. Let it, for good (sysctl.d). root can already;
+# a PC at home is skipped (its router forwards 443 to the fallback port).
+web_ports() {
+  if ((EUID == 0)); then
+    note "root: ya puede"
+    return
+  fi
+  local pub cur
+  pub="$(curl -fsS -m 8 https://api.ipify.org 2>/dev/null || true)"
+  if [[ -z "$pub" ]] || ! ip -4 -o addr 2>/dev/null | grep -qw -- "$pub"; then
+    note "no es un VPS, se omite"
+    return
+  fi
+  cur="$(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024)"
+  if ((cur <= 80)); then
+    note "ya estaban"
+    return
+  fi
+  printf '%s\n' "# Remote Control: HTTPS (443) and its redirect (80) without root" \
+    "net.ipv4.ip_unprivileged_port_start = 80" | as_root tee "$SYSCTL_PORTS" >/dev/null
+  as_root sysctl -q -w net.ipv4.ip_unprivileged_port_start=80
+  note "80 y 443 sin root"
+}
+
 # The window and the CLI manage containers; the first one is made now
 # (the first image takes a few minutes: a whole Linux with what it needs).
 first_container() {
@@ -717,9 +750,9 @@ first_container() {
 
 banner
 choose_mode
-deps_ok && need_cmd ttyd && need_cmd cloudflared && { [[ "$MODE" != multi ]] || need_cmd podman; } || ask_sudo
+deps_ok && need_cmd ttyd && need_cmd cloudflared && [[ "$MODE" != multi ]] || ask_sudo
 STEPS=8
-[[ "$MODE" == multi ]] && STEPS=10
+[[ "$MODE" == multi ]] && STEPS=11
 step "Paquetes del sistema" install_pkgs
 step "ttyd" install_ttyd
 step "cloudflared" install_cloudflared
@@ -730,6 +763,7 @@ step "App y lanzador" install_app
 step "PATH y perfiles de la shell" hook_shells
 if [[ "$MODE" == multi ]]; then
   step "Podman" install_podman
+  step "Puertos web (VPS)" web_ports
   step "Primer contenedor" first_container
 fi
 summary

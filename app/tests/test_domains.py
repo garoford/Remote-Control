@@ -297,6 +297,15 @@ class AcmeTests(unittest.TestCase):
         expected = acme.b64(hashlib.sha256(f"tok.{acme.thumbprint(jwk)}".encode()).digest())
         self.assertEqual(acme.txt_value("tok", jwk), expected)
 
+    def test_expiry_reads_on_cryptography_41_too(self) -> None:
+        # Ubuntu 24.04's cryptography has no not_valid_after_utc.
+        later = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(days=40)
+        old_style = type("Cert", (), {"not_valid_after": later})()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(acme.x509, "load_pem_x509_certificate", lambda data: old_style):
+            path = Path(tmp) / "c.pem"
+            path.write_text("x")
+            self.assertAlmostEqual(acme.days_left(path), 40, delta=0.1)
+
     def test_a_fresh_certificate_is_kept(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cert, key = acme.cert_paths("rc.a.com", Path(tmp))

@@ -66,6 +66,17 @@ class RouterTests(unittest.TestCase):
                 get("otro.a.com")
 
 
+class HttpRedirectTests(unittest.TestCase):
+    def test_port_80_sends_our_names_to_https(self) -> None:
+        r = router.Router(443)
+        r.table = {"rc.bizz.page": 17700}
+        reply = r.redirect_target(b"GET /x?y=1 HTTP/1.1\r\nHost: rc.bizz.page\r\n\r\n", 443)
+        self.assertIn(b"301", reply)
+        self.assertIn(b"Location: https://rc.bizz.page/x?y=1\r\n", reply)
+        self.assertIn(b"Location: https://rc.bizz.page:8443/", r.redirect_target(b"GET / HTTP/1.1\r\nHost: rc.bizz.page:80\r\n\r\n", 8443))
+        self.assertIsNone(r.redirect_target(b"GET / HTTP/1.1\r\nHost: otro.com\r\n\r\n", 443))
+
+
 class AssignTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = domains.DomainConfig(provider="namecom", host="rc.a.com", zone="a.com", creds={"user": "u", "token": "t"})

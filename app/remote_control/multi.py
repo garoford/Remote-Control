@@ -357,6 +357,11 @@ def tunnel_start(name: str) -> str:
     A stopped container is started first."""
     if not get(name).running:
         start(name)
+    from . import router
+
+    if name in router.load_routes() and not router.service_active():
+        # Its own domain: the router brings HTTPS to it (no cloudflared inside).
+        router.ensure_service()
     out = run(name, RC_BIN, "start", timeout=300)
     urls = re.findall(r"https?://\S+", out)
     if not urls:

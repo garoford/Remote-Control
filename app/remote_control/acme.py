@@ -52,7 +52,9 @@ def days_left(cert: Path) -> float:
         data = x509.load_pem_x509_certificate(cert.read_bytes())
     except (OSError, ValueError):
         return -1
-    return (data.not_valid_after_utc - dt.datetime.now(dt.timezone.utc)).total_seconds() / 86400
+    # not_valid_after_utc is cryptography 42+; Ubuntu 24.04 ships 41.
+    end = getattr(data, "not_valid_after_utc", None) or data.not_valid_after.replace(tzinfo=dt.timezone.utc)
+    return (end - dt.datetime.now(dt.timezone.utc)).total_seconds() / 86400
 
 
 def b64(data: bytes) -> str:

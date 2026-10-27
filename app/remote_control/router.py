@@ -146,13 +146,13 @@ def _release(prov: domains.Provider, cfg: domains.DomainConfig, host: str, publi
 
 
 def _tell_container(box: str, url: str | None) -> None:
-    """The container's Remote Control serves its URL without cloudflared (tunnel.py)."""
-    path = f"{multi.HOME}/.config/remote-control/public-url"
+    """The container's Remote Control serves its URL without cloudflared (tunnel.py).
+
+    Written through ``podman cp``, so it works with the container stopped (its
+    tunnel off, which is when the name is changed). Empty means no domain.
+    """
     try:
-        if url:
-            multi.run(box, "sh", "-c", f"mkdir -p {multi.HOME}/.config/remote-control && printf '%s' '{url}' > {path}")
-        else:
-            multi.run(box, "rm", "-f", path)
+        multi._write_file(box, f"{multi.HOME}/.config/remote-control/public-url", url or "")
     except multi.MultiError:
         pass
 
@@ -250,6 +250,54 @@ class Router:
         sock.rc_host = server_name.lower()
         return None
 
+    def redirect_target(self, request: bytes, public_port: int) -> bytes | None:
+        """What port 80 answers: a redirect to the same page on HTTPS, for our names."""
+        try:
+            head = request.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+            line, *headers = head.split("\r\n")
+            path = line.split(" ")[1]
+        except (IndexError, UnicodeDecodeError):
+            return None
+        host = next((h.split(":", 1)[1].strip() for h in headers if h.lower().startswith("host:")), "")
+        host = host.split(":", 1)[0].lower()
+        if host not in self.table or not path.startswith("/"):
+            return None
+        where = f"https://{host}" + ("" if public_port == 443 else f":{public_port}") + path
+        return (
+            "HTTP/1.1 301 Moved Permanently\r\n"
+            f"Location: {where}\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ).encode("latin-1")
+
+    def serve_http(self, port: int = 80, public_port: int = 443, listen_host: str = "0.0.0.0") -> None:
+        """Port 80, when this user may open it: everything goes to HTTPS."""
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((listen_host, port))
+        except OSError:
+            print(f"router: sin puerto {port} (solo HTTPS)", file=sys.stderr, flush=True)
+            return
+        sock.listen(64)
+
+        def answer(conn: socket.socket) -> None:
+            try:
+                conn.settimeout(10)
+                reply = self.redirect_target(conn.recv(8192), public_port)
+                conn.sendall(reply or b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        while True:
+            try:
+                conn, _addr = sock.accept()
+            except OSError:
+                time.sleep(0.2)
+                continue
+            threading.Thread(target=answer, args=(conn,), daemon=True).start()
+
     def serve(self, listen_host: str = "0.0.0.0") -> None:
         sock = socket.socket()
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -326,5 +374,9 @@ def main(_argv: list[str] | None = None) -> int:
     router.reload()
     print(f"router: :{router.port} → {router.table}", file=sys.stderr, flush=True)
     threading.Thread(target=_keep, args=(router,), daemon=True).start()
+    # http://name (typed without https://) lands on HTTPS. 443 only: with the
+    # fallback port the router of the house forwards 443, not 80.
+    if router.port == 443:
+        threading.Thread(target=router.serve_http, daemon=True).start()
     router.serve()
     return 0

@@ -349,6 +349,8 @@ class MultiWindow(Adw.ApplicationWindow):
         host = router.load_routes().get(b.name)
         zone = cfg.zone if cfg else ""
         busy = b.name in self._busy
+        # The name is set with the tunnel off; on, it is the one in use.
+        on = bool(self.tunnel.get("running")) and b.running
         for cls in ("on", "busy", "off"):
             self.dom_state.remove_css_class(cls)
         self.dom_hint.remove_css_class("warn")
@@ -360,11 +362,12 @@ class MultiWindow(Adw.ApplicationWindow):
             self.dom_btn.set_label("Quitar")
             self.dom_btn.remove_css_class("rc-btn-save")
             self.dom_btn.add_css_class("rc-btn-danger")
-            self.dom_btn.set_sensitive(not busy)
+            self.dom_btn.set_sensitive(not busy and not on)
             self.dom_state.add_css_class("on")
             self.dom_state.set_label("Activo")
             port = self._reach.public_port if self._reach else 443
-            self.dom_hint.set_label(f"{router.public_url(host, port)}  ·  {'router activo' if router.service_active() else 'router detenido'}")
+            tail = "apaga el túnel para cambiarlo" if on else ("router activo" if router.service_active() else "se usa al encender el túnel")
+            self.dom_hint.set_label(f"{router.public_url(host, port)}  ·  {tail}")
             return
         self.dom_btn.set_label("Activar")
         self.dom_btn.remove_css_class("rc-btn-danger")
@@ -395,9 +398,9 @@ class MultiWindow(Adw.ApplicationWindow):
         else:
             self.dom_state.add_css_class("on")
             self.dom_state.set_label("Disponible")
-            self.dom_hint.set_label(f"{self._reach.why}.")
-            self.dom_entry.set_sensitive(not busy)
-            self.dom_btn.set_sensitive(not busy and b.running)
+            self.dom_hint.set_label("Apaga el túnel para configurar el dominio." if on else f"{self._reach.why}.")
+            self.dom_entry.set_sensitive(not busy and not on)
+            self.dom_btn.set_sensitive(not busy and not on)
 
     def _toggle_domain(self) -> None:
         b = self._box()

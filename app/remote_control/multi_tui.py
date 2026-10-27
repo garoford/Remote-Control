@@ -392,14 +392,17 @@ class MultiTUI(App):
         state, sub, btn, hint = (self.query_one(w) for w in ("#dom-state", "#dom-sub", "#dom-btn", "#dom-hint"))
         self.query_one("#dom-zone", Static).update(f".{zone}" if zone else "")
         busy = b.name == self.busy_name
+        # The name is set with the tunnel off; on, it is the one in use.
+        on = bool(self.tunnel.get("running")) and b.running
         hint.set_classes("")
         if host:
             sub.value = host[: -len(zone) - 1] if zone and host.endswith("." + zone) else host
             sub.disabled = True
-            btn.label, btn.disabled = "Quitar", busy
+            btn.label, btn.disabled = "Quitar", busy or on
             state.set_classes("chip on")
             state.update("Activo")
-            hint.update(router.public_url(host, self.reach.public_port if self.reach else 443))
+            url = router.public_url(host, self.reach.public_port if self.reach else 443)
+            hint.update(url + ("  ·  apaga el túnel para cambiarlo" if on else ""))
             return
         btn.label = "Activar"
         if self.dom_for != b.name:
@@ -426,8 +429,10 @@ class MultiTUI(App):
             state.update("Disponible")
             hint.update(self.reach.why + ".")
             ok = True
-        sub.disabled = not ok or busy
-        btn.disabled = not ok or busy or not b.running
+        if ok and on:
+            hint.update("Apaga el túnel para configurar el dominio.")
+        sub.disabled = not ok or busy or on
+        btn.disabled = not ok or busy or on
 
     def account_dialog(self) -> None:
         """The provider account (the same one the window's ⚙ opens)."""
