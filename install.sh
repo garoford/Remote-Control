@@ -2,6 +2,7 @@
 # Install Remote Control from GitHub. Safe to re-run.
 # curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/refs/heads/main/install.sh | bash
 # Asks Normal or Multi in a terminal; pick it ahead with  | bash -s -- --multi  (or --normal).
+# Uninstall:  remote-control uninstall   or   | bash -s -- --uninstall [--keep-data] [--yes]
 set -euo pipefail
 
 REPO_URL="${REMOTE_CONTROL_REPO_URL:-https://github.com/garoford/Remote-Control.git}"
@@ -488,6 +489,179 @@ install_app() {
   [[ -f "$tree/app/install.sh" ]] || die "No encuentro app/install.sh en $tree"
   bash "$tree/app/install.sh"
 }
+
+# --- uninstall ---------------------------------------------------------------
+# install.sh --uninstall [--keep-data] [--yes]   (also `remote-control uninstall`)
+# Everything this script and the app put on the machine, in reverse; the
+# system packages stay (other programs may use them), and so do the user's
+# pasted files (~/Remote Control) and herdr (a tool of its own).
+
+KEEP_DATA=0
+ASSUME_YES=0
+RCPY=(env PYTHONPATH="$SHARE" python3)
+LABEL="dev.garoford.remote-control"
+
+has_package() { [[ -d "$SHARE/remote_control" ]]; }
+
+u_stop() {
+  if has_package; then
+    "${RCPY[@]}" -c 'from remote_control.tunnel import TunnelService; TunnelService().stop()' || true
+    # The "this machine is shared" notes in every profile's CLAUDE.md/AGENTS.md…
+    "${RCPY[@]}" -c 'from remote_control import agent_context; agent_context.clear()' || true
+  fi
+  tmux -L cf-remote kill-server 2>/dev/null || true
+  pkill -f "remote_control[.]proxy" 2>/dev/null || true
+  pkill -f "ttyd --interface 127[.]0[.]0[.]1" 2>/dev/null || true
+  pkill -f "cloudflared tunnel --url http://127[.]0[.]0[.]1" 2>/dev/null || true
+}
+
+u_dns() {
+  if ((KEEP_DATA)); then
+    note "se mantienen (--keep-data)"
+    return
+  fi
+  has_package && [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/remote-control/domain.json" ]] || {
+    note "no había"
+    return
+  }
+  # Only records Remote Control made: the containers' names and this machine's.
+  "${RCPY[@]}" - <<'PY' || warn "no pude quitar los registros DNS (quítalos en tu proveedor)"
+from remote_control import domains, router
+cfg = domains.load_config()
+gone = []
+for box, host in list(router.load_routes().items()):
+    router.unassign(box)
+    gone.append(host)
+if cfg and cfg.host and not cfg.problems():
+    prov = domains.provider_for(cfg)
+    zone, name = domains.locate(cfg, prov)
+    ip = domains.public_ipv4()
+    if ip and ("A", ip) in prov.records_at(zone, name):
+        prov.delete_record(zone, name, "A")
+        gone.append(cfg.host)
+    prov.unforward(zone, name)
+print("quitados:", ", ".join(gone) or "ninguno")
+PY
+  note "$(tail -n 1 "$LOG" | sed 's/^quitados: //')"
+}
+
+u_containers() {
+  if ! need_cmd podman; then
+    note "sin Podman"
+    return
+  fi
+  local ids
+  ids="$(podman ps -aq --filter "label=$LABEL")"
+  [[ -z "$ids" ]] || podman rm -f -v $ids >/dev/null
+  podman images -q localhost/remote-control-multi | sort -u | xargs -r podman rmi -f >/dev/null || true
+  note "$(printf '%s\n' "$ids" | grep -c . || true) borrados"
+}
+
+u_services() {
+  local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  if need_cmd systemctl; then
+    systemctl --user disable --now remote-control-update.timer remote-control-update.service \
+      remote-control-router.service >/dev/null 2>&1 || true
+  fi
+  rm -f "$units"/remote-control-update.service "$units"/remote-control-update.timer "$units"/remote-control-router.service
+  need_cmd systemctl && systemctl --user daemon-reload 2>/dev/null || true
+  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/dev.garoford.RemoteControl-autostart.desktop"
+  # The *.trycloudflare.com DNS route (tunnel.py) is system-wide.
+  local dropin=/etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf
+  if [[ -f "$dropin" ]]; then
+    as_root rm -f "$dropin" && { as_root systemctl reload systemd-resolved 2>/dev/null || as_root systemctl restart systemd-resolved 2>/dev/null || true; } \
+      || warn "no pude quitar $dropin"
+  fi
+}
+
+u_files() {
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}" cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  if ((KEEP_DATA)); then
+    # Everything but the profiles (their logins) and the settings.
+    find "$SHARE" -mindepth 1 -maxdepth 1 ! -name profiles -exec rm -rf {} +
+  else
+    rm -rf "$SHARE" "$cfg/remote-control"
+  fi
+  rm -rf "$HOME/.cache/cf-quick-tunnel" "${XDG_STATE_HOME:-$HOME/.local/state}/remote-control"
+  rm -f "$HOME/.local/bin/remote-control" "$data/applications/dev.garoford.RemoteControl.desktop"
+  find "$data/icons/hicolor" -name 'dev.garoford.RemoteControl.*' -delete 2>/dev/null || true
+  need_cmd update-desktop-database && update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+}
+
+# The two blocks hook_shells() added (a comment line and the line under it).
+u_shell() {
+  local rc
+  for rc in "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
+    [[ -f "$rc" ]] || continue
+    sed -i -e '/^# Remote Control: PATH$/{N;d;}' -e '/^# Remote Control: AI CLI profiles and `rc`$/{N;d;}' "$rc"
+  done
+}
+
+uninstall() {
+  local a answer boxes=0 profs=""
+  for a in "$@"; do
+    case "$a" in
+      --keep-data) KEEP_DATA=1 ;;
+      --yes | -y) ASSUME_YES=1 ;;
+    esac
+  done
+  # Killing the tunnel's tmux would kill this very script.
+  if [[ -n "${RC_KEEPHISTORY:-}" || "${TMUX:-}" == */cf-remote,* ]]; then
+    die "estás dentro de Remote Control: desinstala desde otra terminal (SSH o la PC misma)."
+  fi
+  # The log of a run that deletes ~/.cache/remote-control goes elsewhere.
+  LOG="${TMPDIR:-/tmp}/remote-control-uninstall.log"
+  : >"$LOG"
+  need_cmd podman && boxes="$(podman ps -aq --filter "label=$LABEL" | grep -c . || true)"
+  [[ -d "$SHARE/profiles" ]] && profs="$(find "$SHARE/profiles" -mindepth 1 -maxdepth 1 -type d -printf '%f ')"
+
+  if ((UI)); then
+    printf '\n  %s%s ▶_ %s  %sRemote Control%s\n        %sdesinstalar%s\n\n' "$B" "$RED" "$R" "$B" "$R" "$MUTED" "$R"
+    printf '  %sSe borra:%s\n' "$B" "$R"
+  else
+    printf 'Remote Control: desinstalar\nSe borra:\n'
+  fi
+  printf '    • la app, el lanzador, el auto-update y el túnel\n'
+  ((boxes)) && printf '    • %s%d contenedor(es)%s con todo lo que tienen\n' "$RED" "$boxes" "$R"
+  if ((!KEEP_DATA)); then
+    printf '    • tu contraseña y la cuenta de dominios (~/.config/remote-control)\n'
+    [[ -n "$profs" ]] && printf '    • los perfiles %s%s%scon sus logins de IA\n' "$RED" "$profs" "$R"
+    printf '    • los registros DNS que creó Remote Control\n'
+  fi
+  printf '  %sSe queda:%s paquetes del sistema, herdr y ~/Remote Control (tus archivos)\n' "$B" "$R"
+  ((KEEP_DATA)) || printf '  %s(--keep-data conserva la contraseña, la cuenta y los perfiles)%s\n' "$MUTED" "$R"
+  printf '\n'
+  if ((!ASSUME_YES)); then
+    [[ -r /dev/tty ]] || die "sin terminal para confirmar: usa --yes"
+    printf '  Escribe %ssi%s para desinstalar: ' "$B" "$R"
+    read -r answer </dev/tty || answer=""
+    [[ "${answer,,}" == si || "${answer,,}" == sí ]] || { printf '\n  Cancelado: no se borró nada.\n\n'; exit 1; }
+    printf '\n'
+  fi
+  [[ -f /etc/systemd/resolved.conf.d/99-remote-control-trycloudflare.conf ]] && ask_sudo
+  STEPS=6
+  step "Túnel y sesiones" u_stop
+  step "Dominio propio" u_dns
+  step "Contenedores" u_containers
+  step "Servicios" u_services
+  step "Archivos" u_files
+  step "Shell" u_shell
+  if ((UI)); then
+    printf '\n  %s╭─%s %s%sDesinstalado%s\n' "$TEAL" "$R" "$B" "$GREEN" "$R"
+    row "Se quedó" "paquetes del sistema, herdr, ~/Remote Control"
+    ((KEEP_DATA)) && row "Datos" "contraseña, cuenta de dominios y perfiles (--keep-data)"
+    row "Reinstalar" "${TEAL}curl -fsSL …/install.sh | bash${R}"
+    row "Log" "${MUTED}$LOG${R}"
+    printf '  %s╰────────────────────────────────────────────────────────%s\n\n' "$TEAL" "$R"
+  else
+    log "Desinstalado. Se quedó: paquetes del sistema, herdr y ~/Remote Control. Log: $LOG"
+  fi
+  exit 0
+}
+
+for arg in "$@"; do
+  [[ "$arg" == --uninstall ]] && uninstall "$@"
+done
 
 # Normal: Remote Control on this system. Multi: isolated containers (multi.py),
 # each with its own tunnel, managed from the window or `remote-control multi`.

@@ -44,6 +44,26 @@ def _run_gui(gtk_argv: list[str]) -> int:
     return RemoteControlApp().run(gtk_argv)
 
 
+def _uninstall(args: list[str]) -> int:
+    """install.sh --uninstall, run from a copy: it deletes the folder it lives in."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    for script in (here.parent / "src" / "install.sh", here.parent.parent / "install.sh"):
+        if script.is_file():
+            break
+    else:
+        print("error: no encuentro install.sh; corre  curl -fsSL …/install.sh | bash -s -- --uninstall", file=sys.stderr)
+        return 1
+    fd, copy = tempfile.mkstemp(prefix="remote-control-uninstall-", suffix=".sh")
+    os.close(fd)
+    shutil.copyfile(script, copy)
+    os.execvp("bash", ["bash", copy, "--uninstall", *args])
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv if argv is None else argv)
     if len(raw) > 1 and raw[1] in ("cli", "tui"):
@@ -54,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         from remote_control.autostart import headless_start
 
         return headless_start()
+    if len(raw) > 1 and raw[1] == "uninstall":
+        return _uninstall(raw[2:])
     if len(raw) > 1 and raw[1] == "router":
         from remote_control.router import main as router_main
 

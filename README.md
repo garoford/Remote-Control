@@ -77,6 +77,15 @@ systemctl --user disable --now remote-control-update.timer
 
 Log: `~/.local/share/remote-control/update.log`
 
+## Desinstalar
+
+```bash
+remote-control uninstall               # pide escribir "si"; --keep-data conserva contraseña, cuenta de dominios y perfiles
+curl -fsSL https://raw.githubusercontent.com/garoford/Remote-Control/refs/heads/main/install.sh | bash -s -- --uninstall
+```
+
+Quita la app, el lanzador, el auto-update, el router, la sesión tmux del túnel, los contenedores multi (y su imagen), los registros DNS que creó Remote Control, sus avisos en los CLAUDE.md/AGENTS.md de cada perfil y las líneas que agregó a `~/.bashrc`/`~/.zshrc`. Se quedan los paquetes del sistema, herdr y `~/Remote Control` (tus archivos pegados). Hay que correrlo desde fuera de Remote Control (SSH o la PC), no desde su terminal web.
+
 ## Desarrollo
 
 Desde un clone del repo:
