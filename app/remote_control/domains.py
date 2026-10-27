@@ -30,6 +30,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -639,12 +640,45 @@ class Reach:
     public_port: int = 443
 
 
+def port_holder(port: int) -> str:
+    """The program listening on ``port`` here ("" if none, or not visible)."""
+    ss = shutil.which("ss")
+    if not ss:
+        return ""
+    try:
+        out = subprocess.run([ss, "-ltnpH", f"sport = :{port}"], capture_output=True, text=True, timeout=5, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not out.strip():
+        return ""
+    found = re.search(r'users:\(\("([^"]+)"', out)
+    return found.group(1) if found else "otro programa"
+
+
+def _ours_on(port: int) -> bool:
+    """Our router (or a direct-mode proxy) already serving that port."""
+    if port_holder(port) not in ("python3", "python", "remote-control"):
+        return False
+    from . import router
+
+    return router.service_active()
+
+
 def direct_reach(public: str | None) -> Reach:
-    """A server (own public IP) can always; a PC only when its router forwards
-    443 (or 8443) to it, checked from outside while we listen on our port."""
+    """A server (own public IP) can when 443 is free or already ours; a PC
+    only when its router forwards 443 (or 8443) to it, checked from outside
+    while we listen on our port."""
     local = local_https_port()
     if has_own_public_ip(public):
-        return Reach(True, f"Servidor con IP pública ({public})", local, local)
+        # Another web server (Traefik, nginx, Caddy…) on 443 would answer
+        # instead of ours, with its own certificate.
+        if local == 443 or _ours_on(443):
+            return Reach(True, f"Servidor con IP pública ({public})", 443, 443)
+        # 443 taken: our own port (8443) works if the firewall lets it in;
+        # the check below sees whether the internet reaches us there.
+        busy = port_holder(443) or "otro programa"
+    else:
+        busy = ""
     if not public:
         return Reach(False, "No hay conexión para comprobar el puerto", local)
     hits = []
@@ -675,10 +709,14 @@ def direct_reach(public: str | None) -> Reach:
             # Open, and (when we listen) it was us who answered, not another box.
             if port_open_outside(outside, public) and (listener is None or hits):
                 where = "443" if outside == 443 else f"{outside} (la URL lleva :{outside})"
+                if busy:
+                    return Reach(True, f"El 443 lo usa {busy}: tu dominio va por el {where}", local, outside)
                 return Reach(True, f"El puerto {where} de tu router llega a esta PC", local, outside)
     finally:
         if listener is not None:
             listener.close()
+    if busy:
+        return Reach(False, f"El puerto 443 lo usa {busy}; abre el {local} en el firewall del servidor o libera el 443", local)
     pc, router = lan_route()
     target = f"{pc}:{local}" if pc else f"esta PC, puerto {local}"
     return Reach(False, f"Abre el puerto 443 de tu router{f' ({router})' if router else ''} hacia {target}", local)

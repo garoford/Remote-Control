@@ -83,8 +83,43 @@ class HostTests(unittest.TestCase):
         for bad in ("midominio", "-a.com", "a..com", "1.2.3.4", "a b.com", "ñ.com"):
             self.assertFalse(domains.valid_host(bad), bad)
 
+    def test_a_server_whose_443_is_taken_by_another_web_server_cannot(self) -> None:
+        with mock.patch.object(domains, "local_addresses", lambda: {"203.0.113.7"}), \
+             mock.patch.object(domains, "local_https_port", lambda: 8443), \
+             mock.patch.object(domains, "port_holder", lambda port: "traefik"), \
+             mock.patch.object(domains, "port_open_outside", lambda port, public: False):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertFalse(reach.ok)
+        self.assertIn("traefik", reach.why)
+
+    def test_a_server_whose_443_is_taken_uses_8443_when_it_reaches_us(self) -> None:
+        port = _free_port()
+
+        def outside(ext, _public):
+            if ext != domains.FALLBACK_PORT:
+                return False
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            time.sleep(0.8)
+            return True
+
+        with mock.patch.object(domains, "local_addresses", lambda: {"203.0.113.7"}), \
+             mock.patch.object(domains, "local_https_port", lambda: port), \
+             mock.patch.object(domains, "port_holder", lambda p: "traefik"), \
+             mock.patch.object(domains, "port_open_outside", outside):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertEqual((reach.ok, reach.public_port), (True, domains.FALLBACK_PORT))
+        self.assertIn("traefik", reach.why)
+
+    def test_a_server_already_serving_443_with_our_router_can(self) -> None:
+        with mock.patch.object(domains, "local_addresses", lambda: {"203.0.113.7"}), \
+             mock.patch.object(domains, "local_https_port", lambda: 8443), \
+             mock.patch.object(domains, "_ours_on", lambda port: True):
+            reach = domains.direct_reach("203.0.113.7")
+        self.assertEqual((reach.ok, reach.public_port), (True, 443))
+
     def test_a_server_with_its_own_public_ip_can(self) -> None:
         with mock.patch.object(domains, "local_addresses", lambda: {"127.0.0.1", "203.0.113.7"}), \
+             mock.patch.object(domains, "local_https_port", lambda: 443), \
              mock.patch.object(domains, "port_open_outside", side_effect=AssertionError("no check needed")):
             reach = domains.direct_reach("203.0.113.7")
         self.assertTrue(reach.ok)
