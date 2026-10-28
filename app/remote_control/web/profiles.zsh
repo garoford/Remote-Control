@@ -80,6 +80,12 @@ _rc_cli() {
     RC_PROFILE="" ARGV0="$cli" command "${pre[@]}" "$cli" "$@"
     return
   fi
+  # Its agents' git and rsync sign in with the profile's SSH keys too.
+  local -a ssh_opts
+  _rc_ssh_opts
+  if (( ${#ssh_opts} )); then
+    local -x GIT_SSH_COMMAND="ssh ${(j: :)${(@q)ssh_opts}}" RSYNC_RSH="ssh ${(j: :)${(@q)ssh_opts}}"
+  fi
   HOME="$home" \
     XDG_CONFIG_HOME="$home/.config" \
     XDG_DATA_HOME="$home/.local/share" \
@@ -91,26 +97,100 @@ _rc_cli() {
     command "${pre[@]}" "$cli" "$@"
 }
 
-# git and gh of a profile's terminal are that user's: its ~/.gitconfig
-# (identity, aliases, credential helper and the credentials it stores) and its
-# gh login live in its HOME, the same one its AI CLIs commit with. SSH keys
-# stay shared: ssh reads them from the system user's home, not from $HOME.
+# Credentials are the profile's own.
+# - git and gh: its ~/.gitconfig (identity, aliases, credential helper and the
+#   credentials it stores) and its gh login live in its HOME, the same one its
+#   AI CLIs run with.
+# - SSH: ssh never reads $HOME (it takes the system user's ~/.ssh), so a
+#   profile with keys of its own in its HOME's .ssh gets them passed
+#   explicitly, and only them: git clone/pull/push, ssh, scp, sftp and rsync
+#   then sign in as that user, never as the primary. A profile with no keys of
+#   its own keeps using the system's. ssh-keygen there makes its key in the
+#   profile's .ssh (by default it would overwrite the primary's).
+
+# The ssh options for $home's keys (into the caller's ssh_opts), none if it has none.
+_rc_ssh_opts() {
+  ssh_opts=()
+  local dir="$home/.ssh" k
+  local -a keys
+  for k in "$dir"/id_*(N.); do
+    [[ "$k" == *.pub ]] || keys+=("$k")
+  done
+  (( ${#keys} )) || return 0
+  # Its config, or none: the system's could add the primary's IdentityFile.
+  if [[ -f "$dir/config" ]]; then
+    ssh_opts=(-F "$dir/config")
+  else
+    ssh_opts=(-F /dev/null)
+  fi
+  ssh_opts+=(-o IdentitiesOnly=yes -o IdentityAgent=none)
+  for k in $keys; do
+    ssh_opts+=(-i "$k")
+  done
+  # Hosts it trusts first (new ones are noted there), then the system's.
+  ssh_opts+=(-o "UserKnownHostsFile=$dir/known_hosts $HOME/.ssh/known_hosts")
+}
+
 _rc_vcs() {
   local tool="$1"
   shift
   local id="" home=""
+  local -a ssh_opts
   _rc_profile
   if [[ -z "$id" ]]; then
     command "$tool" "$@"
     return
   fi
-  HOME="$home" XDG_CONFIG_HOME="$home/.config" command "$tool" "$@"
+  _rc_ssh_opts
+  if (( ${#ssh_opts} )); then
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" GIT_SSH_COMMAND="ssh ${(j: :)${(@q)ssh_opts}}" command "$tool" "$@"
+  else
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" command "$tool" "$@"
+  fi
+}
+
+_rc_ssh() {
+  local tool="$1"
+  shift
+  local id="" home=""
+  local -a ssh_opts
+  _rc_profile
+  [[ -n "$id" ]] && _rc_ssh_opts
+  if (( ! ${#ssh_opts} )); then
+    command "$tool" "$@"
+  elif [[ "$tool" == rsync ]]; then
+    RSYNC_RSH="ssh ${(j: :)${(@q)ssh_opts}}" command rsync "$@"
+  else
+    command "$tool" "${ssh_opts[@]}" "$@"
+  fi
+}
+
+_rc_keygen() {
+  local id="" home="" arg prev="" kind=ed25519
+  _rc_profile
+  # Making a key (no -f, and not -l/-R/-F… on an existing one) in a profile:
+  # its .ssh, not the primary's key.
+  if [[ -n "$id" ]] && ! (( ${@[(I)-[flRFyeiDK]*]} )); then
+    mkdir -p "$home/.ssh" && chmod 700 "$home/.ssh"
+    for arg in "$@"; do
+      [[ "$prev" == -t ]] && kind="$arg"
+      prev="$arg"
+    done
+    command ssh-keygen "$@" -f "$home/.ssh/id_$kind"
+    return
+  fi
+  command ssh-keygen "$@"
 }
 
 for _rc_name in git gh; do
   (( $+commands[$_rc_name] )) || continue
   eval "function $_rc_name { _rc_vcs $_rc_name \"\$@\" }"
 done
+for _rc_name in ssh scp sftp rsync; do
+  (( $+commands[$_rc_name] )) || continue
+  eval "function $_rc_name { _rc_ssh $_rc_name \"\$@\" }"
+done
+(( $+commands[ssh-keygen] )) && function ssh-keygen { _rc_keygen "$@" }
 
 for _rc_name in claude agent cursor-agent codex gemini agy aider opencode crush goose qwen amp copilot pi; do
   (( $+commands[$_rc_name] )) || continue
