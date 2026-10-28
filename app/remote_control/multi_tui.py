@@ -182,7 +182,7 @@ class MultiTUI(App):
     #actions Button { margin-right: 1; }
     #rm { background: #3b1d22; color: #ef5350; }
     #empty { color: #8a9bb3; padding: 2 2; }
-    #domain-buttons Button:disabled { background: #1d3b53; color: #5f7187; text-style: none; }
+    #domain-buttons Button:disabled, #dom-card Button:disabled { background: #1d3b53; color: #5f7187; text-style: none; }
     #domain-result.busy { color: #82aaff; }
     #dom-sub { width: 1fr; }
     #dom-zone { width: auto; color: #8a9bb3; padding: 0 1; }
@@ -395,6 +395,8 @@ class MultiTUI(App):
         busy = b.name == self.busy_name
         # The name is set with the tunnel off; on, it is the one in use.
         on = bool(self.tunnel.get("running")) and b.running
+        # With the tunnel on nothing here changes, the account included.
+        self.query_one("#dom-account", Button).disabled = busy or on
         hint.set_classes("")
         if host:
             sub.value = host[: -len(zone) - 1] if zone and host.endswith("." + zone) else host

@@ -311,5 +311,18 @@ class ProcessTests(VideoBase):
         self.assertIsNone(backgrounds.video_file(vid, "full"))
 
 
+class StillSourceTests(unittest.TestCase):
+    def test_previews_have_a_still_without_ffmpeg(self) -> None:
+        from remote_control import backgrounds
+
+        self.assertEqual(
+            backgrounds.still_source("https://assets.mixkit.co/videos/28085/28085-360.mp4"),
+            "https://assets.mixkit.co/videos/28085/28085-thumb-360-0.jpg",
+        )
+        self.assertEqual(backgrounds.still_source("https://x.com/a.jpg?w=1"), "https://x.com/a.jpg?w=1")
+        self.assertIsNone(backgrounds.still_source("https://x.com/clip.mp4"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -180,16 +180,18 @@ fi
 # the window GTK 4 + libadwaita. The rest adds features: fontTools/brotli
 # (phone font), Pillow (image previews), zsh (per-profile AI CLIs), wl-copy
 # (clipboard), dig (DNS check), ImageMagick (launcher icons).
-PKGS_dnf=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh
+# ffmpeg is required: animated backgrounds are converted to light, seekable
+# files with it, and their previews come from it (backgrounds.py).
+PKGS_dnf=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg-free
   python3-gobject gtk4 libadwaita python3-fonttools python3-brotli python3-pillow
   wl-clipboard bind-utils ImageMagick)
-PKGS_apt=(git python3 python3-pip rsync curl ca-certificates gnupg desktop-file-utils tmux ttyd zsh
+PKGS_apt=(git python3 python3-pip rsync curl ca-certificates gnupg desktop-file-utils tmux ttyd zsh ffmpeg
   python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-fonttools python3-brotli python3-pil
   wl-clipboard dnsutils imagemagick)
-PKGS_pacman=(git python python-pip rsync curl desktop-file-utils tmux ttyd zsh
+PKGS_pacman=(git python python-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg
   python-gobject gtk4 libadwaita python-fonttools python-brotli python-pillow
   wl-clipboard bind imagemagick cloudflared)
-PKGS_zypper=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh
+PKGS_zypper=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg
   python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 python3-fonttools python3-Brotli python3-Pillow
   wl-clipboard bind-utils ImageMagick)
 
@@ -213,6 +215,15 @@ if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! systemctl get-default 2>/dev
   mapfile -t PKGS_zypper < <(without_gui "${PKGS_zypper[@]}")
 fi
 
+# An ffmpeg already there (RPM Fusion's full one, a static build…) is kept:
+# Fedora's ffmpeg-free would conflict with it and stop the whole install.
+if command -v ffmpeg >/dev/null 2>&1; then
+  mapfile -t PKGS_dnf < <(printf '%s\n' "${PKGS_dnf[@]}" | grep -vx ffmpeg-free)
+  mapfile -t PKGS_apt < <(printf '%s\n' "${PKGS_apt[@]}" | grep -vx ffmpeg)
+  mapfile -t PKGS_pacman < <(printf '%s\n' "${PKGS_pacman[@]}" | grep -vx ffmpeg)
+  mapfile -t PKGS_zypper < <(printf '%s\n' "${PKGS_zypper[@]}" | grep -vx ffmpeg)
+fi
+
 PM=""
 for pm in dnf apt-get pacman zypper; do
   if need_cmd "$pm"; then
@@ -231,7 +242,7 @@ import brotli, fontTools, PIL
 
 deps_ok() {
   local c
-  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh dig; do
+  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh dig ffmpeg; do
     need_cmd "$c" || return 1
   done
   if ((HEADLESS)); then
@@ -428,7 +439,7 @@ row() {
 # The end: what is there, what is missing, how to start.
 summary() {
   local c missing="" optional="" w
-  for c in tmux ttyd cloudflared; do
+  for c in tmux ttyd cloudflared ffmpeg; do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || missing+=" $c"
   done
   ((HEADLESS)) || python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Adw, Gtk' \

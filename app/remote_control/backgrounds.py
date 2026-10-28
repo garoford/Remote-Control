@@ -633,7 +633,8 @@ def catalog_thumb(cid: str) -> Path | None:
         return path
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        return None
+        # Servers and containers may have no ffmpeg: a still, scaled by Pillow.
+        return _still_thumb(cid, item[4], path)
     with _thumb_lock:
         if path.is_file():
             return path
@@ -647,6 +648,46 @@ def catalog_thumb(cid: str) -> Path | None:
             subprocess.run(cmd, capture_output=True, timeout=30, check=True)
             os.replace(tmp, path)
         except (OSError, ValueError, subprocess.SubprocessError, BackgroundError):
+            tmp.unlink(missing_ok=True)
+            return None
+        finally:
+            src.unlink(missing_ok=True)
+    return path
+
+
+MIXKIT_CLIP = re.compile(r"^(https://assets\.mixkit\.co/videos/(\d+)/)\2-\d+\.mp4$")
+
+
+def still_source(url: str) -> str | None:
+    """An image for that preview: itself, or Mixkit's still of the same clip."""
+    if url.lower().split("?", 1)[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return url
+    found = MIXKIT_CLIP.match(url)
+    return f"{found.group(1)}{found.group(2)}-thumb-360-0.jpg" if found else None
+
+
+def _still_thumb(cid: str, url: str, path: Path) -> Path | None:
+    source = still_source(url)
+    if source is None:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    with _thumb_lock:
+        if path.is_file():
+            return path
+        folder().mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".thumb-{cid}.jpg")
+        src = path.with_name(f".thumb-{cid}.src")
+        try:
+            _fetch(source, src, THUMB_MAX_BYTES)
+            with Image.open(src) as img:
+                img = img.convert("RGB")
+                img.thumbnail((320, 320 * img.height // max(1, img.width)))
+                img.save(tmp, "JPEG", quality=78)
+            os.replace(tmp, path)
+        except (OSError, ValueError, BackgroundError):
             tmp.unlink(missing_ok=True)
             return None
         finally:

@@ -307,6 +307,7 @@ class MultiWindow(Adw.ApplicationWindow):
         account.add_css_class("rc-icon-btn")
         account.connect("clicked", lambda *_: self._account_dialog())
         head.append(account)
+        self.dom_account = account
         card.append(head)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.dom_entry = Gtk.Entry()
@@ -351,6 +352,8 @@ class MultiWindow(Adw.ApplicationWindow):
         busy = b.name in self._busy
         # The name is set with the tunnel off; on, it is the one in use.
         on = bool(self.tunnel.get("running")) and b.running
+        # With the tunnel on nothing here changes, the account included.
+        self.dom_account.set_sensitive(not busy and not on)
         for cls in ("on", "busy", "off"):
             self.dom_state.remove_css_class(cls)
         self.dom_hint.remove_css_class("warn")

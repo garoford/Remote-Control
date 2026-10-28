@@ -77,7 +77,7 @@ CONTAINERFILES = {
     "fedora": f"""FROM registry.fedoraproject.org/fedora:44
 RUN dnf -y install --setopt=install_weak_deps=False --setopt=max_parallel_downloads=20 --nodocs systemd systemd-pam dbus-broker sudo git python3 python3-pip \\
       python3-cryptography python3-pillow python3-fonttools python3-brotli rsync curl tmux ttyd zsh \\
-      bind-utils procps-ng which findutils hostname iproute pipewire pipewire-pulseaudio wireplumber \\
+      bind-utils procps-ng which findutils hostname iproute pipewire pipewire-pulseaudio wireplumber ffmpeg-free \\
       pulseaudio-utils glibc-langpack-en \\
  && curl -fsSL https://pkg.cloudflare.com/cloudflared.repo -o /etc/yum.repos.d/cloudflared.repo \\
  && dnf -y install cloudflared && dnf clean all
@@ -89,7 +89,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv libpam-systemd dbus-user-session \\
       sudo git python3 python3-pip python3-cryptography python3-pil python3-fonttools python3-brotli rsync \\
       curl ca-certificates gnupg tmux ttyd zsh dnsutils procps iproute2 pipewire pipewire-pulse wireplumber \\
-      pulseaudio-utils locales \\
+      pulseaudio-utils locales ffmpeg \\
  && mkdir -p --mode=0755 /usr/share/keyrings \\
  && curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg \\
  && echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \\
