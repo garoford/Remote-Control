@@ -105,6 +105,28 @@ class WrapperProfileTests(unittest.TestCase):
         self.assertEqual(self.home_seen("").split("\n")[:2], [str(self.home), ""])
 
 
+class CursorWorkspaceTests(unittest.TestCase):
+    def test_a_cursor_chat_comes_back_in_its_own_folder(self) -> None:
+        # From another folder --resume opens an empty chat with that id; that
+        # ghost must not win over the real one.
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project = Path(tmp), Path(tmp) / "Mi Proyecto"
+            project.mkdir()
+            chat = "0580654d-0ebf-4b1e"
+            for folder, cwd, size, has in (("aaa", str(project), 9000, True), ("bbb", tmp, 100, False)):
+                d = home / ".cursor" / "chats" / folder / chat
+                d.mkdir(parents=True)
+                (d / "meta.json").write_text(json.dumps({"cwd": cwd, "hasConversation": has}))
+                (d / "store.db").write_bytes(b"x" * size)
+            self.assertEqual(
+                workspaces.resume_command("agent", chat, home=home),
+                f"agent --workspace '{project}' --resume {chat}",
+            )
+            self.assertEqual(workspaces.resume_command("agent", "otro-chat-123", home=home), "agent --resume otro-chat-123")
+
+
 class RerunProfileTests(unittest.TestCase):
     def test_primary_cli_is_pinned_to_the_primary(self) -> None:
         self.assertEqual(workspaces._rerun({"cli": "agent", "resume": "abc12345-def"}), "RC_PROFILE= agent --resume abc12345-def")

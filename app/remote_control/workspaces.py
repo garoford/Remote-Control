@@ -1030,6 +1030,24 @@ def _claude_transcript(sid: str, home: Path) -> bool:
     return any((home / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
 
 
+def _cursor_workspace(chat: str, home: Path) -> str:
+    """The folder a Cursor chat belongs to. Cursor files each chat under its
+    folder (chats/<md5 of it>/<id>) and --resume only looks in the current
+    one: from anywhere else it starts an empty chat with that id. Several
+    folders may hold that id that way; the one with the conversation counts."""
+    best = (0, 0, "")
+    for meta in (home / ".cursor" / "chats").glob(f"*/{chat}/meta.json"):
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            size = (meta.parent / "store.db").stat().st_size
+        except (OSError, ValueError):
+            continue
+        cwd = data.get("cwd") if isinstance(data, dict) else None
+        if isinstance(cwd, str) and os.path.isdir(cwd):
+            best = max(best, (int(bool(data.get("hasConversation"))), size, cwd))
+    return best[2]
+
+
 def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
     if cli not in RESUME_FLAG:
         return ""
@@ -1038,6 +1056,10 @@ def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
         return cli
     if cli == "claude" and not _claude_transcript(resume, home):
         return cli
+    if cli == "agent":
+        workspace = _cursor_workspace(resume, home)
+        if workspace:
+            return f"agent --workspace {shlex.quote(workspace)} --resume {resume}"
     return f"{cli} {RESUME_FLAG[cli]} {resume}"
 
 
