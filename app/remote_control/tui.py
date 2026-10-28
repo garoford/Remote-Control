@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -44,6 +45,20 @@ def qr_text(url: str) -> Text | None:
         out.append("\n")
     return out
 
+
+
+def look_up(work) -> None:
+    """A read in the background that never holds up quitting. Textual's thread
+    workers are joined at exit, so leaving waited for a slow podman call;
+    these ask and change nothing, so they are just left behind."""
+
+    def run() -> None:
+        try:
+            work()
+        except Exception:  # mostly the app closed meanwhile: nobody to tell
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
 
 class Confirm(ModalScreen[bool]):
     """Yes / no box (switch the tunnel off)."""
@@ -120,7 +135,7 @@ class DomainScreen(ModalScreen[bool]):
                 reach = domains.Reach(False, str(exc), domains.FALLBACK_PORT)
             self.app.call_from_thread(self.reached, reach)
 
-        self.run_worker(work, thread=True, group="reach")
+        look_up(work)
 
     def reached(self, reach: domains.Reach) -> None:
         self.reach_ok = reach.ok
@@ -218,7 +233,7 @@ class DomainScreen(ModalScreen[bool]):
             except Exception as exc:
                 self.app.call_from_thread(self.loaded, [], str(exc))
 
-        self.run_worker(work, thread=True, exclusive=True)
+        look_up(work)
 
     def loaded(self, zones: list[str], error: str) -> None:
         self.query_one("#domain-load", Button).disabled = False
@@ -539,7 +554,7 @@ class RemoteControlTUI(App):
             else:
                 self.call_from_thread(self.set_domain_state, "off", "No disponible", reach.why)
 
-        self.run_worker(work, thread=True, group="domain-check", exclusive=True)
+        look_up(work)
 
     def paint_qr(self) -> None:
         if not self.url:

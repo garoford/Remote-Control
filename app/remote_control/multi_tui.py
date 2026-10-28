@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, ListItem, ListView, Select, Static, Switch
 
 from . import control, domains, multi, router
-from .tui import Confirm, RemoteControlTUI, qr_text
+from .tui import Confirm, RemoteControlTUI, look_up, qr_text
 
 REFRESH_S = 4
 
@@ -317,7 +317,7 @@ class MultiTUI(App):
             finally:
                 self.refreshing = False
 
-        self.run_worker(work, thread=True, group="refresh")
+        look_up(work)
 
     def paint(self, boxes: list[multi.Box], tunnel: dict | None, auto: bool | None) -> None:
         view = self.query_one("#boxes", ListView)
@@ -401,7 +401,7 @@ class MultiTUI(App):
             self.reach = reach
             self.call_from_thread(self.paint_domain)
 
-        self.run_worker(work, thread=True, group="reach")
+        look_up(work)
 
     def paint_domain(self) -> None:
         b = self.box()
@@ -505,7 +505,7 @@ class MultiTUI(App):
             if name == self.selected:
                 self.call_from_thread(setattr, field, "value", pw)
 
-        self.run_worker(work, thread=True, group="password")
+        look_up(work)
 
     # --- events --------------------------------------------------------------
 
