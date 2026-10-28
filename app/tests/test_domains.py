@@ -117,6 +117,20 @@ class HostTests(unittest.TestCase):
             reach = domains.direct_reach("203.0.113.7")
         self.assertEqual((reach.ok, reach.public_port), (True, 443))
 
+    def test_a_proxy_behind_a_gateway_vps_is_used_when_443_reaches_it(self) -> None:
+        # main has no public IP of its own: another VPS forwards 80/443 to it.
+        edge = domains.Edge("coolify-proxy", Path("/tmp"), "https", "http", "letsencrypt", "10.0.0.1")
+        with mock.patch.object(domains, "local_addresses", lambda: {"192.168.122.48"}), \
+             mock.patch.object(domains, "detect_traefik", lambda: edge), \
+             mock.patch.object(domains, "port_open_outside", lambda port, public: port == 443):
+            reach = domains.direct_reach("161.132.48.51")
+        self.assertEqual((reach.ok, reach.public_port), (True, 443))
+        self.assertIn("detrás de 161.132.48.51", reach.why)
+        with mock.patch.object(domains, "local_addresses", lambda: {"192.168.122.48"}), \
+             mock.patch.object(domains, "detect_traefik", lambda: edge), \
+             mock.patch.object(domains, "port_open_outside", lambda port, public: False):
+            self.assertFalse(domains.direct_reach("161.132.48.51").ok)
+
     def test_a_server_with_its_own_public_ip_can(self) -> None:
         with mock.patch.object(domains, "local_addresses", lambda: {"127.0.0.1", "203.0.113.7"}), \
              mock.patch.object(domains, "local_https_port", lambda: 443), \

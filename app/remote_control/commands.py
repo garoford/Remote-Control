@@ -82,6 +82,12 @@ def update(argv: list[str]) -> int:
         print(f"✓ Remote Control actualizado ({_version(src)})")
     else:
         print(f"✓ Remote Control ya estaba al día ({_version(src)})")
+    from remote_control import router
+
+    if code == UPDATED_EXIT and router.service_active():
+        # The domains' router runs the code it started with.
+        router.ensure_service()
+        print("✓ Router de dominios reiniciado")
     if "--no-containers" in argv or not multi.available():
         return 0
     try:

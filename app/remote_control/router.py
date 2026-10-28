@@ -8,6 +8,11 @@ per name (acme.py, DNS-01 through the account's API), and the plain bytes go
 to the container's local port, where its own Remote Control asks for its
 password. The provider's key never enters a container.
 
+Where the machine already has a reverse proxy on 80/443 (Coolify's
+Traefik), Remote Control adapts instead: each name becomes a route file in
+that proxy's dynamic folder (it gets the certificate itself), and this
+process only bridges the proxy's network to each container's local port.
+
 A name is only taken when it is free: a record there that is not ours (any
 type but an A/AAAA to this machine) means it is used for something else.
 
@@ -92,6 +97,18 @@ def assign(box: str, sub: str, log=lambda _msg: None) -> str:
         raise domains.DomainError(f"{host} ya se usa ({used}): elige otro subdominio")
     log(f"{host} → {public}")
     prov.point(zone, name, public)
+    edge = domains.detect_traefik()
+    if edge:
+        # Its proxy brings HTTPS (and the certificate): a route, not our port.
+        old = routes.get(box)
+        routes[box] = host
+        save_routes(routes)
+        if old and old != host:
+            _release(prov, cfg, old, public)
+        url = f"https://{host}/"
+        _tell_container(box, url)
+        ensure_service()
+        return url
     acme.ensure_cert(
         host,
         zone,
@@ -112,6 +129,66 @@ def assign(box: str, sub: str, log=lambda _msg: None) -> str:
     return url
 
 
+# --- an existing proxy (domains.Edge): routes instead of ports --------------------
+
+ROUTE_PREFIX = "remote-control-"
+
+
+def route_file(edge: domains.Edge, box: str) -> Path:
+    return edge.dynamic_dir / f"{ROUTE_PREFIX}{box}.yaml"
+
+
+def write_route(edge: domains.Edge, box: str, host: str, port: int) -> None:
+    """The container's name as a route of that proxy, in its own style
+    (HTTPS with its resolver, HTTP redirected), to this machine's bridge."""
+    rid = f"{ROUTE_PREFIX}{box}"
+    text = (
+        f"# Remote Control: container {box}. Written and removed by Remote Control.\n"
+        "http:\n"
+        "  middlewares:\n"
+        f"    {rid}-https:\n"
+        "      redirectScheme: {scheme: https, permanent: true}\n"
+        "  routers:\n"
+        f"    {rid}:\n"
+        f'      rule: "Host(`{host}`)"\n'
+        f"      entryPoints: [{edge.https}]\n"
+        "      tls:\n"
+        f"        certResolver: {edge.resolver}\n"
+        f"      service: {rid}\n"
+        f"    {rid}-http:\n"
+        f'      rule: "Host(`{host}`)"\n'
+        f"      entryPoints: [{edge.http}]\n"
+        f"      middlewares: [{rid}-https]\n"
+        f"      service: {rid}\n"
+        "  services:\n"
+        f"    {rid}:\n"
+        "      loadBalancer:\n"
+        "        servers:\n"
+        f'          - url: "http://{edge.gateway}:{port}"\n'
+    )
+    path = route_file(edge, box)
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def sync_routes(edge: domains.Edge, routes: dict[str, str], ports: dict[str, int]) -> None:
+    """Exactly one route file per container with a name; no stale ones."""
+    keep = set()
+    for box, host in routes.items():
+        if box in ports:
+            write_route(edge, box, host, ports[box])
+            keep.add(route_file(edge, box).name)
+    for old in edge.dynamic_dir.glob(f"{ROUTE_PREFIX}*.yaml"):
+        if old.name not in keep:
+            old.unlink(missing_ok=True)
+
+
 def unassign(box: str) -> None:
     routes = load_routes()
     host = routes.pop(box, None)
@@ -124,6 +201,10 @@ def unassign(box: str) -> None:
     except domains.DomainError:
         pass
     _tell_container(box, None)
+    edge = domains.detect_traefik()
+    if edge:
+        # With no name left the router stops, so it would not tidy this one up.
+        route_file(edge, box).unlink(missing_ok=True)
     ensure_service()
 
 
@@ -369,7 +450,81 @@ def _keep(router: Router) -> None:
             print(f"router: {exc}", file=sys.stderr)
 
 
+class Bridge:
+    """With an existing proxy: listen on this machine's address in its network
+    and hand each connection to the container's local port (plain bytes; the
+    proxy did TLS)."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self.socks: dict[int, socket.socket] = {}
+
+    def sync(self, ports: set[int]) -> None:
+        for port in list(self.socks):
+            if port not in ports:
+                self.socks.pop(port).close()
+        for port in ports - set(self.socks):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((self.host, port))
+            except OSError as exc:
+                print(f"router: {self.host}:{port}: {exc}", file=sys.stderr, flush=True)
+                continue
+            sock.listen(64)
+            self.socks[port] = sock
+            threading.Thread(target=self._accept, args=(sock, port), daemon=True).start()
+
+    def _accept(self, sock: socket.socket, port: int) -> None:
+        while True:
+            try:
+                conn, _addr = sock.accept()
+            except OSError:
+                return  # closed by sync()
+            threading.Thread(target=self._serve, args=(conn, port), daemon=True).start()
+
+    @staticmethod
+    def _serve(conn: socket.socket, port: int) -> None:
+        try:
+            up = socket.create_connection(("127.0.0.1", port), timeout=5)
+            up.settimeout(None)
+        except OSError:
+            conn.close()
+            return
+        _pipe(conn, up)
+
+
+def _bridge_loop(edge: domains.Edge) -> None:
+    """Routes, bridges and this machine's IP (the proxy renews the certificates)."""
+    bridge = Bridge(edge.gateway)
+    last_ip = domains.public_ipv4() or ""
+    last_ip_check = time.time()
+    while True:
+        try:
+            routes = load_routes()
+            ports = {b.name: b.port for b in multi.list_boxes()}
+            sync_routes(edge, routes, ports)
+            bridge.sync({ports[b] for b in routes if b in ports})
+            if time.time() - last_ip_check >= IP_CHECK_S:
+                last_ip_check = time.time()
+                ip = domains.public_ipv4()
+                if ip and ip != last_ip and routes:
+                    cfg, prov = _account()
+                    for host in routes.values():
+                        zone, name = domains.split_host(host, [cfg.zone])
+                        prov.point(zone, name, ip)
+                    last_ip = ip
+        except Exception as exc:
+            print(f"router: {exc}", file=sys.stderr, flush=True)
+        time.sleep(RELOAD_S)
+
+
 def main(_argv: list[str] | None = None) -> int:
+    edge = domains.detect_traefik()
+    if edge:
+        print(f"router: rutas en {edge.dynamic_dir} ({edge.name}), puente en {edge.gateway}", file=sys.stderr, flush=True)
+        _bridge_loop(edge)
+        return 0
     router = Router(domains.local_https_port())
     router.reload()
     print(f"router: :{router.port} → {router.table}", file=sys.stderr, flush=True)

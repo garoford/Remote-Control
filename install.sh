@@ -65,7 +65,7 @@ banner() {
   [[ -r /etc/os-release ]] && distro="$(. /etc/os-release && printf '%s' "${NAME:-} ${VERSION_ID:-}")"
   if ((UI)); then
     printf '\n  %s%s ▶_ %s  %sRemote Control%s\n' "$B" "$TEAL" "$R" "$B" "$R"
-    printf '        %sinstalador · %s · %s%s\n\n' "$MUTED" "${distro:-linux}" "${PM:-?}" "$R"
+    printf '        %sinstalador · %s · %s%s%s\n\n' "$MUTED" "${distro:-linux}" "${PM:-?}" "$( ((HEADLESS)) && echo ' · servidor sin escritorio')" "$R"
   else
     printf 'Remote Control: instalador (%s, %s)\n' "${distro:-linux}" "${PM:-?}"
   fi
@@ -193,6 +193,25 @@ PKGS_zypper=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh
   python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 python3-fonttools python3-Brotli python3-Pillow
   wl-clipboard bind-utils ImageMagick)
 
+# A server without a desktop (no display, not booting to graphical.target)
+# has no use for the GTK window: only `remote-control cli`. Its toolkit and
+# the Wayland clipboard stay out.
+HEADLESS=0
+if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! systemctl get-default 2>/dev/null | grep -q graphical; then
+  HEADLESS=1
+  GUI_PKGS=" python3-gobject gtk4 libadwaita python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 wl-clipboard "
+  without_gui() {
+    local p
+    for p in "$@"; do
+      [[ "$GUI_PKGS" == *" $p "* ]] || printf '%s\n' "$p"
+    done
+  }
+  mapfile -t PKGS_dnf < <(without_gui "${PKGS_dnf[@]}")
+  mapfile -t PKGS_apt < <(without_gui "${PKGS_apt[@]}")
+  mapfile -t PKGS_pacman < <(without_gui "${PKGS_pacman[@]}")
+  mapfile -t PKGS_zypper < <(without_gui "${PKGS_zypper[@]}")
+fi
+
 PM=""
 for pm in dnf apt-get pacman zypper; do
   if need_cmd "$pm"; then
@@ -211,10 +230,14 @@ import brotli, fontTools, PIL
 
 deps_ok() {
   local c
-  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh wl-copy dig convert; do
+  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh dig convert; do
     need_cmd "$c" || return 1
   done
-  python3 -c "$PY_CHECK" >/dev/null 2>&1
+  if ((HEADLESS)); then
+    python3 -c "import brotli, fontTools, PIL" >/dev/null 2>&1
+  else
+    need_cmd wl-copy && python3 -c "$PY_CHECK" >/dev/null 2>&1
+  fi
 }
 
 # One package at a time where the manager would refuse the whole list over a
@@ -400,9 +423,9 @@ summary() {
   for c in tmux ttyd cloudflared; do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || missing+=" $c"
   done
-  python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Adw, Gtk' \
+  ((HEADLESS)) || python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Adw, Gtk' \
     >/dev/null 2>&1 || missing+=" GTK4/libadwaita(PyGObject)"
-  for c in herdr zsh wl-copy dig convert; do
+  for c in herdr zsh dig convert $( ((HEADLESS)) || echo wl-copy); do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || optional+=" $c"
   done
   python3 -c "import brotli, fontTools, PIL, textual, segno, cryptography" >/dev/null 2>&1 || optional+=" (módulos python)"

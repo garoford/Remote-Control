@@ -139,6 +139,20 @@ class InsideTests(unittest.TestCase):
             info = tar.getmembers()[0]
             self.assertEqual((info.name, info.uid, info.mode, tar.extractfile(info).read()), ("gate", 1000, 0o600, b"Nueva123\n"))
 
+    def test_next_to_a_dropping_docker_podman_uses_its_iptables_rules(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "containers.conf.d" / "50-remote-control.conf"
+            with mock.patch.object(multi, "NET_CONF", conf), \
+                 mock.patch.object(multi, "docker_blocks_forwarding", lambda: True):
+                multi.ensure_network()
+                self.assertIn('firewall_driver = "iptables"', conf.read_text())
+            with mock.patch.object(multi, "NET_CONF", Path(tmp) / "otro.conf"), \
+                 mock.patch.object(multi, "docker_blocks_forwarding", lambda: False):
+                multi.ensure_network()
+                self.assertFalse((Path(tmp) / "otro.conf").exists())
+
     def test_commands_run_as_the_container_user(self) -> None:
         fake = FakePodman()
         with mock.patch.object(multi, "podman", fake):

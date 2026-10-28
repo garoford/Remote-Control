@@ -1,3 +1,4 @@
+import json
 import socket
 import ssl
 import tempfile
@@ -64,6 +65,51 @@ class RouterTests(unittest.TestCase):
             self.assertTrue(get("ia.a.com").endswith(b"soy ia"))
             with self.assertRaises(ssl.SSLError):
                 get("otro.a.com")
+
+
+class EdgeTests(unittest.TestCase):
+    def test_coolify_traefik_is_read_from_its_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "dynamic").mkdir()
+            inspect = [{
+                "Args": ["--entrypoints.http.address=:80", "--entrypoints.https.address=:443",
+                         "--providers.file.directory=/traefik/dynamic/",
+                         "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"],
+                "Mounts": [{"Source": tmp, "Destination": "/traefik"}],
+                "NetworkSettings": {"Networks": {"coolify": {"Gateway": "10.0.1.1"}}},
+            }]
+            outs = iter(["coolify-proxy\tghcr.io/traefik:v3\n", json.dumps(inspect)])
+            with mock.patch.object(domains.shutil, "which", lambda name: "/usr/bin/" + name), \
+                 mock.patch.object(domains.subprocess, "run", lambda *a, **k: mock.Mock(stdout=next(outs))):
+                edge = domains.detect_traefik()
+        self.assertEqual((edge.https, edge.http, edge.resolver, edge.gateway), ("https", "http", "letsencrypt", "10.0.1.1"))
+        self.assertEqual(edge.dynamic_dir, Path(tmp) / "dynamic")
+
+    def test_routes_are_written_in_its_style_and_stale_ones_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            edge = domains.Edge("coolify-proxy", Path(tmp), "https", "http", "letsencrypt", "10.0.1.1")
+            (Path(tmp) / "remote-control-viejo.yaml").write_text("x")
+            (Path(tmp) / "w5-https.yml").write_text("ajeno")
+            router.sync_routes(edge, {"backend": "cr.bizz.page"}, {"backend": 17701})
+            files = sorted(p.name for p in Path(tmp).iterdir())
+            text = (Path(tmp) / "remote-control-backend.yaml").read_text()
+        self.assertEqual(files, ["remote-control-backend.yaml", "w5-https.yml"])
+        for need in ("Host(`cr.bizz.page`)", "entryPoints: [https]", "certResolver: letsencrypt",
+                     "entryPoints: [http]", "redirectScheme", 'url: "http://10.0.1.1:17701"'):
+            self.assertIn(need, text)
+
+    def test_the_bridge_reaches_the_containers_port(self) -> None:
+        backend = _backend(b"soy el contenedor")
+        bridge = router.Bridge("127.0.0.2")
+        # Same port as the container's, on another address (the proxy's network).
+        bridge.sync({backend})
+        with socket.create_connection(("127.0.0.2", backend), timeout=5) as conn:
+            conn.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            out = b""
+            while chunk := conn.recv(4096):
+                out += chunk
+        bridge.sync(set())
+        self.assertTrue(out.endswith(b"soy el contenedor"))
 
 
 class HttpRedirectTests(unittest.TestCase):

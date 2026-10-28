@@ -640,6 +640,63 @@ class Reach:
     public_port: int = 443
 
 
+@dataclass
+class Edge:
+    """A reverse proxy already on this machine (Coolify's Traefik and the like)
+    that takes 80/443: Remote Control hands it a route instead of the ports."""
+
+    name: str  # its container
+    dynamic_dir: Path  # where it reads routes from, on this machine
+    https: str  # its entry point on 443
+    http: str  # and on 80
+    resolver: str  # its Let's Encrypt certificate resolver
+    gateway: str  # this machine's address on its network (how it reaches us)
+
+
+def _flag(args: list[str], prefix: str) -> str:
+    for arg in args:
+        if arg.lower().startswith(prefix.lower()):
+            return arg.split("=", 1)[1] if "=" in arg else ""
+    return ""
+
+
+def detect_traefik() -> Edge | None:
+    """A running Traefik container with a file provider, both entry points and
+    an ACME resolver (how Coolify sets it up); None when there is none."""
+    docker = shutil.which("docker")
+    if not docker:
+        return None
+    try:
+        out = subprocess.run([docker, "ps", "--format", "{{.Names}}\t{{.Image}}"], capture_output=True, text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = next((n for line in out.splitlines() for n, _, image in [line.partition("\t")] if "traefik" in (n + image).lower() or n == "coolify-proxy"), "")
+    if not name:
+        return None
+    try:
+        info = json.loads(subprocess.run([docker, "inspect", name], capture_output=True, text=True, timeout=10, check=False).stdout)[0]
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    args = [str(a) for a in (info.get("Args") or [])] + [str(a) for a in ((info.get("Config") or {}).get("Cmd") or [])]
+    inside = _flag(args, "--providers.file.directory=").rstrip("/")
+    entry = {}
+    for arg in args:
+        found = re.match(r"--entrypoints\.([^.=]+)\.address=:?(\d+)$", arg, re.I)
+        if found:
+            entry[found.group(2)] = found.group(1)
+    resolver = next((m.group(1) for a in args if (m := re.match(r"--certificatesresolvers\.([^.=]+)\.acme", a, re.I))), "")
+    dynamic_dir = None
+    for mount in info.get("Mounts") or []:
+        dest = str(mount.get("Destination") or "").rstrip("/")
+        if inside and dest and (inside == dest or inside.startswith(dest + "/")):
+            dynamic_dir = Path(str(mount.get("Source"))) / inside[len(dest):].lstrip("/")
+    networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    gateway = next((str(n.get("Gateway")) for n in networks.values() if n.get("Gateway")), "")
+    if not (dynamic_dir and dynamic_dir.is_dir() and "443" in entry and "80" in entry and resolver and gateway):
+        return None
+    return Edge(name, dynamic_dir, entry["443"], entry["80"], resolver, gateway)
+
+
 def port_holder(port: int) -> str:
     """The program listening on ``port`` here ("" if none, or not visible)."""
     ss = shutil.which("ss")
@@ -669,7 +726,19 @@ def direct_reach(public: str | None) -> Reach:
     only when its router forwards 443 (or 8443) to it, checked from outside
     while we listen on our port."""
     local = local_https_port()
-    if has_own_public_ip(public):
+    own_ip = has_own_public_ip(public)
+    edge = detect_traefik()
+    if edge:
+        # A proxy here owns 80/443 (and their certificates): it gets a route.
+        # Its public IP may live on another machine that forwards 80/443 to
+        # this one (a VPS used as a gateway, rathole, NAT): then the internet
+        # must reach 443 on that IP.
+        if own_ip:
+            return Reach(True, f"Lo sirve el Traefik del servidor ({edge.name})", local, 443)
+        if public and port_open_outside(443, public):
+            return Reach(True, f"Lo sirve el Traefik del servidor ({edge.name}), detrás de {public}", local, 443)
+        return Reach(False, f"El Traefik del servidor ({edge.name}) no se alcanza desde internet en {public or 'la IP pública'}:443", local)
+    if own_ip:
         # Another web server (Traefik, nginx, Caddy…) on 443 would answer
         # instead of ours, with its own certificate.
         if local == 443 or _ours_on(443):

@@ -181,13 +181,51 @@ def has_image(base: str) -> bool:
     return subprocess.run(["podman", "image", "exists", image(base)], check=False).returncode == 0
 
 
+# --- living next to Docker ---------------------------------------------------------------
+# Docker sets the kernel's FORWARD policy to DROP. Rootful Podman's bridge
+# (netavark's nftables rules) then has no way out: containers get no DNS and
+# no internet. Podman's own answer is netavark's iptables driver, whose rules
+# let Podman's networks (and only them) through next to Docker's.
+NET_CONF = Path("/etc/containers/containers.conf.d/50-remote-control.conf")
+NET_CONF_TEXT = (
+    "# Remote Control (multi.py): Docker drops forwarded traffic on this machine;\n"
+    "# netavark's iptables rules let Podman's own networks out next to Docker's.\n"
+    "[network]\n"
+    'firewall_driver = "iptables"\n'
+)
+
+
+def docker_blocks_forwarding() -> bool:
+    """Rootful Podman next to a Docker that drops forwarded traffic."""
+    iptables = shutil.which("iptables")
+    if os.geteuid() != 0 or not shutil.which("docker") or not iptables:
+        return False
+    out = subprocess.run([iptables, "-S", "FORWARD"], capture_output=True, text=True, check=False).stdout
+    return "-P FORWARD DROP" in out
+
+
+def ensure_network(log=lambda _line: None) -> None:
+    if not docker_blocks_forwarding():
+        return
+    try:
+        if NET_CONF.read_text(encoding="utf-8") == NET_CONF_TEXT:
+            return
+    except OSError:
+        pass
+    NET_CONF.parent.mkdir(parents=True, exist_ok=True)
+    NET_CONF.write_text(NET_CONF_TEXT, encoding="utf-8")
+    log("Red de Podman ajustada para convivir con Docker")
+
+
 def build_image(base: str, log=lambda _line: None) -> None:
     """The base image: that distro plus what Remote Control needs inside."""
     if base not in CONTAINERFILES:
         raise MultiError(f"base desconocida: {base}")
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "Containerfile").write_text(CONTAINERFILES[base], encoding="utf-8")
-        podman("build", "-t", image(base), tmp, timeout=3600, log=log)
+        # The host's network while building: only packages are fetched, and it
+        # works whatever the firewall does to the containers' bridge.
+        podman("build", "--network", "host", "-t", image(base), tmp, timeout=3600, log=log)
 
 
 def list_boxes() -> list[Box]:
@@ -242,6 +280,7 @@ def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
     boxes = list_boxes()
     if any(b.name == name for b in boxes):
         raise MultiError(f"ya existe un contenedor {name}")
+    ensure_network(log)
     if not has_image(base):
         log(f"Preparando la imagen {BASES[base]} (solo la primera vez)…")
         build_image(base, log)
@@ -266,6 +305,7 @@ def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
 
 
 def start(name: str, log=lambda _line: None) -> None:
+    ensure_network(log)
     podman("start", container(name))
     # systemd up (and the user session with PipeWire) before anything runs in it.
     deadline = time.time() + 60
