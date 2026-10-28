@@ -174,7 +174,11 @@ class MultiTUI(App):
     #mhero.on { border: round #21c7a8; }
     #mhero.busy { border: round #82aaff; }
     #mname { width: 1fr; height: 3; content-align: left middle; text-style: bold; }
-    #power { margin-right: 2; }
+    #power-col { width: 12; height: auto; align-horizontal: center; }
+    #state-text { width: 100%; color: #8a9bb3; text-align: center; }
+    #step-chip { margin-left: 1; }
+    #state-text.on { color: #22da6e; }
+    #state-text.busy { color: #82aaff; }
     #mmid { height: auto; }
     #mleft { width: 1fr; height: auto; }
     #mqr-card { width: 46; height: auto; margin-left: 1; }
@@ -193,7 +197,6 @@ class MultiTUI(App):
     BINDINGS = [
         Binding("n", "new", "Nuevo"),
         Binding("space", "toggle_tunnel", "Túnel"),
-        Binding("p", "power", "Encender/apagar"),
         Binding("c", "copy_url", "Copiar URL"),
         Binding("o", "open_url", "Abrir"),
         Binding("q", "quit", "Salir"),
@@ -228,11 +231,13 @@ class MultiTUI(App):
                         with Horizontal(id="mhero-top"):
                             yield Static(">_", id="badge")
                             yield Static("", id="mname")
-                            yield Button("Encender", id="power", compact=True)
-                            yield Switch(id="switch", animate=False)
+                            # One switch: on starts the container and its tunnel, off stops both.
+                            with Vertical(id="power-col"):
+                                yield Switch(id="switch", animate=False)
+                                yield Static("Apagado", id="state-text")
                         with Horizontal(id="chips"):
-                            yield Static("● Apagado", id="status-chip", classes="chip")
                             yield Static("", id="minfo", classes="chip")
+                            yield Static("", id="step-chip", classes="chip busy")
                     with Horizontal(id="mmid"):
                         with Vertical(id="mleft"):
                             with Vertical(id="share", classes="card"):
@@ -346,13 +351,14 @@ class MultiTUI(App):
         hero = self.query_one("#mhero")
         hero.set_classes(f"card {kind}")
         self.query_one("#mname", Static).update(b.name)
-        text = f"● {self.busy_text or 'Un momento…'}" if busy else "● En línea" if on else "● Túnel apagado" if b.running else "● Contenedor apagado"
-        chip = self.query_one("#status-chip", Static)
-        chip.set_classes(f"chip {kind}")
-        chip.update(text)
+        state = self.query_one("#state-text", Static)
+        state.set_classes(kind)
+        state.update("Un momento…" if busy else "Encendido" if on else "Apagado")
+        # What a long action is doing (an update can take minutes), beside its info.
+        step = self.query_one("#step-chip", Static)
+        step.display = busy and bool(self.busy_text)
+        step.update(self.busy_text)
         self.query_one("#minfo", Static).update(f"{multi.BASES.get(b.base, b.base)} · {multi.human_size(b.size)}")
-        self.query_one("#power", Button).label = "Apagar" if b.running else "Encender"
-        self.query_one("#power", Button).disabled = busy
         sw = self.query_one("#switch", Switch)
         with sw.prevent(Switch.Changed):
             sw.value = on
@@ -517,7 +523,6 @@ class MultiTUI(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         handlers = {
             "new": self.action_new,
-            "power": self.action_power,
             "copy-url": self.action_copy_url,
             "copy-local": lambda: self.url and self.box() and self.copy(f"http://localhost:{self.box().port}/", "URL local copiada"),
             "copy-pass": lambda: self.copy(self.query_one("#password", Input).value, "Contraseña copiada"),
