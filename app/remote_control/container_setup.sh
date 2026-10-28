@@ -9,6 +9,10 @@
 
 set -u
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+# Every download with a limit: a site that stops answering mid-transfer would
+# otherwise hold the whole update forever (seen with ohmyposh.dev).
+DL="curl -fsSL --connect-timeout 15 --max-time 300 --retry 2"
+export DL
 FAILED=()
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -18,7 +22,8 @@ try() {
   # last line says why.
   local what="$1" out
   shift
-  if ! out=$("$@" 2>&1); then
+  # And a limit for the whole part (an installer may download more on its own).
+  if ! out=$(timeout 900 "$@" 2>&1); then
     FAILED+=("$what")
     step "  ✗ $what: $(printf '%s\n' "$out" | grep -v '^\s*$' | tail -n 1 | cut -c1-160)"
   fi
@@ -45,9 +50,15 @@ fi
 
 # --- prompt and plugins --------------------------------------------------------
 step "Oh My Posh y plugins de zsh…"
-have oh-my-posh || try "oh-my-posh" bash -c 'curl -fsSL https://ohmyposh.dev/install.sh | bash -s -- -d "$HOME/.local/bin"'
+# Its binary straight from GitHub (their install script fetches more, and hung).
+case "$(uname -m)" in
+  aarch64 | arm64) POSH_ARCH=arm64 ;;
+  armv7l) POSH_ARCH=arm ;;
+  *) POSH_ARCH=amd64 ;;
+esac
+have oh-my-posh || try "oh-my-posh" bash -c '$DL -o "$HOME/.local/bin/oh-my-posh.tmp" "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest/download/posh-linux-'"$POSH_ARCH"'" && chmod +x "$HOME/.local/bin/oh-my-posh.tmp" && mv "$HOME/.local/bin/oh-my-posh.tmp" "$HOME/.local/bin/oh-my-posh"'
 THEME="$HOME/.config/oh-my-posh/night-owl.omp.json"
-[[ -s "$THEME" ]] || try "tema night-owl" curl -fsSL -o "$THEME" \
+[[ -s "$THEME" ]] || try "tema night-owl" $DL -o "$THEME" \
   https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/night-owl.omp.json
 for repo in zsh-autosuggestions zsh-syntax-highlighting zsh-history-substring-search zsh-completions; do
   [[ -d "$HOME/.zsh/$repo" ]] || try "$repo" git clone -q --depth 1 "https://github.com/zsh-users/$repo" "$HOME/.zsh/$repo"
@@ -56,19 +67,19 @@ done
 # --- Node (nvm) and Bun --------------------------------------------------------
 step "Node y Bun…"
 export NVM_DIR="$HOME/.nvm"
-[[ -s "$NVM_DIR/nvm.sh" ]] || try "nvm" bash -c 'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash'
+[[ -s "$NVM_DIR/nvm.sh" ]] || try "nvm" bash -c '$DL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash'
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh"
   have node || try "node" nvm install --lts
 fi
-[[ -x "$HOME/.bun/bin/bun" ]] || try "bun" bash -c 'curl -fsSL https://bun.sh/install | SHELL=/bin/false bash'
+[[ -x "$HOME/.bun/bin/bun" ]] || try "bun" bash -c '$DL https://bun.sh/install | SHELL=/bin/false bash'
 
 # --- AI CLIs --------------------------------------------------------------------
 step "CLIs de IA (Claude Code, Codex, Cursor Agent)…"
-have claude || try "claude" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+have claude || try "claude" bash -c '$DL https://claude.ai/install.sh | bash'
 have codex || { have npm && try "codex" npm install -g @openai/codex; }
-have cursor-agent || try "cursor-agent" bash -c 'curl -fsSL https://cursor.com/install | bash'
+have cursor-agent || try "cursor-agent" bash -c '$DL https://cursor.com/install | bash'
 
 # --- zsh settings ---------------------------------------------------------------
 step "Configuración de zsh…"
