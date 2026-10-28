@@ -3960,3 +3960,13 @@ html.rc-is-empty #rc-net-badge {
 .rc-local-note.is-busy {
   color: var(--rc-muted);
 }
+
+/* A profile's name being changed: its dot and the field, in place. */
+.rc-ws-profile.is-renaming {
+  gap: 6px;
+  padding: 2px 0 2px 10px;
+}
+
+.rc-ws-profile.is-renaming .rc-ws-input {
+  height: 32px;
+}

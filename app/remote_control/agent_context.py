@@ -42,7 +42,7 @@ CURSOR_TARGET = ("AGENTS.md", ".cursor", ("agent", "cursor-agent"))
 
 def _homes() -> list[tuple[str, str, Path]]:
     """(profile id, label, HOME) for everyone; "" is the primary user."""
-    out = [("", profiles.primary_name(), Path.home())]
+    out = [("", profiles.primary_label(), Path.home())]
     for p in profiles.list_profiles():
         home = profiles.home_of(p["id"])
         if home:

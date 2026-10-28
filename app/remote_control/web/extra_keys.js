@@ -6404,6 +6404,8 @@
   var PROFILE_KEY = "rc-profile";
   var profState = { primary: "", profiles: [] };
   var profEditing = false;
+  // The profile whose name is being edited ("" is the primary), null none.
+  var profRenaming = null;
   var profPinged = { at: 0, id: null };
 
   function myProfile() {
@@ -6524,7 +6526,7 @@
     var a = profileAccent(pid);
     dot.style.background = a ? a.dot : "";
     dot.style.color = a ? (themeMode() === "light" ? "#fff" : "#111214") : "";
-    name.style.color = a ? a.text : "";
+    if (name) name.style.color = a ? a.text : "";
   }
 
   function renderProfiles() {
@@ -6533,12 +6535,17 @@
     var box = document.getElementById("rc-ws-profiles");
     if (!box) return;
     if (profEditing && document.activeElement && document.activeElement.id === "rc-ws-profile-name") return;
+    if (profRenaming !== null && document.activeElement && document.activeElement.id === "rc-ws-profile-rename") return;
     var mine = myProfile();
     box.innerHTML = "";
     var items = [{ id: "", label: profState.primary || "Principal", primary: true }].concat(profState.profiles);
     items.forEach(function (p) {
       var row = document.createElement("div");
       row.className = "rc-ws-profile" + (p.id === mine ? " is-on" : "");
+      if (profRenaming === p.id) {
+        box.appendChild(renameProfileRow(row, p));
+        return;
+      }
       var main = wsButton("", "rc-ws-profile-main", "Usar el perfil " + p.label, function () {
         pickProfile(p.id);
       });
@@ -6552,6 +6559,13 @@
       main.appendChild(dot);
       main.appendChild(name);
       row.appendChild(main);
+      row.appendChild(
+        wsButton("✎", "rc-ws-act", "Cambiar el nombre de " + p.label, function () {
+          profRenaming = p.id;
+          profEditing = false;
+          renderProfiles();
+        })
+      );
       if (!p.primary) {
         row.appendChild(
           wsButton("🗑", "rc-ws-act is-danger", "Borrar el perfil " + p.label, function () {
@@ -6613,6 +6627,58 @@
     if (menu) {
       menu.title = "Workspaces · perfil: " + profileLabel(mine);
     }
+  }
+
+  // Its name only: the id and the folder with its logins stay (profiles.rename).
+  function renameProfileRow(row, p) {
+    row.classList.add("is-renaming");
+    var dot = document.createElement("span");
+    dot.className = "rc-ws-profile-dot";
+    dot.textContent = (p.label || "?").charAt(0).toUpperCase();
+    paintProfileLabel(dot, null, p.id);
+    var input = document.createElement("input");
+    input.id = "rc-ws-profile-rename";
+    input.className = "rc-ws-input";
+    input.type = "text";
+    input.maxLength = 40;
+    input.value = p.label;
+    input.setAttribute("aria-label", "Nuevo nombre de " + p.label);
+    var settled = false;
+    var finish = function (save) {
+      if (settled) return;
+      settled = true;
+      profRenaming = null;
+      var label = input.value.trim();
+      if (save && label && label !== p.label) {
+        postProfiles({ op: "rename", id: p.id, label: label }).then(function (payload) {
+          if (payload && payload.ok === false && payload.error) showToast(payload.error);
+          else showToast("Ahora se llama «" + label + "»");
+          renderProfiles();
+        });
+      } else setTimeout(renderProfiles, 0);
+    };
+    input.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        finish(true);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", function () {
+      finish(true);
+    });
+    row.appendChild(dot);
+    row.appendChild(input);
+    setTimeout(function () {
+      try {
+        input.focus();
+        input.select();
+      } catch (_) {}
+    }, 0);
+    return row;
   }
 
   function confirmDeleteProfile(p) {

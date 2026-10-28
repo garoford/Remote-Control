@@ -77,7 +77,7 @@ def _tmux(*args: str, socket: str = TMUX_SOCKET) -> str:
 
 def label_of(pid: str) -> str:
     if not pid:
-        return profiles.primary_name()
+        return profiles.primary_label()
     for p in profiles.list_profiles():
         if p["id"] == pid:
             return p["label"]

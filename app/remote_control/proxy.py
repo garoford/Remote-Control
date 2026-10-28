@@ -1094,6 +1094,8 @@ class Sidecar:
             result = profiles.create(str(req.get("label") or ""))
         elif kind == "delete":
             result = profiles.delete(str(req.get("id") or ""))
+        elif kind == "rename":
+            result = profiles.rename(str(req.get("id") or ""), str(req.get("label") or ""))
         else:
             result = {"ok": False, "error": "Operación desconocida"}
         if result.get("ok"):

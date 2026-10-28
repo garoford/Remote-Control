@@ -106,7 +106,7 @@ def create(label_raw: str) -> dict:
         existing = list_profiles()
         if len(existing) >= PROFILES_MAX:
             return {"ok": False, "error": "Hay demasiados perfiles"}
-        if label.casefold() == primary_name().casefold():
+        if label.casefold() in (primary_name().casefold(), primary_label().casefold()):
             return {"ok": False, "error": "Ese es el usuario principal"}
         if any(p["label"].casefold() == label.casefold() for p in existing):
             return {"ok": False, "error": "Ya existe un perfil con ese nombre"}
@@ -126,6 +126,44 @@ def create(label_raw: str) -> dict:
         labels[pid] = label
         _write_labels(labels)
     return {"ok": True, "id": pid}
+
+
+def _primary_label_file() -> Path:
+    return base_dir() / "primary-label"
+
+
+def primary_label() -> str:
+    """What the primary user is called on the page (its Linux name by default)."""
+    try:
+        label = " ".join(_primary_label_file().read_text(encoding="utf-8").split())[:LABEL_MAX]
+    except OSError:
+        label = ""
+    return label or primary_name()
+
+
+def rename(pid: str, label_raw: str) -> dict:
+    """Only the name shown changes: the id and its folder (with the logins
+    in it) stay. "" is the primary user."""
+    label = " ".join(str(label_raw or "").split())[:LABEL_MAX]
+    if not label:
+        return {"ok": False, "error": "Escribe un nombre"}
+    with _lock:
+        others = [p["label"] for p in list_profiles() if p["id"] != pid]
+        if pid:
+            others.append(primary_label())
+        if any(o.casefold() == label.casefold() for o in others):
+            return {"ok": False, "error": "Ya existe un perfil con ese nombre"}
+        if not pid:
+            path = _primary_label_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(label + "\n", encoding="utf-8")
+            return {"ok": True}
+        if home_of(pid) is None:
+            return {"ok": False, "error": "Ese perfil no existe"}
+        labels = _read_labels()
+        labels[pid] = label
+        _write_labels(labels)
+    return {"ok": True}
 
 
 def delete(pid: str) -> dict:
@@ -179,4 +217,4 @@ def set_active(pid: str) -> dict:
 
 
 def public() -> dict:
-    return {"ok": True, "primary": primary_name(), "profiles": list_profiles(), "active": read_active()}
+    return {"ok": True, "primary": primary_label(), "profiles": list_profiles(), "active": read_active()}
