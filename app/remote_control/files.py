@@ -519,6 +519,9 @@ def _move_one(src: Path, dest_dir: Path) -> Path:
 
 def apply_op(op: dict) -> dict:
     kind = str(op.get("op") or "")
+    if kind == "mkdirs":
+        # An empty folder inside a folder dropped from the PC.
+        return {"ok": True, "path": str(_subfolder(_folder(op.get("dir")), str(op.get("sub") or "")))}
     if kind in ("mkdir", "newfile"):
         folder = _folder(op.get("dir"))
         target = free_name(folder, _clean_name(op.get("name") or ("Carpeta nueva" if kind == "mkdir" else "Archivo nuevo")))
@@ -651,8 +654,22 @@ def apply_op(op: dict) -> dict:
 # --- uploads in chunks -------------------------------------------------------------------
 
 
-def upload_chunk(dir_raw: str, name_raw: str, offset: int, total: int, body: bytes, upload_id: str) -> dict:
-    folder = _folder(dir_raw)
+def _subfolder(folder: Path, sub: str) -> Path:
+    """folder/a/b for "a/b" (a folder dropped from the PC keeps its tree),
+    made if missing; every part a plain name, so nothing leaves folder."""
+    for part in [p for p in str(sub or "").split("/") if p]:
+        folder = folder / _clean_name(part)
+        try:
+            folder.mkdir(exist_ok=True)
+        except OSError as exc:
+            raise _err(exc, "crear " + part)
+        if not folder.is_dir() or folder.is_symlink():
+            raise FsError("No es una carpeta: " + str(folder))
+    return folder
+
+
+def upload_chunk(dir_raw: str, name_raw: str, offset: int, total: int, body: bytes, upload_id: str, sub: str = "") -> dict:
+    folder = _subfolder(_folder(dir_raw), sub)
     name = _clean_name(name_raw)
     if not re.match(r"^[a-z0-9]{8,32}$", upload_id or ""):
         raise FsError("Subida no válida")

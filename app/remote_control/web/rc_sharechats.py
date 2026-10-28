@@ -10,6 +10,12 @@ hence hardlinks. Logins and tokens are never touched, only chat transcripts.
 A chat is handed to each HOME once (shared-chats.json): a chat someone deletes
 does not come back from another profile's copy.
 
+Cursor Agent and Antigravity (agy) keep each chat in an SQLite database next
+to its journal (-wal/-shm): a hardlinked database would get one journal per
+HOME. Their whole chat folder is shared instead: in every profile it is a
+symlink to the primary's, so all of them open the very same files. What a
+profile already had is moved in there first (nothing is deleted).
+
 Usage: rc_sharechats.py BASE   (BASE = the primary's ~/.local/share/remote-control)
 """
 
@@ -26,6 +32,66 @@ STORES = {
     "claude": Path(".claude") / "projects",
     "pi": Path(".pi") / "agent" / "sessions",
 }
+
+
+# Folders (or files) of a HOME that every profile shares with the primary's.
+SHARED = (
+    Path(".cursor") / "chats",
+    Path(".gemini") / "antigravity-cli" / "conversations",
+    Path(".gemini") / "antigravity-cli" / "brain",
+    Path(".gemini") / "antigravity-cli" / "conversation_summaries.db",
+)
+
+
+def _keep_aside(path: Path, tag: str) -> Path:
+    """A free name beside path for something that would collide."""
+    n = 1
+    while True:
+        other = path.with_name(f"{path.stem}.{tag}{'' if n == 1 else n}{path.suffix}")
+        if not other.exists() and not other.is_symlink():
+            return other
+        n += 1
+
+
+def _move_db(src: Path, dest: Path) -> None:
+    """An SQLite database with its journal files."""
+    for side in ("", "-wal", "-shm"):
+        part = src.with_name(src.name + side)
+        if part.exists():
+            os.rename(part, dest.with_name(dest.name + side))
+
+
+def share_folders(base: Path) -> int:
+    """Every profile's SHARED paths become symlinks to the primary's. Returns links made."""
+    every = homes(base)
+    primary, made = every[0], 0
+    for home in every[1:]:
+        for rel in SHARED:
+            target, link = primary / rel, home / rel
+            is_db = rel.suffix == ".db"
+            # Folders exist up front; a database is made by its CLI, through the
+            # link, in the primary's folder.
+            (target.parent if is_db else target).mkdir(parents=True, exist_ok=True)
+            if link.is_symlink():
+                if os.path.realpath(link) == os.path.realpath(target):
+                    continue
+                link.unlink()
+            elif link.exists():
+                if is_db:
+                    # Two indexes cannot be merged: the primary's wins, this
+                    # one stays beside it under another name.
+                    _move_db(link, _keep_aside(target, home.name) if target.exists() else target)
+                else:
+                    for item in list(link.iterdir()):
+                        dest = target / item.name
+                        if dest.exists() or dest.is_symlink():
+                            dest = _keep_aside(dest, home.name)
+                        os.rename(item, dest)
+                    link.rmdir()
+            link.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, link)
+            made += 1
+    return made
 
 
 def homes(base: Path) -> list[Path]:
@@ -121,6 +187,12 @@ def main() -> int:
         return 0
     try:
         sync(base)
+    except OSError:
+        pass
+    try:
+        with open(base / "shared-chats.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            share_folders(base)
     except OSError:
         pass
     return 0

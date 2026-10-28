@@ -2704,9 +2704,10 @@
     })();
   }
 
-  function uploadOne(file, dest) {
+  function uploadOne(file, dest, sub, quiet) {
     var id = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-    var job = opCard(I.upload, "Subiendo «" + file.name + "»");
+    // A folder's files share one card (uploadTree): theirs only report errors.
+    var job = quiet || opCard(I.upload, "Subiendo «" + file.name + "»");
     var total = file.size;
     var offset = 0;
     return new Promise(function (resolve) {
@@ -2721,6 +2722,7 @@
               "offset=" + offset,
               "total=" + total,
               "id=" + id,
+              "sub=" + encodeURIComponent(sub || ""),
             ].join("&"),
           { method: "PUT", body: blob, credentials: "same-origin", cache: "no-store" }
         )
@@ -2757,6 +2759,167 @@
     });
   }
 
+  // --- folders dropped from the PC ------------------------------------------------
+  // dataTransfer.files lists a folder as an unreadable empty "file". Its
+  // entries (webkitGetAsEntry) walk the tree: the folder is made here (a free
+  // name if taken) and every file goes to its place inside it.
+  function readAll(dirEntry) {
+    var reader = dirEntry.createReader();
+    var all = [];
+    return new Promise(function (resolve) {
+      (function more() {
+        reader.readEntries(
+          function (batch) {
+            if (!batch.length) return resolve(all);
+            all = all.concat(Array.prototype.slice.call(batch));
+            more();
+          },
+          function () {
+            resolve(all);
+          }
+        );
+      })();
+    });
+  }
+
+  function walk(entry, sub, out) {
+    if (entry.isFile) {
+      return new Promise(function (resolve) {
+        entry.file(
+          function (file) {
+            out.files.push({ file: file, sub: sub });
+            resolve();
+          },
+          function () {
+            out.unreadable++;
+            resolve();
+          }
+        );
+      });
+    }
+    var here = sub ? sub + "/" + entry.name : entry.name;
+    out.dirs.push(here);
+    return readAll(entry).then(function (children) {
+      return children.reduce(function (chain, child) {
+        return chain.then(function () {
+          return walk(child, here, out);
+        });
+      }, Promise.resolve());
+    });
+  }
+
+  function uploadTree(dirEntry, dest) {
+    var job = opCard(I.upload, "Leyendo «" + dirEntry.name + "»…");
+    var out = { files: [], dirs: [], unreadable: 0 };
+    var failed = 0;
+    return op({ op: "mkdir", dir: dest, name: dirEntry.name })
+      .then(function (made) {
+        if (!made || !made.ok) throw new Error((made && made.error) || "No pude crear la carpeta");
+        var root = made.path;
+        var shown = root.split("/").pop();
+        // The tree is read from inside the folder: its own name is root's.
+        return readAll(dirEntry)
+          .then(function (children) {
+            return children.reduce(function (chain, child) {
+              return chain.then(function () {
+                return walk(child, "", out);
+              });
+            }, Promise.resolve());
+          })
+          .then(function () {
+            // Empty folders too, in order (parents first).
+            return out.dirs.reduce(function (chain, sub) {
+              return chain.then(function () {
+                return op({ op: "mkdirs", dir: root, sub: sub });
+              });
+            }, Promise.resolve());
+          })
+          .then(function () {
+            var total = out.files.length;
+            var done = 0;
+            var quiet = {
+              progress: function () {},
+              text: function () {},
+              done: function () {},
+              fail: function () {
+                failed++;
+              },
+            };
+            job.text("Subiendo carpeta «" + shown + "» · 0 de " + total + " archivos");
+            return out.files
+              .reduce(function (chain, item) {
+                return chain.then(function () {
+                  return uploadOne(item.file, root, item.sub, quiet).then(function () {
+                    done++;
+                    job.progress(total ? done / total : 1);
+                    job.text("Subiendo carpeta «" + shown + "» · " + done + " de " + total + " archivos");
+                  });
+                });
+              }, Promise.resolve())
+              .then(function () {
+                var lost = failed + out.unreadable;
+                if (lost) job.fail("«" + shown + "»: " + lost + " de " + (total + out.unreadable) + " archivos no se subieron");
+                else job.done("Subida la carpeta «" + shown + "» (" + total + " archivos)");
+                var t = tab();
+                if (t.path === dest) t.focusName = shown;
+              });
+          });
+      })
+      .catch(function (err) {
+        job.fail(err.message || "Falló la subida");
+      });
+  }
+
+  function uploadDropped(dataTransfer, dest) {
+    if (!dest || dest.indexOf("://") !== -1) {
+      toast("Abre una carpeta para subir archivos");
+      return;
+    }
+    var items = Array.prototype.slice.call(dataTransfer.items || []);
+    // Entries must be taken during the drop event itself.
+    var entries = items
+      .map(function (item) {
+        return item.kind === "file" && item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+      })
+      .filter(Boolean);
+    if (!entries.length) {
+      uploadFiles(Array.prototype.slice.call(dataTransfer.files || []), dest);
+      return;
+    }
+    var files = [];
+    var dirs = [];
+    var chain = Promise.resolve();
+    entries.forEach(function (entry) {
+      if (entry.isDirectory) dirs.push(entry);
+      else
+        chain = chain.then(function () {
+          return new Promise(function (resolve) {
+            entry.file(
+              function (file) {
+                files.push(file);
+                resolve();
+              },
+              function () {
+                resolve();
+              }
+            );
+          });
+        });
+    });
+    dirs.forEach(function (entry) {
+      chain = chain.then(function () {
+        return uploadTree(entry, dest);
+      });
+    });
+    chain.then(function () {
+      if (files.length) uploadFiles(files, dest);
+      else {
+        var t = tab();
+        if (t.path === dest) load(t, true);
+      }
+    });
+  }
+
   function bootDrop() {
     var depth = 0;
     function hasFiles(ev) {
@@ -2787,7 +2950,7 @@
       ui.drop.classList.remove("is-on");
       var target = ev.target.closest && ev.target.closest("[data-drop]");
       var dest = target ? target.dataset.drop : tab().path;
-      uploadFiles(Array.prototype.slice.call(ev.dataTransfer.files || []), dest);
+      uploadDropped(ev.dataTransfer, dest);
     });
   }
 

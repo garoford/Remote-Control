@@ -70,6 +70,40 @@ class SetPaneOwnerTests(unittest.TestCase):
         kill.assert_called_once_with(77, herdr.signal.SIGTERM)
         self.assertEqual(run.call_args[0][0][-1], " RC_PROFILE=cuenta2 claude --resume abc")
 
+    def test_cursor_agy_and_pi_come_back_in_their_chat(self) -> None:
+        for cli, sid, line in (
+            ("agent", "c0ffee12-aaaa", "agent --resume c0ffee12-aaaa"),
+            ("agy", "2337caa1-e924", "agy --conversation 2337caa1-e924"),
+            ("pi", "01a17df3-dce2", "pi --session 01a17df3-dce2"),
+        ):
+            fg = iter([77, 77, None])
+            with (
+                mock.patch.object(herdr, "_foreground_pgid", lambda pid: next(fg)),
+                mock.patch.object(herdr, "cli_profile", lambda pid: ""),
+                mock.patch.object(herdr, "detect_cli", lambda pid, home=None, c=cli, s=sid: (c, s)),
+                mock.patch.object(herdr, "_share_chats", lambda: None),
+                mock.patch.object(herdr.os, "killpg"),
+                mock.patch.object(herdr.subprocess, "run") as run,
+                mock.patch.object(herdr.time, "sleep", lambda s: None),
+            ):
+                res = herdr.set_pane_owner("w1:p2", "cuenta2")
+            self.assertEqual(res, {"ok": True, "restarted": True}, cli)
+            self.assertEqual(run.call_args[0][0][-1], f" RC_PROFILE=cuenta2 {line}")
+
+    def test_a_cli_with_no_chat_yet_just_reopens(self) -> None:
+        fg = iter([77, 77, None])
+        with (
+            mock.patch.object(herdr, "_foreground_pgid", lambda pid: next(fg)),
+            mock.patch.object(herdr, "cli_profile", lambda pid: ""),
+            mock.patch.object(herdr, "detect_cli", lambda pid, home=None: ("pi", "")),
+            mock.patch.object(herdr, "_share_chats", lambda: None),
+            mock.patch.object(herdr.os, "killpg"),
+            mock.patch.object(herdr.subprocess, "run") as run,
+            mock.patch.object(herdr.time, "sleep", lambda s: None),
+        ):
+            herdr.set_pane_owner("w1:p2", "cuenta2")
+        self.assertEqual(run.call_args[0][0][-1], " RC_PROFILE=cuenta2 pi")
+
     def test_working_claude_is_left_alone(self) -> None:
         self.panes[0]["agent_status"] = "working"
         with (

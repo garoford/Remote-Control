@@ -537,11 +537,16 @@ def _move_cli(pane: str, prof: str, status: str) -> dict:
     return _restart_cli(shell_pid, prof, status == "working", run)
 
 
-def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
-    """Close a waiting Claude under shell_pid and reopen it as prof, same chat.
+# The CLIs a profile change closes and reopens with the new account, in the
+# same conversation (their chats are shared by every profile: rc_sharechats.py).
+CLI_NAMES = {"claude": "Claude", "agent": "Cursor Agent", "agy": "Antigravity", "pi": "pi"}
 
-    ``run`` types a command line in that shell. A Claude at work, or another
-    CLI, keeps its account until someone closes it.
+
+def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
+    """Close a waiting CLI under shell_pid and reopen it as prof, same chat.
+
+    ``run`` types a command line in that shell. One at work keeps its account
+    until someone closes it; one with no conversation yet just reopens.
     """
     fg = _foreground_pgid(shell_pid)
     if fg is None:
@@ -550,25 +555,27 @@ def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
     cli, sid = detect_cli(shell_pid, home=_profile_home(current))
     if not cli or current == prof:
         return {"restarted": False}
-    if cli != "claude" or not sid:
+    name = CLI_NAMES.get(cli)
+    if name is None:
         return {"restarted": False, "note": f"{cli} sigue con la cuenta anterior hasta que lo cierres"}
     if working:
-        return {"restarted": False, "note": "Claude está trabajando: el cambio aplica cuando lo vuelvas a abrir"}
+        return {"restarted": False, "note": f"{name} está trabajando: el cambio aplica cuando lo vuelvas a abrir"}
+    # The new account must see this conversation before it is reopened.
     _share_chats()
     try:
         os.killpg(fg, signal.SIGTERM)
     except OSError:
-        return {"restarted": False, "note": "No se pudo cerrar Claude"}
+        return {"restarted": False, "note": f"No se pudo cerrar {name}"}
     deadline = time.monotonic() + RESTART_WAIT_S
     while _foreground_pgid(shell_pid) is not None:
         if time.monotonic() > deadline:
-            return {"restarted": False, "note": "Claude no se cerró: ciérralo y ábrelo de nuevo"}
+            return {"restarted": False, "note": f"{name} no se cerró: ciérralo y ábrelo de nuevo"}
         time.sleep(0.2)
-    line = resume_command("claude", sid, home=_profile_home(prof)) or "claude"
+    line = resume_command(cli, sid, home=_profile_home(prof)) or cli
     try:
         run(f" RC_PROFILE={prof} {line}")
     except (OSError, subprocess.SubprocessError):
-        return {"restarted": False, "note": "Claude se cerró: ábrelo de nuevo"}
+        return {"restarted": False, "note": f"{name} se cerró: ábrelo de nuevo"}
     return {"restarted": True}
 
 
@@ -610,7 +617,7 @@ def set_pane_owner(pane: object, prof: object) -> dict:
 # Gemini: "esc to cancel"); a waiting one does not. The tab's last output
 # time is no sign: an idle Claude redraws itself on every resize and when
 # it opens, which is just when someone moves the tab to another profile.
-WORKING_RE = re.compile(r"\besc to (interrupt|cancel)\b", re.I)
+WORKING_RE = re.compile(r"\b(esc|ctrl\+c) to (interrupt|cancel|stop)\b", re.I)
 
 
 def _client_key(client: str) -> str:

@@ -780,7 +780,9 @@ def _claude_session(pid: int, home: Path) -> str:
 
 
 def _cursor_chat(pid: int, home: Path) -> str:
-    chats = str(home / ".cursor" / "chats") + "/"
+    # Its chats folder may be a link to the primary's (rc_sharechats.py); the
+    # open files show the real path.
+    chats = os.path.realpath(home / ".cursor" / "chats") + "/"
     try:
         fds = os.listdir(f"/proc/{pid}/fd")
     except OSError:
@@ -822,8 +824,52 @@ def _agy_conversation(pid: int, home: Path) -> str:
     return ""
 
 
+def _is_pi(argv: list[str]) -> bool:
+    """pi runs as node with its own script (…/node_modules/.bin/pi)."""
+    return any(os.path.basename(part) == "pi" or "/pi-coding-agent/" in part for part in argv[:2])
+
+
+def _started_at(pid: int) -> float:
+    """When a process started, as a Unix time (0 if unknown)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        ticks = int(stat[stat.rindex(")") + 2 :].split()[19])
+        uptime = float(Path("/proc/uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+    return time.time() - uptime + ticks / os.sysconf("SC_CLK_TCK")
+
+
+def _pi_session(pid: int, home: Path) -> str:
+    """The session pi works on: the one of its folder it last wrote, since it started.
+
+    pi keeps them as <home>/.pi/agent/sessions/--<cwd with - for />--/<time>_<id>.jsonl
+    and does not hold the file open between writes.
+    """
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+    folder = home / ".pi" / "agent" / "sessions" / ("--" + cwd.strip("/").replace("/", "-") + "--")
+    since = _started_at(pid) - 2
+    best, best_time = "", since
+    try:
+        entries = list(folder.glob("*.jsonl"))
+    except OSError:
+        return ""
+    for item in entries:
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        sid = item.stem.rpartition("_")[2]
+        if mtime >= best_time and RESUME_RE.match(sid):
+            best, best_time = sid, mtime
+    return best
+
+
 def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
-    """("claude"|"agent"|"agy", conversation id or "") for the CLI under a pane's shell."""
+    """("claude"|"agent"|"agy"|"pi", conversation id or "") for the CLI under a pane's shell."""
     home = home or Path.home()
     queue = list(_children(pane_pid))
     seen = 0
@@ -838,6 +884,8 @@ def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
         name = os.path.basename(argv[0]) if argv else ""
         if name == "agy":
             return "agy", _agy_conversation(pid, home)
+        if _is_pi(argv):
+            return "pi", _pi_session(pid, home)
         if "cursor-agent" in " ".join(argv) or name == "agent":
             chat = _cursor_chat(pid, home)
             if chat:
@@ -973,7 +1021,7 @@ def snapshot(socket: str = TMUX_SOCKET, base: Path | None = None) -> None:
         save_state(state, base)
 
 
-RESUME_FLAG = {"claude": "--resume", "agent": "--resume", "agy": "--conversation"}
+RESUME_FLAG = {"claude": "--resume", "agent": "--resume", "agy": "--conversation", "pi": "--session"}
 
 
 def _claude_transcript(sid: str, home: Path) -> bool:
