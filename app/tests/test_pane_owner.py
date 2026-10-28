@@ -66,7 +66,7 @@ class SetPaneOwnerTests(unittest.TestCase):
             mock.patch.object(herdr.time, "sleep", lambda s: None),
         ):
             res = herdr.set_pane_owner("w1:p2", "cuenta2")
-        self.assertEqual(res, {"ok": True, "restarted": True})
+        self.assertEqual(res, {"ok": True, "restarted": True, "cli": "Claude"})
         kill.assert_called_once_with(77, herdr.signal.SIGTERM)
         self.assertEqual(run.call_args[0][0][-1], " RC_PROFILE=cuenta2 claude --resume abc")
 
@@ -87,7 +87,7 @@ class SetPaneOwnerTests(unittest.TestCase):
                 mock.patch.object(herdr.time, "sleep", lambda s: None),
             ):
                 res = herdr.set_pane_owner("w1:p2", "cuenta2")
-            self.assertEqual(res, {"ok": True, "restarted": True}, cli)
+            self.assertEqual(res, {"ok": True, "restarted": True, "cli": herdr.CLI_NAMES[cli]}, cli)
             self.assertEqual(run.call_args[0][0][-1], f" RC_PROFILE=cuenta2 {line}")
 
     def test_a_cli_with_no_chat_yet_just_reopens(self) -> None:
@@ -351,7 +351,7 @@ class SetTabOwnerTests(unittest.TestCase):
         ):
             res = herdr.set_tab_owner(self.TAB, "cuenta2")
         kill.assert_called_once()
-        self.assertEqual(res, {"ok": True, "restarted": True})
+        self.assertEqual(res, {"ok": True, "restarted": True, "cli": "Claude"})
         self.assertIn(("send-keys", "-t", f"={self.TAB}:", "-l", " RC_PROFILE=cuenta2 claude --resume abc"), self.calls)
 
     def test_marks_note_every_known_panes_owner(self) -> None:

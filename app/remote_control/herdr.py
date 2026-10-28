@@ -576,7 +576,7 @@ def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
         run(f" RC_PROFILE={prof} {line}")
     except (OSError, subprocess.SubprocessError):
         return {"restarted": False, "note": f"{name} se cerró: ábrelo de nuevo"}
-    return {"restarted": True}
+    return {"restarted": True, "cli": name}
 
 
 def set_pane_owner(pane: object, prof: object) -> dict:

@@ -469,6 +469,83 @@ def scan(own_ports: set[int] | None = None, use_cache: bool = True) -> list[dict
     return entries
 
 
+# --- stopping one -------------------------------------------------------------------
+
+STOP_WAIT = 4.0
+
+
+def _uid(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return -1
+
+
+def _port_open(port: int, pids: set[int]) -> bool:
+    return any(i["port"] == port and (not pids or i["pid"] in pids) for i in listening())
+
+
+def _stop_container(name: str) -> str:
+    for tool in ("podman", "docker"):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        try:
+            done = subprocess.run([exe, "stop", "-t", "5", name], capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0:
+            return ""
+    return f"No pude detener el contenedor {name}"
+
+
+def stop(port: int, own_ports: set[int] | None = None) -> str:
+    """Stops what listens on the port (its process, or its container) and drops
+    its publication. "" when done, else why not. Only this user's processes,
+    read again here: the page only names the port."""
+    share(port, False)
+    _scan_cache_clear()
+    own = set(own_ports or ())
+    found = [i for i in listening() if i["port"] == port]
+    if not found:
+        return ""
+    if any(_is_own(i, own) for i in found):
+        return "Ese puerto es de Remote Control"
+    if any(i["process"].startswith(CONTAINER_PROCESSES) for i in found):
+        name = _containers().get(port, "")
+        if name.startswith("rc-"):
+            return "Ese puerto es de Remote Control"
+        if name:
+            return _stop_container(name)
+    pids = {i["pid"] for i in found if i["pid"]}
+    if not pids:
+        return "No veo su proceso: es de otro usuario o del sistema"
+    if any(pid in (1, os.getpid()) or _uid(pid) != os.getuid() for pid in pids):
+        return "Su proceso es de otro usuario o del sistema"
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                return f"No pude detenerlo ({exc.strerror or exc})"
+        deadline = time.monotonic() + STOP_WAIT
+        while time.monotonic() < deadline:
+            if not _port_open(port, pids):
+                return ""
+            time.sleep(0.2)
+    return "Sigue escuchando después de detenerlo"
+
+
+def _scan_cache_clear() -> None:
+    global _scan_cache
+    _scan_cache = (0.0, [])
+
+
 def host_aliases() -> list[str]:
     """Names in /etc/hosts that point at this machine (myapp.test, api.local…)."""
     names = []

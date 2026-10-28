@@ -234,5 +234,37 @@ class ServeTests(unittest.TestCase):
         self.assertFalse(any(e["port"] == self.port for e in items))
 
 
+class StopTests(unittest.TestCase):
+    def test_it_stops_the_process_on_that_port_and_its_publication(self) -> None:
+        import subprocess
+        import sys
+
+        if not devlocal.listening():
+            self.skipTest("sin ss")
+        port = _free_port()
+        proc = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.kill)
+        for _ in range(50):
+            if any(i["port"] == port for i in devlocal.listening()):
+                break
+            time.sleep(0.1)
+        dropped = []
+        with mock.patch.object(devlocal, "share", lambda p, on, *a, **k: dropped.append((p, on))):
+            self.assertEqual(devlocal.stop(port), "")
+        self.assertEqual(dropped, [(port, False)])
+        self.assertIsNotNone(proc.wait(timeout=5))
+        self.assertFalse(any(i["port"] == port for i in devlocal.listening()))
+
+    def test_never_remote_controls_own_nor_someone_elses(self) -> None:
+        with mock.patch.object(devlocal, "share", lambda *a, **k: None), \
+             mock.patch.object(devlocal, "listening", lambda: [{"port": 80, "addr": "0.0.0.0", "process": "nginx", "pid": 1}]):
+            self.assertIn("otro usuario", devlocal.stop(80))
+            self.assertIn("Remote Control", devlocal.stop(80, {80}))
+        with mock.patch.object(devlocal, "share", lambda *a, **k: None), \
+             mock.patch.object(devlocal, "listening", lambda: [{"port": 5432, "addr": "127.0.0.1", "process": "", "pid": 0}]):
+            self.assertIn("No veo", devlocal.stop(5432))
+
+
 if __name__ == "__main__":
     unittest.main()

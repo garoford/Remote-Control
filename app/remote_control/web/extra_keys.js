@@ -5144,7 +5144,7 @@
           return;
         }
         if (res.note) showToast(res.note);
-        else if (res.restarted) showToast("Claude volvió con la cuenta de " + label);
+        else if (res.restarted) showToast((res.cli || "El CLI") + " volvió con la cuenta de " + label);
         else showToast("Esta pestaña ahora es de " + label);
       })
       .catch(function () {
@@ -5175,7 +5175,7 @@
           return;
         }
         if (res.note) showToast(res.note);
-        else if (res.restarted) showToast("Claude volvió con la cuenta de " + label);
+        else if (res.restarted) showToast((res.cli || "El CLI") + " volvió con la cuenta de " + label);
         else showToast("Este panel ahora usa la cuenta de " + label);
       })
       .catch(function () {
@@ -8771,6 +8771,8 @@
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2.8h4.2V7M13.2 2.8 7.4 8.6M11.5 9.5v2.8a1 1 0 0 1-1 1H3.7a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1h2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var REFRESH_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v2.6h-2.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var TRASH_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.3h10.4M6.3 4.3V3a.8.8 0 0 1 .8-.8h1.8a.8.8 0 0 1 .8.8v1.3M4.2 4.3l.6 8.4a1 1 0 0 0 1 .9h4.4a1 1 0 0 0 1-.9l.6-8.4M6.7 6.8v4.2M9.3 6.8v4.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var KIND_LABEL = { localhost: "localhost", loopback: "loopback", todas: "todas las redes", red: "red" };
   var localState = { items: [], aliases: [], all: false, busy: {}, loaded: false };
   var localTimer = 0;
@@ -8842,7 +8844,7 @@
   }
 
   function localKey(ev) {
-    if (ev.key === "Escape") {
+    if (ev.key === "Escape" && !document.getElementById("rc-auto-modal")) {
       ev.preventDefault();
       ev.stopPropagation();
       closeLocal();
@@ -8950,6 +8952,56 @@
       });
   }
 
+  function confirmStopLocal(entry) {
+    if (autoBusy) return;
+    var card = autoModalShell();
+    card.querySelector(".rc-auto-title").textContent = "¿Detener " + entry.name + " (:" + entry.port + ")?";
+    var note = document.createElement("div");
+    note.className = "rc-auto-note is-warn";
+    note.textContent = entry.down
+      ? "Ya no responde: solo se quita su publicación."
+      : (entry.container
+          ? "Se detiene el contenedor " + entry.container + "."
+          : "Se cierra el proceso " + (entry.process || "") + " que escucha en ese puerto" + (entry.cwd ? " (" + entry.cwd + ")" : "") + ".") +
+        (entry.slug ? " También deja de publicarse." : "") +
+        " Lo que no esté guardado en ese servidor se pierde.";
+    card.appendChild(note);
+    var bar = autoActions(function (cancel, go) {
+      cancel.disabled = true;
+      go.disabled = true;
+      go.textContent = "Deteniendo…";
+      localState.busy[entry.port] = "stop";
+      paintLocal();
+      fetch("/rc-local", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "stop", port: entry.port }),
+      })
+        .then(function (resp) {
+          return resp.json().catch(function () {
+            return null;
+          });
+        })
+        .catch(function () {
+          return null;
+        })
+        .then(function (payload) {
+          delete localState.busy[entry.port];
+          if (payload && Array.isArray(payload.items)) {
+            localState.items = payload.items;
+            localState.aliases = payload.aliases || [];
+          }
+          closeAutoModal();
+          paintLocalRow();
+          paintLocal();
+          showToast(!payload ? "No pude detenerlo" : payload.ok ? entry.name + " detenido" : payload.error || "No pude detenerlo");
+        });
+    });
+    bar.querySelector(".rc-auto-go").textContent = "Detener";
+    card.appendChild(bar);
+  }
+
   function copyLocal(share, fresh) {
     writeClipboard(shareHref(share.link)).then(
       function () {
@@ -9036,6 +9088,12 @@
       acts.appendChild(copy);
       acts.appendChild(open);
     }
+    var del = wsButton("", "rc-local-icon is-danger", entry.down ? "Quitar" : "Detener este entorno", function () {
+      confirmStopLocal(entry);
+    });
+    del.innerHTML = TRASH_ICON;
+    del.disabled = !!localState.busy[entry.port];
+    acts.appendChild(del);
     var sw = document.createElement("button");
     sw.type = "button";
     sw.className = "rc-set-toggle rc-local-switch" + (entry.slug ? " is-on" : "");
@@ -9047,7 +9105,7 @@
     if (sw.disabled) {
       var wait = info.appendChild(document.createElement("div"));
       wait.className = "rc-local-note is-busy";
-      wait.textContent = entry.slug ? "Despublicando…" : "Publicando… (un túnel propio tarda unos segundos)";
+      wait.textContent = localState.busy[entry.port] === "stop" ? "Deteniendo…" : entry.slug ? "Despublicando…" : "Publicando… (un túnel propio tarda unos segundos)";
     }
     sw.innerHTML = '<span class="rc-set-toggle-track"><span></span></span>';
     sw.addEventListener("click", function () {

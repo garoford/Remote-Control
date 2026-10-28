@@ -66,6 +66,20 @@ def main() -> int:
         pass
     sync_size()
     signal.signal(signal.SIGWINCH, sync_size)
+
+    # The program runs in its own session, so a signal for this job (Remote
+    # Control closing it to reopen it with another account, a closed tab) is
+    # passed on to it, and this keeps going until it ends and the terminal is
+    # restored: dying here would leave the shell's terminal raw, and the next
+    # program drawn in steps.
+    def pass_on(signum, _frame):
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            pass
+
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+        signal.signal(signum, pass_on)
     saved = termios.tcgetattr(0)
     tty.setraw(0)
     tail = b""
@@ -96,7 +110,10 @@ def main() -> int:
                 if data:
                     write_all(1, data)
             if 0 in ready:
-                data = os.read(0, 65536)
+                try:
+                    data = os.read(0, 65536)
+                except OSError:
+                    break
                 if not data:
                     break
                 write_all(fd, data)
@@ -104,7 +121,14 @@ def main() -> int:
         if tail:
             write_all(1, tail)
         termios.tcsetattr(0, termios.TCSADRAIN, saved)
-    _, status = os.waitpid(pid, 0)
+    while True:
+        try:
+            _, status = os.waitpid(pid, 0)
+            break
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return 0
     return os.waitstatus_to_exitcode(status) if status else 0
 
 

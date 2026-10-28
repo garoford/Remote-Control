@@ -1316,6 +1316,10 @@ class Sidecar:
             if not 0 < port < 65536:
                 self._json(conn, {"ok": False, "error": "Puerto no válido"}, "400 Bad Request")
                 return
+            if req.get("op") == "stop":
+                error = devlocal.stop(port, self._own_ports())
+                self._json(conn, {**devlocal.payload(self._own_ports(), fresh=True), "ok": not error, "error": error})
+                return
             devlocal.share(
                 port, bool(req.get("on")), str(req.get("label") or "")[:60], str(req.get("addr") or "127.0.0.1"), proxy_port=self.listen_port
             )

@@ -3747,6 +3747,17 @@ html.rc-is-empty #rc-net-badge {
   color: var(--rc-text);
 }
 
+.rc-local-icon.is-danger:hover {
+  border-color: rgb(239 68 68 / 0.4);
+  background: rgb(239 68 68 / 0.14);
+  color: #f87171;
+}
+
+.rc-local-icon:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .rc-local-icon svg {
   width: 16px;
   height: 16px;
