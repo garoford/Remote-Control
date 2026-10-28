@@ -281,6 +281,18 @@ def reload(_argv: list[str]) -> int:
         print("Página al día; el proxy necesita apagar y encender el túnel una vez")
         return 3
     os.kill(pid, signal.SIGHUP)
+    # Back once it answers again (a second or so: it starts Python anew).
+    import socket
+    import time
+
+    deadline = time.monotonic() + 15
+    time.sleep(0.3)
+    while time.monotonic() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", service.port), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.2)
     print("Página y proxy al día (recarga el navegador)")
     return 0
 

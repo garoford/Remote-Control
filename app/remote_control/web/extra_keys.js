@@ -883,9 +883,13 @@
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
       }
       if (typeof pullSessions === "function") pullSessions();
-      setTimeout(function () {
-        if (!pane.intentional && panes[pane.id] === pane && !closedTabs[pane.id]) connectPane(pane);
-      }, 200);
+      // Only if its tab still exists (an exit ends it): checkTab.
+      checkTab(pane.id).then(function (again) {
+        if (!again) return;
+        setTimeout(function () {
+          if (!pane.intentional && panes[pane.id] === pane && !closedTabs[pane.id]) connectPane(pane);
+        }, 200);
+      });
     });
   }
 
@@ -1386,15 +1390,21 @@
       origAdd("close", function (ev) {
         if (ws.__rcIntentional || pane) return;
         window.dispatchEvent(new CustomEvent("rc-ws-close"));
+        // ttyd hears of the close (and shows "Reconectando…") only once the
+        // tab is known to still exist (checkCurrentTab).
+        var checked = checkCurrentTab();
         var fns = closeFns.slice();
         if (!fns.length) return;
-        schedulePrimaryRetry(function (code) {
-          if (ws.__rcIntentional) return;
-          var fake = { code: code, reason: (ev && ev.reason) || "", wasClean: code === 1000, type: "close" };
-          fns.forEach(function (fn) {
-            try {
-              fn.call(ws, fake);
-            } catch (_) {}
+        checked.then(function (again) {
+          if (!again || ws.__rcIntentional) return;
+          schedulePrimaryRetry(function (code) {
+            if (ws.__rcIntentional) return;
+            var fake = { code: code, reason: (ev && ev.reason) || "", wasClean: code === 1000, type: "close" };
+            fns.forEach(function (fn) {
+              try {
+                fn.call(ws, fake);
+              } catch (_) {}
+            });
           });
         });
       });
@@ -4324,24 +4334,51 @@
 
   // A shell that ended (exit, Ctrl+D) takes its tmux session with it, and with
   // the last one the whole tmux server. Nothing marks it closed, so ttyd would
-  // reconnect to it forever: when the socket drops, ask the server whether the
-  // tab still exists, and if not leave it like a closed one.
+  // reconnect to it forever. Before any reconnect (and its "Reconectando…"),
+  // ask the server whether the tab still exists; if not, leave it like a
+  // closed one, for a live tab or the empty screen. Resolves true when it
+  // should reconnect (alive, or no answer: a network blip, a proxy reload).
   function checkCurrentTab() {
-    var id = tabId();
-    if (!id || closedTabs[id]) return;
-    fetch("/rc-workspaces", { cache: "no-store" })
+    return checkTab(tabId());
+  }
+
+  // The same for any tab this page holds a socket for (also those in the
+  // background): an ended one leaves the bar, the shown one moves on.
+  function checkTab(id) {
+    if (!id || closedTabs[id]) return Promise.resolve(true);
+    var asked = fetch("/rc-workspaces", { cache: "no-store" })
       .then(function (resp) {
         return resp.ok ? resp.json() : null;
       })
       .then(function (payload) {
-        takeWorkspaces(payload);
-        if (!payload || !Array.isArray(payload.sessions) || id !== tabId() || closedTabs[id]) return;
-        var alive = payload.sessions.some(function (item) {
-          return item.id === id;
+        if (!payload || !Array.isArray(payload.sessions) || closedTabs[id]) return true;
+        var live = {};
+        payload.sessions.forEach(function (item) {
+          if (item && item.id) live[item.id] = true;
         });
-        if (!alive) forgetSession(id);
+        if (live[id]) {
+          takeWorkspaces(payload);
+          return true;
+        }
+        // Tabs that ended too (several exits in a row) are never the next stop.
+        var host = document.getElementById("rc-session-tabs");
+        if (host) {
+          host.querySelectorAll(".rc-tab").forEach(function (el) {
+            if (el.dataset.id && el.dataset.id !== id && !live[el.dataset.id]) el.remove();
+          });
+        }
+        forgetSession(id);
+        return false;
       })
-      .catch(function () {});
+      .catch(function () {
+        return true;
+      });
+    var waited = new Promise(function (resolve) {
+      setTimeout(function () {
+        resolve(true);
+      }, 4000);
+    });
+    return Promise.race([asked, waited]);
   }
 
   function forgetSession(id) {
@@ -9084,15 +9121,6 @@
       if (!document.hidden) pullSessions();
     }, 3000);
     window.addEventListener("rc-ws-open", pullSessions);
-    // One check at a time: a dead tab reconnects faster than any debounce.
-    var aliveCheck = 0;
-    window.addEventListener("rc-ws-close", function () {
-      if (aliveCheck) return;
-      aliveCheck = setTimeout(function () {
-        aliveCheck = 0;
-        checkCurrentTab();
-      }, 300);
-    });
     window.addEventListener("rc-tab-changed", function () {
       paintSessions(sessionCache);
     });
