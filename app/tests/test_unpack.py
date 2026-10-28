@@ -101,6 +101,27 @@ class UnpackTests(unittest.TestCase):
         self.assertEqual(Path(s["path"]).read_text(), "42")
         self.assertEqual(self.leftovers(), [])
 
+    def test_links_inside_stay_and_links_out_are_left_out(self) -> None:
+        # The real case: .claude/skills/x → ../../.agents/skills/x. 7-Zip
+        # calls every ".." link dangerous and ends with an error.
+        src = self.dir / "ws.zip"
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("ws/.agents/skills/x/SKILL.md", "skill")
+            for name, target in (("ws/.claude/skills/x", "../../.agents/skills/x"), ("ws/fuera", "../../../../etc")):
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (0o120777 << 16)
+                info.create_system = 3
+                zf.writestr(info, target)
+        for seven in ("", unpack.seven_zip()):
+            with self.subTest(seven=bool(seven)), mock.patch.object(unpack, "seven_zip", lambda s=seven: s):
+                s = run(src)
+                self.assertEqual(s["state"], "done", s)
+                out = Path(s["path"])
+                self.assertEqual((out / ".claude" / "skills" / "x" / "SKILL.md").read_text(), "skill")
+                self.assertFalse((out / "fuera").exists() or (out / "fuera").is_symlink())
+                self.assertEqual(s["skipped"], 1)
+                shutil.rmtree(out)
+
     def test_a_broken_one_leaves_nothing(self) -> None:
         (self.dir / "roto.zip").write_bytes(b"PK\x03\x04 esto no es un zip")
         with mock.patch.object(unpack, "seven_zip", lambda: ""):

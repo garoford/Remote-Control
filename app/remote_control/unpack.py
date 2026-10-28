@@ -192,34 +192,79 @@ PERCENT_RE = re.compile(rb"(\d{1,3})%")
 SEVEN_PASSWORD = ("wrong password", "can not open encrypted archive", "enter password", "encrypted")
 
 
+DANGEROUS_RE = re.compile(r"dangerous link path was ignored : (.+) : (.+)$", re.I)
+
+
+def _restore_links(dest: Path, links: list[tuple[str, str]], job: dict) -> None:
+    """7-Zip leaves out every link whose target has "..", even one that stays
+    in the archive (.claude/skills/x → ../../.agents/skills/x). Those come back
+    here when they point inside the folder; the rest stay out."""
+    root = os.path.realpath(dest)
+    for rel, target in links:
+        link = os.path.normpath(os.path.join(root, rel))
+        parent = os.path.realpath(os.path.dirname(link))
+        aim = os.path.normpath(os.path.join(parent, target))
+        inside = os.path.commonpath([root, parent]) == root and os.path.commonpath([root, aim]) == root
+        # 7-Zip leaves an empty file in its place.
+        placeholder = os.path.isfile(link) and not os.path.islink(link) and os.path.getsize(link) == 0
+        if not inside or os.path.isabs(target) or os.path.lexists(link) and not placeholder:
+            if placeholder:
+                os.unlink(link)
+            job["skipped"] += 1
+            continue
+        try:
+            os.makedirs(parent, exist_ok=True)
+            if placeholder:
+                os.unlink(link)
+            os.symlink(target, link)
+        except OSError:
+            job["skipped"] += 1
+
+
 def _seven(exe: str, src: Path, dest: Path, job: dict, password: str) -> None:
     # -p always: without it 7-Zip would wait for a password on its stdin.
     cmd = [exe, "x", "-y", "-bso0", "-bsp1", "-bse1", f"-o{dest}", f"-p{password}", "--", str(src)]
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     job["proc"] = proc
     out = b""
+    pending = b""
+    errors: list[str] = []
+    links: list[tuple[str, str]] = []
     assert proc.stdout is not None
-    while chunk := proc.stdout.read1(4096):
+    while chunk := proc.stdout.read1(65536):
         out = (out + chunk)[-8192:]
         found = PERCENT_RE.findall(chunk)
         if found:
             job["progress"] = min(int(found[-1]) / 100, 0.99)
+        *lines, pending = (pending + chunk).split(b"\n")
+        for raw in lines:
+            # The progress line is drawn with backspaces right before it.
+            at = raw.upper().find(b"ERROR:")
+            if at < 0:
+                continue
+            line = raw[at:].decode("utf-8", "replace").strip()
+            danger = DANGEROUS_RE.search(line)
+            if danger and len(links) < 100000:
+                links.append((danger.group(1).strip(), danger.group(2).strip()))
+            else:
+                errors.append(line)
     proc.stdout.close()
     code = proc.wait()
     _stop_if_cancelled(job)
-    # 1 is a warning (a link pointing out of the folder left out, say).
-    if code == 0 or code == 1 and any(dest.iterdir()):
+    # 1 is a warning; 2 with only left-out links is a whole extraction too.
+    if code == 0 or code in (1, 2) and not errors and any(dest.iterdir()):
+        _restore_links(dest, links, job)
         job["files"] = sum(len(files) for _, _, files in os.walk(dest))
         return
-    text = out.decode("utf-8", "replace").lower()
-    if any(w in text for w in SEVEN_PASSWORD):
+    text = out.decode("utf-8", "replace")
+    if any(w in text.lower() for w in SEVEN_PASSWORD):
         raise NeedsPassword()
-    if "unsupported method" in text and src.name.lower().endswith(".rar") and shutil.which("unrar"):
+    if "unsupported method" in text.lower() and src.name.lower().endswith(".rar") and shutil.which("unrar"):
         shutil.rmtree(dest, ignore_errors=True)
         dest.mkdir()
         _unrar(src, dest, job, password)
         return
-    last = next((line.strip() for line in reversed(text.splitlines()) if line.strip().startswith("error")), "")
+    last = errors[-1] if errors else ""
     raise FsError("No pude extraerlo" + (": " + last[6:].strip(" :") if last else " (¿archivo dañado?)"))
 
 
@@ -310,6 +355,7 @@ def _place(work: Path, src: Path) -> Path:
 
 def _work(job: dict, src: Path, kind: str, seven: str, password: str) -> None:
     work = src.parent / f".{stem_of(src.name)[:80]}.rc-extract-{secrets.token_hex(4)}"
+    state, error = "error", ""
     try:
         work.mkdir(mode=0o755)
         if kind == "tar":
@@ -326,23 +372,24 @@ def _work(job: dict, src: Path, kind: str, seven: str, password: str) -> None:
             raise FsError("El archivo está vacío")
         job["path"] = str(_place(work, src))
         job["progress"] = 1.0
-        job["state"] = "done"
+        state = "done"
     except NeedsPassword:
-        job["state"] = "password"
-        job["error"] = "Contraseña incorrecta" if password else "Este archivo tiene contraseña"
+        state, error = "password", "Contraseña incorrecta" if password else "Este archivo tiene contraseña"
     except _Cancelled:
-        job["state"] = "cancelled"
+        state = "cancelled"
     except FsError as exc:
-        job["state"], job["error"] = "error", str(exc)
+        error = str(exc)
     except PermissionError:
-        job["state"], job["error"] = "error", "Sin permiso para escribir ahí"
+        error = "Sin permiso para escribir ahí"
     except OSError as exc:
-        job["state"], job["error"] = "error", "No pude extraerlo: " + str(exc.strerror or exc)
+        error = "No pude extraerlo: " + str(exc.strerror or exc)
     finally:
         job.pop("proc", None)
-        if job["state"] != "done":
+        # What came out goes away before the page hears the job ended.
+        if state != "done":
             shutil.rmtree(work, ignore_errors=True)
-        job["made"] = time.time()
+        job["error"], job["made"] = error, time.time()
+        job["state"] = state
 
 
 def status(token: str) -> dict:
