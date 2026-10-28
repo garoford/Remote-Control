@@ -17,13 +17,14 @@ import hashlib
 import json
 import mimetypes
 import queue
+import secrets
 import socket
 import sys
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.gate import LOGIN_PAGE, Gate, clear_cookie, load_gate, set_cookie
+from remote_control.gate import COOKIE_MAX_AGE, LOGIN_PAGE, Gate, clear_cookie, load_gate, set_cookie
 from remote_control.history import (
     cancel_copy_mode,
     close_session,
@@ -34,7 +35,7 @@ from remote_control.history import (
     scrollback_state,
 )
 from remote_control import files as fs
-from remote_control import agent_context, profiles
+from remote_control import agent_context, devlocal, profiles
 from remote_control.agents import write_rc_command
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control import backgrounds
@@ -355,8 +356,21 @@ class Sidecar:
             if path != "/" and path.endswith("/"):
                 path = path.rstrip("/")
             headers = _header_map(header)
+            # A local environment's own name (subdomain or its own tunnel):
+            # everything there is that server's, Remote Control's included paths.
+            hosted = devlocal.share_for_host(_host_name(headers.get("host", "")))
+            if hosted is not None:
+                self._serve_dev_host(conn, method, header, body, headers, raw_target, hosted)
+                return
             if self.gate is not None and not self.gate.cookie_ok(headers.get("cookie", "")):
                 self._serve_gated(conn, method, path, body, headers)
+                return
+            dev = devlocal.route(raw_target, headers)
+            if dev is not None:
+                self._serve_dev(conn, method, header, body, headers, dev)
+                return
+            if path == "/rc-local" and method in ("GET", "POST"):
+                self._serve_local(conn, method, body, parse_qs(parsed_url.query))
                 return
             if method == "OPTIONS" and path.startswith("/rc-"):
                 self._serve_options(conn)
@@ -518,7 +532,8 @@ class Sidecar:
         if method == "POST" and path == "/rc-login":
             self._serve_gate_login(conn, body, headers)
             return
-        if method in {"GET", "HEAD"} and path in {"/", "/index.html"}:
+        # A published local environment asks for the same password.
+        if method in {"GET", "HEAD"} and (path in {"/", "/index.html"} or path.startswith("/p/")):
             self._serve_gate_page(conn, method == "HEAD")
             return
         conn.sendall(
@@ -1281,6 +1296,156 @@ class Sidecar:
             except OSError:
                 pass
 
+    def _own_ports(self) -> set[int]:
+        return {self.listen_port, self.upstream_port}
+
+    def _serve_local(self, conn: socket.socket, method: str, body: bytes, query: dict[str, list[str]]) -> None:
+        if method == "POST":
+            try:
+                req = json.loads(body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, ValueError):
+                req = {}
+            req = req if isinstance(req, dict) else {}
+            try:
+                port = int(req.get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if not 0 < port < 65536:
+                self._json(conn, {"ok": False, "error": "Puerto no válido"}, "400 Bad Request")
+                return
+            devlocal.share(
+                port, bool(req.get("on")), str(req.get("label") or "")[:60], str(req.get("addr") or "127.0.0.1"), proxy_port=self.listen_port
+            )
+        self._json(conn, devlocal.payload(self._own_ports(), fresh=(query.get("fresh") or [""])[0] == "1"))
+
+    def _serve_dev_host(
+        self,
+        conn: socket.socket,
+        method: str,
+        header: bytes,
+        body: bytes,
+        headers: dict[str, str],
+        raw_target: str,
+        hosted: tuple[str, dict],
+    ) -> None:
+        """A local environment on its own name. Its key (from the link, then a
+        cookie of that name only) or the password lets in; nothing else here."""
+        slug, share = hosted
+        path, _, query = raw_target.partition("?")
+        params = parse_qs(query)
+        cookie_key = devlocal._cookie(headers.get("cookie", ""), devlocal.KEY_COOKIE)
+        if self.gate is None or (cookie_key and secrets.compare_digest(cookie_key, share["key"])):
+            self._serve_dev(conn, method, header, body, headers, (slug, share, raw_target, False), hosted=True)
+            return
+        cookie = f"{devlocal.KEY_COOKIE}={share['key']}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={COOKIE_MAX_AGE}"
+        given = (params.get(devlocal.KEY_PARAM) or [""])[0]
+        if given and secrets.compare_digest(given, share["key"]):
+            rest = "&".join(p for p in query.split("&") if p and not p.startswith(devlocal.KEY_PARAM + "="))
+            where = path + ("?" + rest if rest else "")
+            conn.sendall(_http_response("302 Found", b"", "text/plain", [("Location", where), ("Set-Cookie", cookie), ("Cache-Control", "no-store")]))
+            return
+        if method == "OPTIONS" and path == "/rc-login":
+            self._serve_options(conn)
+            return
+        if method == "POST" and path == "/rc-login":
+            password = _login_password(body)
+            if password is None or not self.gate.check(password):
+                self._json(conn, {"error": "contraseña incorrecta"}, "401 Unauthorized")
+                return
+            conn.sendall(
+                _http_response("200 OK", b'{"ok":true}', "application/json; charset=utf-8", [("Cache-Control", "no-store"), ("Set-Cookie", cookie)])
+            )
+            return
+        if method in {"GET", "HEAD"} and "text/html" in (headers.get("accept") or ""):
+            self._serve_gate_page(conn, method == "HEAD")
+            return
+        conn.sendall(_http_response("401 Unauthorized", b'{"error":"unauthorized"}', "application/json; charset=utf-8", [("Cache-Control", "no-store")]))
+
+    def _serve_dev(
+        self,
+        conn: socket.socket,
+        method: str,
+        header: bytes,
+        body: bytes,
+        headers: dict[str, str],
+        dev: tuple[str, dict, str, bool],
+        hosted: bool = False,
+    ) -> None:
+        """A published local environment (devlocal.py): its server, as if the
+        browser were on this machine."""
+        slug, share, target, entering = dev
+        raw_path = header.split(b"\r\n", 1)[0].split(b" ")[1].split(b"?", 1)[0].decode("latin1")
+        if entering and raw_path == f"/p/{slug}":
+            # Relative links need the trailing slash.
+            conn.sendall(_http_response("302 Found", b"", "text/plain", [("Location", f"/p/{slug}/"), ("Cache-Control", "no-store")]))
+            return
+        upgrade = "upgrade" in (headers.get("connection") or "").lower()
+        wants_html = not upgrade and method == "GET" and "text/html" in (headers.get("accept") or "")
+        try:
+            upstream = socket.create_connection((devlocal._connect_host(share["addr"]), share["port"]), timeout=10)
+        except OSError:
+            page = (
+                "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                "<title>Sin respuesta</title><body style='font:16px system-ui;background:#111;color:#ddd;display:grid;place-items:center;height:90vh'>"
+                f"<div><h2>{slug} no responde</h2><p>Nada escucha en el puerto {share['port']} de la máquina. ¿Se detuvo el servidor?</p></div>"
+            ).encode()
+            conn.sendall(_http_response("502 Bad Gateway", page, "text/html; charset=utf-8", [("Cache-Control", "no-store")]))
+            return
+        try:
+            upstream.sendall(devlocal.request_head(method, target, header, share, upgrade, wants_html) + body)
+            if not wants_html:
+                conn.settimeout(None)
+                upstream.settimeout(None)
+                _splice(conn, upstream)
+                return
+            upstream.settimeout(30)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = upstream.recv(65536)
+                if not chunk:
+                    return
+                data += chunk
+                if len(data) > MAX_HEADER:
+                    return
+            head, _, rest = data.partition(b"\r\n\r\n")
+            lines = head.split(b"\r\n")
+            resp = _header_map(head)
+            if "chunked" in (resp.get("transfer-encoding") or "").lower():
+                resp_body = _read_chunked(upstream, rest) or b""
+            elif "content-length" in resp:
+                need = int(resp["content-length"])
+                resp_body = rest
+                while len(resp_body) < need:
+                    chunk = upstream.recv(min(65536, need - len(resp_body)))
+                    if not chunk:
+                        break
+                    resp_body += chunk
+            else:
+                resp_body = rest
+                while chunk := upstream.recv(65536):
+                    resp_body += chunk
+            encoded = (resp.get("content-encoding") or "identity").lower() != "identity"
+            if "html" in (resp.get("content-type") or "").lower() and not encoded:
+                resp_body = devlocal.rewrite_html(resp_body, slug, hosted)
+            out = [lines[0]]
+            for line in lines[1:]:
+                key = line.split(b":", 1)[0].strip().lower()
+                if key in (b"content-length", b"transfer-encoding", b"connection", b"keep-alive"):
+                    continue
+                if key == b"location":
+                    value = line.split(b":", 1)[1].strip().decode("latin1")
+                    line = b"Location: " + devlocal.fix_location(value, slug, hosted).encode("latin1")
+                out.append(line)
+            if entering:
+                out.append(f"Set-Cookie: {devlocal.COOKIE}={slug}; Path=/; SameSite=Lax; HttpOnly".encode())
+            out += [f"Content-Length: {len(resp_body)}".encode(), b"Connection: close"]
+            conn.sendall(b"\r\n".join(out) + b"\r\n\r\n" + resp_body)
+        finally:
+            try:
+                upstream.close()
+            except OSError:
+                pass
+
     def _mobile_font_url(self) -> str:
         return pick_mobile_font_url(load_manifest(self.assets), self.assets)
 
@@ -1338,6 +1503,13 @@ class Sidecar:
                 upstream.close()
             except OSError:
                 pass
+
+
+def _host_name(host: str) -> str:
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
 def _login_password(body: bytes) -> str | None:

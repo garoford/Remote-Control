@@ -448,5 +448,17 @@ class TunnelCommandTests(unittest.TestCase):
              mock.patch.object(domains, "direct_reach", lambda public: domains.Reach(True, "", 8443)):
             self.assertEqual(svc._domain_plan(), (cfg, "203.0.113.7", "direct"))
 
+
+class CoversTests(unittest.TestCase):
+    def test_a_wildcard_added_later_needs_a_new_certificate(self) -> None:
+        from remote_control import acme
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert, key = Path(tmp) / "c.pem", Path(tmp) / "k.pem"
+            _self_signed("rc.a.com", cert, key, days=60)
+            self.assertTrue(acme.covers(cert, ["rc.a.com"]))
+            self.assertFalse(acme.covers(cert, ["rc.a.com", "*.rc.a.com"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -299,7 +299,8 @@ class TunnelService:
         if mode == "routed":
             assert routed is not None
             self._start_proxy()
-            self.mode_file.write_text("direct\n", encoding="utf-8")
+            # No cloudflared, like "direct"; the router owns its subdomains.
+            self.mode_file.write_text("routed\n", encoding="utf-8")
             url = routed
         elif mode == "direct":
             assert domain is not None
@@ -323,6 +324,14 @@ class TunnelService:
         self._pkill(f"cloudflared tunnel --url http://127.0.0.1:{self.port}")
         self.ttyd_port_file.unlink(missing_ok=True)
         self.proxy_port_file.unlink(missing_ok=True)
+        # Nothing stays published with the tunnel off (devlocal.py).
+        from remote_control.devlocal import clear_shares, set_subdomain_base
+
+        clear_shares()
+        # The domain's subdomains come back with the next direct start; a
+        # container's (written by the router) stay.
+        if self.mode_file.is_file() and self.mode_file.read_text(encoding="utf-8").strip() == "direct":
+            set_subdomain_base(None)
         # Switching the tunnel off closes the tabs too (nothing keeps using
         # CPU and memory unseen): their folder, screen and conversation are
         # saved first, and the next start brings them back (workspaces.py).
@@ -507,6 +516,9 @@ class TunnelService:
             self._tls = None
         self.mode_file.write_text("direct\n", encoding="utf-8")
         port = reach.public_port
+        from remote_control.devlocal import set_subdomain_base
+
+        set_subdomain_base(cfg.host + ("" if port == 443 else f":{port}"))
         return f"https://{cfg.host}" + ("" if port == 443 else f":{port}") + "/"
 
     def _start_proxy(self) -> None:

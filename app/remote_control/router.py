@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -138,10 +139,60 @@ def route_file(edge: domains.Edge, box: str) -> Path:
     return edge.dynamic_dir / f"{ROUTE_PREFIX}{box}.yaml"
 
 
-def write_route(edge: domains.Edge, box: str, host: str, port: int) -> None:
+CERTS_DIR = "remote-control-certs"
+
+
+def _host_regexp(edge: domains.Edge, host: str) -> str:
+    """Any one-label subdomain of host (its local environments)."""
+    if edge.v3:
+        return "HostRegexp(`^[a-z0-9-]+\\." + re.escape(host).replace("\\-", "-") + "$`)"
+    return "HostRegexp(`{sub:[a-z0-9-]+}." + host + "`)"
+
+
+def _copy_certs(edge: domains.Edge, host: str) -> None:
+    """Our wildcard certificate where the proxy can read it (it cannot get one:
+    a wildcard needs the DNS challenge, and it has no DNS account)."""
+    folder = edge.dynamic_dir / CERTS_DIR / host
+    folder.mkdir(parents=True, exist_ok=True)
+    for src in acme.cert_paths(host):
+        dst = folder / src.name
+        data = src.read_bytes()
+        if not dst.is_file() or dst.read_bytes() != data:
+            tmp = dst.with_name(f".{dst.name}.tmp")
+            tmp.write_bytes(data)
+            tmp.chmod(0o600)
+            tmp.replace(dst)
+
+
+def write_route(edge: domains.Edge, box: str, host: str, port: int, wild: bool = False) -> None:
     """The container's name as a route of that proxy, in its own style
-    (HTTPS with its resolver, HTTP redirected), to this machine's bridge."""
+    (HTTPS with its resolver, HTTP redirected), to this machine's bridge.
+    wild: its subdomains too, with our wildcard certificate."""
     rid = f"{ROUTE_PREFIX}{box}"
+    subs = ""
+    certs = ""
+    if wild:
+        _copy_certs(edge, host)
+        rule = _host_regexp(edge, host)
+        subs = (
+            f"    {rid}-sub:\n"
+            f"      rule: '{rule}'\n"
+            f"      entryPoints: [{edge.https}]\n"
+            "      tls: {}\n"
+            f"      service: {rid}\n"
+            f"    {rid}-sub-http:\n"
+            f"      rule: '{rule}'\n"
+            f"      entryPoints: [{edge.http}]\n"
+            f"      middlewares: [{rid}-https]\n"
+            f"      service: {rid}\n"
+        )
+        inside = f"{edge.inside.rstrip('/')}/{CERTS_DIR}/{host}"
+        certs = (
+            "tls:\n"
+            "  certificates:\n"
+            f"    - certFile: {inside}/fullchain.pem\n"
+            f"      keyFile: {inside}/key.pem\n"
+        )
     text = (
         f"# Remote Control: container {box}. Written and removed by Remote Control.\n"
         "http:\n"
@@ -160,11 +211,13 @@ def write_route(edge: domains.Edge, box: str, host: str, port: int) -> None:
         f"      entryPoints: [{edge.http}]\n"
         f"      middlewares: [{rid}-https]\n"
         f"      service: {rid}\n"
-        "  services:\n"
+        + subs
+        + "  services:\n"
         f"    {rid}:\n"
         "      loadBalancer:\n"
         "        servers:\n"
         f'          - url: "http://{edge.gateway}:{port}"\n'
+        + certs
     )
     path = route_file(edge, box)
     try:
@@ -177,16 +230,25 @@ def write_route(edge: domains.Edge, box: str, host: str, port: int) -> None:
     tmp.replace(path)
 
 
+def has_wildcard(host: str) -> bool:
+    return acme.covers(acme.cert_paths(host)[0], [f"*.{host}"])
+
+
 def sync_routes(edge: domains.Edge, routes: dict[str, str], ports: dict[str, int]) -> None:
     """Exactly one route file per container with a name; no stale ones."""
     keep = set()
     for box, host in routes.items():
         if box in ports:
-            write_route(edge, box, host, ports[box])
+            write_route(edge, box, host, ports[box], wild=has_wildcard(host))
             keep.add(route_file(edge, box).name)
     for old in edge.dynamic_dir.glob(f"{ROUTE_PREFIX}*.yaml"):
         if old.name not in keep:
             old.unlink(missing_ok=True)
+    certs = edge.dynamic_dir / CERTS_DIR
+    if certs.is_dir():
+        for old in certs.iterdir():
+            if old.name not in routes.values():
+                shutil.rmtree(old, ignore_errors=True)
 
 
 def unassign(box: str) -> None:
@@ -201,6 +263,7 @@ def unassign(box: str) -> None:
     except domains.DomainError:
         pass
     _tell_container(box, None)
+    _tell_subdomains(box, None)
     edge = domains.detect_traefik()
     if edge:
         # With no name left the router stops, so it would not tidy this one up.
@@ -220,10 +283,64 @@ def _release(prov: domains.Provider, cfg: domains.DomainConfig, host: str, publi
     """Drop the A record of a name we no longer use (only if it is ours)."""
     try:
         zone, name = domains.split_host(host, [cfg.zone])
-        if public and ("A", public) in prov.records_at(zone, name):
-            prov.delete_record(zone, name, "A")
+        for each in (name, wild_name(name)):
+            if public and ("A", public) in prov.records_at(zone, each):
+                prov.delete_record(zone, each, "A")
     except domains.DomainError:
         pass
+
+
+def wild_name(name: str) -> str:
+    return f"*.{name}" if name else "*"
+
+
+def _tell_subdomains(box: str, base: str | None) -> None:
+    """Its local environments may use <slug>.<base> (devlocal.py)."""
+    try:
+        multi._write_file(box, f"{multi.HOME}/.config/remote-control/subdomains", base or "")
+    except multi.MultiError:
+        pass
+
+
+def _wildcard_keeper(edge: domains.Edge | None) -> None:
+    """Each name also gets *.name (DNS and certificate) for the container's local
+    environments. In the background: the certificate takes a few minutes, and
+    names given before this existed get it too."""
+    done: dict[str, str] = {}
+    failed: dict[str, float] = {}
+    while True:
+        try:
+            routes = load_routes()
+            for box in list(done):
+                if routes.get(box) != done[box]:
+                    done.pop(box)
+            todo = {b: h for b, h in routes.items() if done.get(b) != h and time.time() - failed.get(h, 0) > 3600}
+            if todo:
+                cfg, prov = _account()
+                ip = domains.public_ipv4()
+                for box, host in todo.items():
+                    try:
+                        zone, name = domains.split_host(host, [cfg.zone])
+                        if ip:
+                            prov.point(zone, wild_name(name), ip)
+                        acme.ensure_cert(
+                            host,
+                            zone,
+                            lambda value, z=zone, n=name: prov.set_record(z, domains.challenge_name(n), "TXT", value, ttl=300),
+                            lambda z=zone, n=name: prov.delete_record(z, domains.challenge_name(n), "TXT"),
+                            email=cfg.email,
+                            directory=acme.STAGING if os.environ.get("RC_ACME_STAGING") else acme.DIRECTORY,
+                            wildcard=True,
+                            log=lambda msg: print(f"router: {msg}", file=sys.stderr, flush=True),
+                        )
+                        _tell_subdomains(box, host)
+                        done[box] = host
+                    except Exception as exc:
+                        failed[host] = time.time()
+                        print(f"router: *.{host}: {exc}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"router: {exc}", file=sys.stderr, flush=True)
+        time.sleep(RELOAD_S)
 
 
 def _tell_container(box: str, url: str | None) -> None:
@@ -323,12 +440,22 @@ class Router:
                 cert, key = acme.cert_paths(first)
                 self.base.load_cert_chain(str(cert), str(key))
 
+    def match(self, name: str) -> str:
+        """The route that serves name: itself, or the name it is one label
+        under (a container's local environment, devlocal.py)."""
+        name = (name or "").lower()
+        if name in self.table:
+            return name
+        parent = name.partition(".")[2]
+        return parent if parent in self.table and has_wildcard(parent) else ""
+
     def _sni(self, sock, server_name, _ctx):
-        ctx = self.contexts.get((server_name or "").lower())
+        host = self.match(server_name)
+        ctx = self.contexts.get(host)
         if ctx is None:
             return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
         sock.context = ctx
-        sock.rc_host = server_name.lower()
+        sock.rc_host = host
         return None
 
     def redirect_target(self, request: bytes, public_port: int) -> bytes | None:
@@ -341,7 +468,7 @@ class Router:
             return None
         host = next((h.split(":", 1)[1].strip() for h in headers if h.lower().startswith("host:")), "")
         host = host.split(":", 1)[0].lower()
-        if host not in self.table or not path.startswith("/"):
+        if not self.match(host) or not path.startswith("/"):
             return None
         where = f"https://{host}" + ("" if public_port == 443 else f":{public_port}") + path
         return (
@@ -434,6 +561,8 @@ def _keep(router: Router) -> None:
                     for host in routes.values():
                         zone, name = domains.split_host(host, [cfg.zone])
                         prov.point(zone, name, ip)
+                        if has_wildcard(host):
+                            prov.point(zone, wild_name(name), ip)
                     last_ip = ip
             if now - last_renew >= RENEW_CHECK_S:
                 last_renew = now
@@ -513,6 +642,8 @@ def _bridge_loop(edge: domains.Edge) -> None:
                     for host in routes.values():
                         zone, name = domains.split_host(host, [cfg.zone])
                         prov.point(zone, name, ip)
+                        if has_wildcard(host):
+                            prov.point(zone, wild_name(name), ip)
                     last_ip = ip
         except Exception as exc:
             print(f"router: {exc}", file=sys.stderr, flush=True)
@@ -521,6 +652,7 @@ def _bridge_loop(edge: domains.Edge) -> None:
 
 def main(_argv: list[str] | None = None) -> int:
     edge = domains.detect_traefik()
+    threading.Thread(target=_wildcard_keeper, args=(edge,), daemon=True).start()
     if edge:
         print(f"router: rutas en {edge.dynamic_dir} ({edge.name}), puente en {edge.gateway}", file=sys.stderr, flush=True)
         _bridge_loop(edge)

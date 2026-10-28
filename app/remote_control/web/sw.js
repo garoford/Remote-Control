@@ -115,11 +115,6 @@ self.addEventListener("fetch", function (event) {
     event.respondWith(cacheFirst(request, /\.woff2$/.test(url.pathname)));
     return;
   }
-  if (/\.woff2$/.test(url.pathname)) {
-    event.respondWith(cacheFirst(request, true));
-    return;
-  }
-  if (/\.(js|css|wasm)$/.test(url.pathname)) {
-    event.respondWith(cacheFirst(request, false));
-  }
+  // Anything else may be a published local environment's (devlocal.py):
+  // its files change on every save, so they are never cached here.
 });

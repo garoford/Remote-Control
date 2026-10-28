@@ -57,6 +57,16 @@ def days_left(cert: Path) -> float:
     return (end - dt.datetime.now(dt.timezone.utc)).total_seconds() / 86400
 
 
+def covers(cert: Path, names: list[str]) -> bool:
+    """The certificate names all of them (a wildcard added later needs a new one)."""
+    try:
+        data = x509.load_pem_x509_certificate(cert.read_bytes())
+        sans = data.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except (OSError, ValueError, x509.ExtensionNotFound):
+        return False
+    return all(n in sans for n in names)
+
+
 def b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -211,15 +221,19 @@ def ensure_cert(
     home: Path | None = None,
     directory: str = DIRECTORY,
     log: Callable[[str], None] = lambda _msg: None,
+    wildcard: bool = False,
 ) -> tuple[Path, Path]:
-    """(fullchain, key) for host, issuing a new one when missing or near expiry."""
+    """(fullchain, key) for host, issuing a new one when missing or near expiry.
+    wildcard: it also covers *.host (its local environments, devlocal.py); both
+    are proved with the same TXT name, one after the other."""
     cert, key_path = cert_paths(host, home)
-    if days_left(cert) > RENEW_DAYS and key_path.is_file():
+    names = [host] + ([f"*.{host}"] if wildcard else [])
+    if days_left(cert) > RENEW_DAYS and key_path.is_file() and covers(cert, names):
         return cert, key_path
-    log(f"Pidiendo certificado HTTPS para {host}…")
+    log(f"Pidiendo certificado HTTPS para {', '.join(names)}…")
     client = Client(_load_or_make_key(tls_dir(home) / "account.key"), directory)
     client.account(email)
-    order, headers = client.post(client.dir["newOrder"], {"identifiers": [{"type": "dns", "value": host}]})
+    order, headers = client.post(client.dir["newOrder"], {"identifiers": [{"type": "dns", "value": n} for n in names]})
     assert isinstance(order, dict)
     order_url = headers.get("Location", "")
     record = f"_acme-challenge.{host}"
@@ -251,7 +265,7 @@ def ensure_cert(
     csr = (
         x509.CertificateSigningRequestBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)]))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in names]), critical=False)
         .sign(cert_key, hashes.SHA256())
     )
     client.post(order["finalize"], {"csr": b64(csr.public_bytes(serialization.Encoding.DER))})

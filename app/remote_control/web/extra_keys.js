@@ -5653,6 +5653,7 @@
     renderDrawer();
     pullSessions();
     loadProfiles();
+    loadLocal(false);
   }
 
   function closeDrawer() {
@@ -8584,6 +8585,373 @@
     else if (typeof lightQuery.addListener === "function") lightQuery.addListener(onChange);
   }
 
+  // --- Local environments (devlocal.py) ---------------------------------------------
+  // The dev servers listening on this machine, with a switch that publishes
+  // one on this tunnel at /p/<slug>/ (behind the same password).
+  var LOCAL_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="2.6" width="12.4" height="8.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 13.6h5M8 11.2v2.4M5 6.9l1.6-1.5L5 3.9M8 8.2h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var LINK_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2.2-2.2a2.6 2.6 0 0 0-3.7-3.7l-.9.9M9.2 6.8a2.6 2.6 0 0 0-3.7 0L3.3 9a2.6 2.6 0 0 0 3.7 3.7l.9-.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  var OPEN_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2.8h4.2V7M13.2 2.8 7.4 8.6M11.5 9.5v2.8a1 1 0 0 1-1 1H3.7a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1h2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var REFRESH_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v2.6h-2.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var KIND_LABEL = { localhost: "localhost", loopback: "loopback", todas: "todas las redes", red: "red" };
+  var localState = { items: [], aliases: [], all: false, busy: {}, loaded: false };
+  var localTimer = 0;
+
+  var SHARE_KIND = { sub: "subdominio", tunnel: "túnel propio", path: "ruta" };
+
+  function shareHref(u) {
+    return u && u.charAt(0) === "/" ? location.origin + u : u;
+  }
+
+  function loadLocal(fresh) {
+    return fetch("/rc-local" + (fresh ? "?fresh=1" : ""), { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        if (!payload || !Array.isArray(payload.items)) return;
+        localState.items = payload.items;
+        localState.aliases = payload.aliases || [];
+        localState.loaded = true;
+        paintLocalRow();
+        paintLocal();
+      })
+      .catch(function () {});
+  }
+
+  function localDev() {
+    return localState.items.filter(function (e) {
+      return e.web && e.dev;
+    });
+  }
+
+  function paintLocalRow() {
+    var row = document.getElementById("rc-ws-local");
+    if (!row) return;
+    var count = row.querySelector(".rc-ws-local-count");
+    var n = localDev().length;
+    count.textContent = n ? String(n) : "";
+    count.hidden = !n;
+    row.classList.toggle(
+      "is-live",
+      localState.items.some(function (e) {
+        return e.slug;
+      })
+    );
+  }
+
+  function buildLocalRow() {
+    var b = wsButton("", "rc-ws-local", "Ver los entornos locales de esta máquina", openLocal);
+    b.id = "rc-ws-local";
+    b.innerHTML = LOCAL_ICON;
+    var text = document.createElement("span");
+    text.className = "rc-ws-local-text";
+    text.textContent = "Entornos locales";
+    var count = document.createElement("span");
+    count.className = "rc-ws-local-count";
+    count.hidden = true;
+    b.appendChild(text);
+    b.appendChild(count);
+    return b;
+  }
+
+  function closeLocal() {
+    var layer = document.getElementById("rc-local");
+    if (layer) layer.remove();
+    clearInterval(localTimer);
+    localTimer = 0;
+    document.removeEventListener("keydown", localKey, true);
+  }
+
+  function localKey(ev) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeLocal();
+    }
+  }
+
+  function openLocal() {
+    closeLocal();
+    closeDrawer();
+    var layer = document.createElement("div");
+    layer.id = "rc-local";
+    layer.setAttribute("role", "dialog");
+    layer.setAttribute("aria-modal", "true");
+    layer.setAttribute("aria-label", "Entornos locales");
+    layer.addEventListener("pointerdown", function (ev) {
+      if (ev.target === layer) closeLocal();
+    });
+    var card = document.createElement("div");
+    card.className = "rc-local";
+    var head = document.createElement("div");
+    head.className = "rc-local-head";
+    var title = document.createElement("div");
+    title.className = "rc-local-title";
+    title.innerHTML = LOCAL_ICON;
+    title.appendChild(document.createElement("span")).textContent = "Entornos locales";
+    var sub = document.createElement("div");
+    sub.className = "rc-local-sub";
+    var tools = document.createElement("div");
+    tools.className = "rc-local-tools";
+    var all = document.createElement("button");
+    all.type = "button";
+    all.className = "rc-set-toggle rc-local-all" + (localState.all ? " is-on" : "");
+    all.setAttribute("role", "switch");
+    all.setAttribute("aria-checked", localState.all ? "true" : "false");
+    all.innerHTML = '<span class="rc-set-toggle-label">Mostrar todo</span><span class="rc-set-toggle-track"><span></span></span>';
+    all.addEventListener("click", function () {
+      localState.all = !localState.all;
+      all.classList.toggle("is-on", localState.all);
+      all.setAttribute("aria-checked", localState.all ? "true" : "false");
+      paintLocal();
+    });
+    var refresh = wsButton("", "rc-local-icon", "Buscar otra vez", function () {
+      refresh.classList.add("is-spin");
+      loadLocal(true).then(function () {
+        refresh.classList.remove("is-spin");
+      });
+    });
+    refresh.innerHTML = REFRESH_ICON;
+    var close = wsButton("", "rc-local-icon", "Cerrar", closeLocal);
+    close.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    tools.appendChild(all);
+    tools.appendChild(refresh);
+    tools.appendChild(close);
+    var titles = document.createElement("div");
+    titles.appendChild(title);
+    titles.appendChild(sub);
+    head.appendChild(titles);
+    head.appendChild(tools);
+    var list = document.createElement("div");
+    list.className = "rc-local-list";
+    card.appendChild(head);
+    card.appendChild(list);
+    layer.appendChild(card);
+    (document.body || document.documentElement).appendChild(layer);
+    document.addEventListener("keydown", localKey, true);
+    paintLocal();
+    loadLocal(true);
+    localTimer = setInterval(function () {
+      if (!document.hidden) loadLocal(false);
+    }, 4000);
+  }
+
+  function setLocalShare(entry, on) {
+    localState.busy[entry.port] = true;
+    paintLocal();
+    return fetch("/rc-local", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: entry.port, on: on, addr: entry.addr, label: (entry.web && entry.web.framework && entry.name === entry.process ? entry.web.framework : entry.name) || "" }),
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        delete localState.busy[entry.port];
+        if (payload && Array.isArray(payload.items)) {
+          localState.items = payload.items;
+          localState.aliases = payload.aliases || [];
+        }
+        paintLocalRow();
+        paintLocal();
+        if (on) {
+          var now = localState.items.filter(function (e) {
+            return e.port === entry.port;
+          })[0];
+          if (now && now.share) copyLocal(now.share, true);
+        } else showToast("Ya no se publica");
+      })
+      .catch(function () {
+        delete localState.busy[entry.port];
+        paintLocal();
+        showToast("No pude cambiarlo");
+      });
+  }
+
+  function copyLocal(share, fresh) {
+    writeClipboard(shareHref(share.link)).then(
+      function () {
+        showToast(fresh ? "Publicado · link copiado" : "Link copiado");
+      },
+      function () {
+        showToast(fresh ? "Publicado en " + shareHref(share.url) : "No pude copiar");
+      }
+    );
+  }
+
+  function localRow(entry) {
+    var row = document.createElement("div");
+    row.className = "rc-local-row" + (entry.slug ? " is-on" : "") + (entry.down ? " is-down" : "");
+    var info = document.createElement("div");
+    info.className = "rc-local-info";
+    var top = document.createElement("div");
+    top.className = "rc-local-top";
+    var name = document.createElement("span");
+    name.className = "rc-local-name";
+    name.textContent = entry.name;
+    top.appendChild(name);
+    var fw = entry.web && entry.web.framework;
+    if (fw) top.appendChild(document.createElement("span")).className = "rc-local-chip is-fw";
+    if (fw) top.lastChild.textContent = fw;
+    if (entry.container) {
+      var box = top.appendChild(document.createElement("span"));
+      box.className = "rc-local-chip";
+      box.textContent = "contenedor";
+    }
+    var port = top.appendChild(document.createElement("span"));
+    port.className = "rc-local-port";
+    port.textContent = ":" + entry.port;
+    var meta = document.createElement("div");
+    meta.className = "rc-local-meta";
+    var bits = [];
+    if (entry.down) bits.push("no responde ahora");
+    if (entry.web && entry.web.title && entry.web.title !== entry.name) bits.push(entry.web.title);
+    if (entry.process && entry.process !== entry.name) bits.push(entry.process);
+    if (entry.cwd) bits.push(entry.cwd);
+    meta.textContent = bits.join(" · ");
+    var addrs = document.createElement("div");
+    addrs.className = "rc-local-addrs";
+    (entry.addrs || []).forEach(function (a) {
+      var chip = addrs.appendChild(document.createElement("span"));
+      var kind = a === "127.0.0.1" || a === "::1" ? "localhost" : a.indexOf("127.") === 0 ? "loopback" : a === "0.0.0.0" || a === "::" ? "todas" : "red";
+      chip.className = "rc-local-addr is-" + kind;
+      chip.textContent = kind === "todas" ? KIND_LABEL.todas : a.indexOf(":") >= 0 ? "[" + a + "]" : a;
+      chip.title = KIND_LABEL[kind];
+    });
+    info.appendChild(top);
+    if (bits.length) info.appendChild(meta);
+    info.appendChild(addrs);
+    var share = entry.share;
+    if (share) {
+      var line = info.appendChild(document.createElement("div"));
+      line.className = "rc-local-shared";
+      var kind = line.appendChild(document.createElement("span"));
+      kind.className = "rc-local-chip is-" + share.kind;
+      kind.textContent = SHARE_KIND[share.kind] || share.kind;
+      var link = line.appendChild(document.createElement("a"));
+      link.className = "rc-local-link";
+      link.href = shareHref(share.link);
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = shareHref(share.url).replace(/^https:\/\//, "");
+      if (share.note || !share.alive) {
+        var note = info.appendChild(document.createElement("div"));
+        note.className = "rc-local-note";
+        note.textContent = !share.alive ? "Su túnel se cayó: apaga y enciende el switch" : share.note;
+      }
+    }
+    var acts = document.createElement("div");
+    acts.className = "rc-local-acts";
+    if (share) {
+      var copy = wsButton("", "rc-local-icon", share.kind === "path" ? "Copiar el link (pide la contraseña)" : "Copiar el link (entra sin contraseña, solo a este entorno)", function () {
+        copyLocal(share, false);
+      });
+      copy.innerHTML = LINK_ICON;
+      var open = wsButton("", "rc-local-icon", "Abrir en otra pestaña", function () {
+        window.open(shareHref(share.link), "_blank", "noopener");
+      });
+      open.innerHTML = OPEN_ICON;
+      acts.appendChild(copy);
+      acts.appendChild(open);
+    }
+    var sw = document.createElement("button");
+    sw.type = "button";
+    sw.className = "rc-set-toggle rc-local-switch" + (entry.slug ? " is-on" : "");
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", entry.slug ? "true" : "false");
+    sw.setAttribute("aria-label", (entry.slug ? "Dejar de publicar " : "Publicar ") + entry.name + " en el túnel");
+    sw.title = entry.slug ? "Publicado en el túnel" : entry.web ? "Publicar en el túnel" : "No responde como web: puede no verse bien";
+    sw.disabled = !!localState.busy[entry.port];
+    if (sw.disabled) {
+      var wait = info.appendChild(document.createElement("div"));
+      wait.className = "rc-local-note is-busy";
+      wait.textContent = entry.slug ? "Despublicando…" : "Publicando… (un túnel propio tarda unos segundos)";
+    }
+    sw.innerHTML = '<span class="rc-set-toggle-track"><span></span></span>';
+    sw.addEventListener("click", function () {
+      setLocalShare(entry, !entry.slug);
+    });
+    acts.appendChild(sw);
+    row.appendChild(info);
+    row.appendChild(acts);
+    return row;
+  }
+
+  function paintLocal() {
+    var layer = document.getElementById("rc-local");
+    if (!layer) return;
+    var list = layer.querySelector(".rc-local-list");
+    var sub = layer.querySelector(".rc-local-sub");
+    var items = localState.items;
+    var dev = items.filter(function (e) {
+      return e.web && e.dev;
+    });
+    var webOther = items.filter(function (e) {
+      return e.web && !e.dev;
+    });
+    var rest = items.filter(function (e) {
+      return !e.web;
+    });
+    var shared = items.filter(function (e) {
+      return e.slug;
+    }).length;
+    sub.textContent = !localState.loaded
+      ? "Buscando…"
+      : dev.length + (dev.length === 1 ? " de desarrollo" : " de desarrollo") + " · " + webOther.length + " web más" + (shared ? " · " + shared + " publicado" + (shared === 1 ? "" : "s") : "");
+    var scroll = list.scrollTop;
+    list.textContent = "";
+    function section(label, rows) {
+      if (!rows.length) return;
+      var h = list.appendChild(document.createElement("div"));
+      h.className = "rc-local-section";
+      h.textContent = label;
+      rows.forEach(function (e) {
+        list.appendChild(localRow(e));
+      });
+    }
+    // A published one that stopped answering stays visible to switch it off.
+    var pinned = rest.filter(function (e) {
+      return e.slug;
+    });
+    section("Desarrollo", dev.concat(pinned));
+    if (localState.all) {
+      section("Otros servicios web", webOther);
+      section(
+        "Sin web",
+        rest.filter(function (e) {
+          return !e.slug;
+        })
+      );
+    } else if (webOther.length + rest.length) {
+      var more = list.appendChild(document.createElement("button"));
+      more.type = "button";
+      more.className = "rc-local-more";
+      more.textContent = "+ " + (webOther.length + rest.length) + " puertos más (sistema, bases de datos…)";
+      more.addEventListener("click", function () {
+        var t = layer.querySelector(".rc-local-all");
+        if (t) t.click();
+      });
+    }
+    if (localState.loaded && !dev.length && !pinned.length) {
+      var empty = list.insertBefore(document.createElement("div"), list.firstChild);
+      empty.className = "rc-local-empty";
+      empty.textContent = "Ningún servidor de desarrollo corriendo. Levanta uno (npm run dev, php artisan serve…) y aparece aquí.";
+    }
+    if (localState.aliases.length && localState.all) {
+      var al = list.appendChild(document.createElement("div"));
+      al.className = "rc-local-aliases";
+      al.textContent = "Nombres locales en /etc/hosts: " + localState.aliases.join(", ");
+    }
+    list.scrollTop = scroll;
+  }
+
   function bootWorkspaces(bar) {
     var menu = document.createElement("button");
     menu.id = "rc-ws-menu";
@@ -8649,6 +9017,7 @@
     drawer.appendChild(find);
     drawer.appendChild(list);
     drawer.appendChild(add);
+    drawer.appendChild(buildLocalRow());
     drawer.appendChild(buildProfileBox());
     drawer.appendChild(buildThemeSwitch());
     drawer.appendChild(buildLogout());

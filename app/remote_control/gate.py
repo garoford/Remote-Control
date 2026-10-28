@@ -274,7 +274,7 @@ LOGIN_PAGE = """<!doctype html>
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({password: input.value})
     }).then(function (res) {
-      if (res.ok) { location.replace("/"); return; }
+      if (res.ok) { location.replace(location.pathname + location.search); return; }
       fail("Contraseña incorrecta");
     }).catch(function () {
       fail("No hay conexión con el servidor");

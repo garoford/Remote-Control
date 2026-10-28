@@ -120,6 +120,7 @@ def keep_domain(front: TlsFront | None) -> None:
                     prov = domains.provider_for(cfg)
                     zone, name = domains.locate(cfg, prov)
                     prov.point(zone, name, ip)
+                    prov.point(zone, f"*.{name}" if name else "*", ip)
                 last_ip = ip
             if front is not None and time.time() - last_renew > RENEW_CHECK_S:
                 last_renew = time.time()

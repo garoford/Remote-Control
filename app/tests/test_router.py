@@ -98,6 +98,20 @@ class EdgeTests(unittest.TestCase):
                      "entryPoints: [http]", "redirectScheme", 'url: "http://10.0.1.1:17701"'):
             self.assertIn(need, text)
 
+    def test_with_the_wildcard_its_subdomains_and_our_certificate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            edge = domains.Edge("coolify-proxy", Path(tmp), "https", "http", "letsencrypt", "10.0.1.1", "/traefik/dynamic")
+            cert, key = Path(tmp) / "c.pem", Path(tmp) / "k.pem"
+            cert.write_text("CERT")
+            key.write_text("KEY")
+            with mock.patch.object(router.acme, "cert_paths", lambda host: (cert, key)):
+                router.write_route(edge, "backend", "cr.bizz.page", 17701, wild=True)
+            text = (Path(tmp) / "remote-control-backend.yaml").read_text()
+            copied = (Path(tmp) / "remote-control-certs" / "cr.bizz.page" / "c.pem").read_text()
+        self.assertIn("HostRegexp(`^[a-z0-9-]+\\.cr\\.bizz\\.page$`)", text)
+        self.assertIn("certFile: /traefik/dynamic/remote-control-certs/cr.bizz.page/fullchain.pem", text)
+        self.assertEqual(copied, "CERT")
+
     def test_the_bridge_reaches_the_containers_port(self) -> None:
         backend = _backend(b"soy el contenedor")
         bridge = router.Bridge("127.0.0.2")
@@ -110,6 +124,18 @@ class EdgeTests(unittest.TestCase):
                 out += chunk
         bridge.sync(set())
         self.assertTrue(out.endswith(b"soy el contenedor"))
+
+
+class WildcardMatchTests(unittest.TestCase):
+    def test_one_label_under_a_name_with_its_wildcard(self) -> None:
+        r = router.Router(443)
+        r.table = {"cr.bizz.page": 17701}
+        with mock.patch.object(router, "has_wildcard", lambda host: True):
+            self.assertEqual(r.match("tienda.cr.bizz.page"), "cr.bizz.page")
+            self.assertEqual(r.match("CR.bizz.page"), "cr.bizz.page")
+            self.assertEqual(r.match("a.b.cr.bizz.page"), "")
+        with mock.patch.object(router, "has_wildcard", lambda host: False):
+            self.assertEqual(r.match("tienda.cr.bizz.page"), "")
 
 
 class HttpRedirectTests(unittest.TestCase):

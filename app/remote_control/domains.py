@@ -651,6 +651,8 @@ class Edge:
     http: str  # and on 80
     resolver: str  # its Let's Encrypt certificate resolver
     gateway: str  # this machine's address on its network (how it reaches us)
+    inside: str = "/traefik/dynamic"  # that folder as the proxy sees it
+    v3: bool = True  # Traefik 3 rule syntax (HostRegexp takes a regular expression)
 
 
 def _flag(args: list[str], prefix: str) -> str:
@@ -670,9 +672,10 @@ def detect_traefik() -> Edge | None:
         out = subprocess.run([docker, "ps", "--format", "{{.Names}}\t{{.Image}}"], capture_output=True, text=True, timeout=10, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    name = next((n for line in out.splitlines() for n, _, image in [line.partition("\t")] if "traefik" in (n + image).lower() or n == "coolify-proxy"), "")
-    if not name:
+    found = next(((n, image) for line in out.splitlines() for n, _, image in [line.partition("\t")] if "traefik" in (n + image).lower() or n == "coolify-proxy"), None)
+    if not found:
         return None
+    name, image = found
     try:
         info = json.loads(subprocess.run([docker, "inspect", name], capture_output=True, text=True, timeout=10, check=False).stdout)[0]
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
@@ -694,7 +697,8 @@ def detect_traefik() -> Edge | None:
     gateway = next((str(n.get("Gateway")) for n in networks.values() if n.get("Gateway")), "")
     if not (dynamic_dir and dynamic_dir.is_dir() and "443" in entry and "80" in entry and resolver and gateway):
         return None
-    return Edge(name, dynamic_dir, entry["443"], entry["80"], resolver, gateway)
+    tag = image.rpartition(":")[2] if ":" in image.rpartition("/")[2] else ""
+    return Edge(name, dynamic_dir, entry["443"], entry["80"], resolver, gateway, inside, not re.match(r"v?[12]\.", tag))
 
 
 def port_holder(port: int) -> str:
@@ -841,6 +845,8 @@ def serve_direct(cfg: DomainConfig, public: str | None, log=lambda _msg: None) -
     zone, name = locate(cfg, prov)
     log(f"{cfg.host} → {public}")
     prov.point(zone, name, public)
+    # *.host too: each local environment gets its own name (devlocal.py).
+    prov.point(zone, f"*.{name}" if name else "*", public)
     directory = acme.STAGING if os.environ.get("RC_ACME_STAGING") else acme.DIRECTORY
     return acme.ensure_cert(
         cfg.host,
@@ -850,6 +856,7 @@ def serve_direct(cfg: DomainConfig, public: str | None, log=lambda _msg: None) -
         email=cfg.email,
         directory=directory,
         log=log,
+        wildcard=True,
     )
 
 
