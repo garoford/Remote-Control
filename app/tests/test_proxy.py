@@ -102,12 +102,12 @@ class ProxyAssetTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _wait_port(self, port: int) -> None:
-        for _ in range(40):
+        for _ in range(100):
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                     return
             except OSError:
-                pass
+                time.sleep(0.05)
         self.fail(f"port {port} did not open")
 
     def _get(self, path: str, headers: dict[str, str] | None = None):

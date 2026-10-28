@@ -37,11 +37,11 @@ step "Herramientas del sistema…"
 # install it downloads the distro's indexes first (~100 MB on Fedora).
 if have dnf; then
   # ffmpeg (-free on Fedora) is required: animated backgrounds (backgrounds.py).
-  PKGS=(zsh git curl unzip tar which fzf bat ripgrep jq htop nano vim-enhanced less)
+  PKGS=(zsh git curl unzip tar which fzf bat ripgrep jq htop nano vim-enhanced less 7zip zstd)
   have ffmpeg || PKGS+=(ffmpeg-free)
   rpm -q "${PKGS[@]}" >/dev/null 2>&1 || try "paquetes" sudo dnf -y -q install "${PKGS[@]}"
 elif have apt-get; then
-  PKGS=(zsh git curl unzip tar fzf bat ripgrep jq htop nano vim less ffmpeg)
+  PKGS=(zsh git curl unzip tar fzf bat ripgrep jq htop nano vim less ffmpeg 7zip zstd)
   if ! dpkg -s "${PKGS[@]}" >/dev/null 2>&1; then
     try "apt update" sudo apt-get update -q
     try "paquetes" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${PKGS[@]}"

@@ -34,6 +34,7 @@
     clear: stroke("M9 6h11v12H9l-5-6 5-6zM12 10l4 4M16 10l-4 4"),
     upload: stroke("M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"),
     download: stroke("M12 4v12M7 11l5 5 5-5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"),
+    extract: stroke("M4 8l2-4h12l2 4M4 8h16v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM12 11v6M9 14l3 3 3-3"),
     terminal: stroke("M4 5h16v14H4zM7 9l3 3-3 3M12 15h5"),
     insert: stroke("M4 12h11M11 8l4 4-4 4M19 5v14"),
     copy: stroke("M9 9h10v10H9zM5 15V5h10"),
@@ -1237,6 +1238,7 @@
     }
     bar.appendChild(pill(I.download, "Descargar", downloadSel, "is-accent"));
     if (count === 1 && items[0].kind !== "dir") bar.appendChild(pill(I.eye, "Ver", function () { preview(items[0]); }));
+    if (items.every(isArchive)) bar.appendChild(pill(I.extract, "Extraer", extractSel));
     bar.appendChild(pill(I.insert, "Insertar ruta", insertSel));
     bar.appendChild(pill(I.trash, "Papelera", trashSel));
     bar.appendChild(
@@ -1590,6 +1592,7 @@
       { icon: I.insert, label: "Insertar ruta en la terminal", fn: insertSel },
       "-",
       { icon: I.download, label: items.length > 1 || dir ? "Descargar como .zip" : "Descargar", fn: downloadSel },
+      items.every(isArchive) ? { icon: I.extract, label: "Extraer aquí", fn: extractSel } : null,
       "-",
       { icon: I.cut, label: "Cortar", fn: function () { setClip("cut"); }, key: "Ctrl+X" },
       { icon: I.copy, label: "Copiar", fn: function () { setClip("copy"); }, key: "Ctrl+C" },
@@ -1702,7 +1705,7 @@
     var err = el("div", "rcf-dialog-err");
     if (opts.input != null) {
       input = el("input", "rcf-dialog-input");
-      input.type = "text";
+      input.type = opts.password ? "password" : "text";
       input.value = opts.input;
       input.spellcheck = false;
       input.setAttribute("autocapitalize", "off");
@@ -2661,6 +2664,89 @@
           saveUrl("/rc-fs/zip?token=" + encodeURIComponent(r.token), s.name);
         });
       })();
+    });
+  }
+
+  // --- extracting archives (unpack.py), one after another, each with its card -------------------------
+
+  var ARCHIVE_RE = /\.(zip|jar|apk|xpi|epub|cbz|cbr|cb7|rar|7z|iso|cab|arj|lzh|lha|cpio|wim|dmg|vhdx?|msi|chm|tar|tgz|tbz2?|txz|tzst|tlz|gz|bz2|xz|lzma|zst)$|\.(zip|7z|rar)\.0*1$/i;
+
+  function isArchive(it) {
+    return !!it && it.kind !== "dir" && ARCHIVE_RE.test(it.name || "");
+  }
+
+  function extractSel() {
+    var queue = selItems(tab()).filter(isArchive);
+    (function next() {
+      var it = queue.shift();
+      if (it) extractOne(it, "").then(next);
+    })();
+  }
+
+  function extractOne(it, password) {
+    var folder = parentOf(it.path);
+    var job = opCard(I.extract, "Extrayendo «" + it.name + "»…");
+    job.progress(-1);
+    return new Promise(function (resolve) {
+      api("extract", null, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: it.path, password: password }),
+      }).then(function (r) {
+        if (!r.ok) {
+          job.fail(r.error || "No pude extraerlo");
+          resolve();
+          return;
+        }
+        (function check() {
+          api("extract-status", { token: r.token }).then(function (s) {
+            if (!s.ok || s.state === "error" || s.state === "cancelled") {
+              job.fail(s.error || "No pude extraerlo");
+              resolve();
+            } else if (s.state === "working") {
+              job.progress(s.progress > 0 ? s.progress : -1);
+              job.text("Extrayendo «" + it.name + "»… " + (s.progress > 0 ? Math.round(s.progress * 100) + "%" : s.files ? s.files + " archivos" : ""));
+              setTimeout(check, 400);
+            } else if (s.state === "password") {
+              job.fail(s.error);
+              askArchivePassword(it, !!password).then(function (pw) {
+                if (pw) extractOne(it, pw).then(resolve);
+                else resolve();
+              });
+            } else {
+              var name = baseName(s.path);
+              job.done("Extraído en «" + name + "»" + (s.skipped ? " (" + s.skipped + " omitidos por inseguros)" : ""));
+              var t = tab();
+              if (t.path === folder) {
+                t.focusName = name;
+                load(t);
+              }
+              resolve();
+            }
+          });
+        })();
+      });
+    });
+  }
+
+  function askArchivePassword(it, retry) {
+    return new Promise(function (resolve) {
+      var answered = false;
+      var layer = dialog(retry ? "Contraseña incorrecta" : "«" + it.name + "» tiene contraseña", {
+        text: retry ? "Prueba otra vez." : "Escríbela para extraerlo.",
+        input: "",
+        password: true,
+        ok: "Extraer",
+        onOk: function (pw) {
+          answered = true;
+          resolve(pw);
+        },
+      });
+      var close = layer.__rcClose;
+      layer.__rcClose = function () {
+        close();
+        if (!answered) resolve("");
+      };
     });
   }
 

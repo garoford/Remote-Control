@@ -35,6 +35,7 @@ from remote_control.history import (
     scrollback_state,
 )
 from remote_control import files as fs
+from remote_control import unpack
 from remote_control import agent_context, devlocal, profiles
 from remote_control.agents import write_rc_command
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
@@ -1172,6 +1173,15 @@ class Sidecar:
                 req = req if isinstance(req, dict) else {}
                 paths = req.get("paths") if isinstance(req.get("paths"), list) else []
                 self._json(conn, fs.start_zip(paths, str(req.get("label") or "")))
+            elif method == "POST" and route in ("extract", "extract-cancel"):
+                req = json.loads(body.decode("utf-8") or "{}")
+                req = req if isinstance(req, dict) else {}
+                if route == "extract":
+                    self._json(conn, unpack.start(str(req.get("path") or ""), str(req.get("password") or "")))
+                else:
+                    self._json(conn, unpack.cancel(str(req.get("token") or "")))
+            elif method == "GET" and route == "extract-status":
+                self._json(conn, unpack.status(arg("token")))
             elif method == "GET" and route == "zip-status":
                 self._json(conn, fs.zip_status(arg("token")))
             elif method == "GET" and route == "zip":

@@ -180,20 +180,21 @@ fi
 # the window GTK 4 + libadwaita. The rest adds features: fontTools/brotli
 # (phone font), Pillow (image previews), zsh (per-profile AI CLIs), wl-copy
 # (clipboard), dig (DNS check), ImageMagick (launcher icons).
+# 7zip opens rar, 7z and the rest in the file explorer (unpack.py).
 # ffmpeg is required: animated backgrounds are converted to light, seekable
 # files with it, and their previews come from it (backgrounds.py).
 PKGS_dnf=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg-free
   python3-gobject gtk4 libadwaita python3-fonttools python3-brotli python3-pillow
-  wl-clipboard bind-utils ImageMagick)
+  wl-clipboard bind-utils ImageMagick 7zip zstd)
 PKGS_apt=(git python3 python3-pip rsync curl ca-certificates gnupg desktop-file-utils tmux ttyd zsh ffmpeg
   python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-fonttools python3-brotli python3-pil
-  wl-clipboard dnsutils imagemagick)
+  wl-clipboard dnsutils imagemagick 7zip zstd)
 PKGS_pacman=(git python python-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg
   python-gobject gtk4 libadwaita python-fonttools python-brotli python-pillow
-  wl-clipboard bind imagemagick cloudflared)
+  wl-clipboard bind imagemagick cloudflared 7zip zstd)
 PKGS_zypper=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh ffmpeg
   python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 python3-fonttools python3-Brotli python3-Pillow
-  wl-clipboard bind-utils ImageMagick)
+  wl-clipboard bind-utils ImageMagick 7zip zstd)
 
 # A server without a desktop (no display, not booting to graphical.target)
 # has no use for the GTK window: only `remote-control cli`. Its toolkit and
