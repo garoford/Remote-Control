@@ -273,6 +273,11 @@ def reload(_argv: list[str]) -> int:
     service._prepare_rc_assets()
     service._prepare_ttyd_index()
     service._prepare_tab_session()
+    # The running tmux takes new terminal features without a restart; its
+    # clients get them when they attach again (a page reload).
+    shown = subprocess.run(["tmux", "-L", "cf-remote", "show", "-s", "terminal-features"], capture_output=True, text=True, check=False)
+    if shown.returncode == 0 and ":sync" not in shown.stdout:
+        subprocess.run(["tmux", "-L", "cf-remote", "set", "-as", "terminal-features", ",xterm*:sync"], capture_output=True, check=False)
     pid = service._alive_pid(service.proxy_pid_file)
     if not pid:
         print("Página al día")

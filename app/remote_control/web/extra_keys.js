@@ -701,6 +701,52 @@
     if (nativeTitle.get.call(document) !== text) nativeTitle.set.call(document, text);
   }
 
+  // --- Synchronized output (DEC mode 2026) ----------------------------------
+  // tmux marks where a redraw starts (CSI ? 2026 h) and ends (… l). A redraw
+  // reaches the browser in several messages; painted as they come, half-drawn
+  // frames flicker (TUIs that repaint often: cursor-agent, claude, htop…).
+  // Messages from a start to its end are held and handed over together; a
+  // frame never closed is let go after 100 ms. xterm.js ignores the marks.
+  function syncMark(bytes) {
+    // The last mark in the message: 1 a frame starts, 0 it ends, -1 none.
+    for (var i = bytes.length - 8; i >= 0; i--) {
+      if (bytes[i] === 27 && bytes[i + 1] === 91 && bytes[i + 2] === 63 && bytes[i + 3] === 50 && bytes[i + 4] === 48 && bytes[i + 5] === 50 && bytes[i + 6] === 54) {
+        if (bytes[i + 7] === 104) return 1;
+        if (bytes[i + 7] === 108) return 0;
+      }
+    }
+    return -1;
+  }
+
+  function asBytes(data) {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return null;
+  }
+
+  function frameGate(deliver) {
+    var held = [];
+    var timer = 0;
+    function release() {
+      clearTimeout(timer);
+      timer = 0;
+      var out = held;
+      held = [];
+      out.forEach(deliver);
+    }
+    return function (item, data) {
+      var bytes = asBytes(data);
+      var mark = bytes ? syncMark(bytes) : -1;
+      if (!held.length && mark !== 1) {
+        deliver(item);
+        return;
+      }
+      held.push(item);
+      if (mark === 0) release();
+      else if (!timer) timer = setTimeout(release, 100);
+    };
+  }
+
   function writePane(pane, data) {
     var bytes = null;
     if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
@@ -870,9 +916,12 @@
         }, 350);
       });
     });
+    var gate = frameGate(function (data) {
+      if (pane.ws === ws) writePane(pane, data);
+    });
     ws.addEventListener("message", function (ev) {
       if (pane.ws !== ws) return;
-      writePane(pane, ev && ev.data);
+      gate(ev && ev.data, ev && ev.data);
     });
     ws.addEventListener("close", function () {
       if (pane.intentional || pane.ws !== ws) return;
@@ -1373,12 +1422,13 @@
         closeFns = [];
         ws.__rcIntentional = true;
       };
+      var gate = frameGate(dispatch);
       origAdd("message", function (ev) {
         if (!live) {
           queue.push(ev);
           return;
         }
-        dispatch(ev);
+        gate(ev, ev && ev.data);
       });
       origAdd("open", function () {
         setTimeout(flush, 0);
