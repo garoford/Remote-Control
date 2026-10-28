@@ -4,4 +4,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# A system unit (root without a user session) has no HOME of its own.
+Environment=HOME=%h
 ExecStart=%h/.local/share/remote-control/update.sh

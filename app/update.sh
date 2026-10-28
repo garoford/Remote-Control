@@ -32,6 +32,15 @@ if [[ ! -d "$SRC/.git" ]]; then
   exit 0
 fi
 
+# Installs made from a checkout cloned over SSH: a public repo fetches over
+# HTTPS with no GitHub key on this machine.
+ORIGIN="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
+if [[ "$ORIGIN" =~ ^(ssh://)?git@github\.com[:/](.+)$ ]]; then
+  HTTPS="https://github.com/${BASH_REMATCH[2]}"
+  [[ "$HTTPS" == *.git ]] || HTTPS+=".git"
+  git -C "$SRC" remote set-url origin "$HTTPS"
+  log "origin: $ORIGIN -> $HTTPS"
+fi
 if ! git -C "$SRC" fetch --quiet origin main 2>>"$LOG"; then
   log "fetch failed"
   trim_log

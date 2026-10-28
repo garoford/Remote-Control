@@ -477,6 +477,16 @@ summary() {
   fi
 }
 
+# git@github.com:owner/repo(.git) → https://github.com/owner/repo.git
+https_url() {
+  local url="$1"
+  if [[ "$url" =~ ^(ssh://)?git@github\.com[:/](.+)$ ]]; then
+    url="https://github.com/${BASH_REMATCH[2]}"
+    [[ "$url" == *.git ]] || url+=".git"
+  fi
+  printf '%s' "$url"
+}
+
 checkout_src() {
   local here="" self="${BASH_SOURCE[0]:-}"
   if [[ -n "$self" && -f "$self" && "$self" != /dev/fd/* ]]; then
@@ -491,7 +501,9 @@ checkout_src() {
       mkdir -p "$SHARE"
       git clone --branch main --single-branch "$here" "$SRC"
     fi
-    git -C "$SRC" remote set-url origin "$(git -C "$here" remote get-url origin)"
+    # Updates fetch over HTTPS: the repo is public, and a server has no GitHub
+    # SSH key (git@github.com:… would fail there forever).
+    git -C "$SRC" remote set-url origin "$(https_url "$(git -C "$here" remote get-url origin)")"
     git -C "$SRC" fetch --quiet origin main 2>/dev/null || true
     # Prefer the working tree we launched from.
     printf '%s' "$here" >"$STATE/tree"
@@ -598,6 +610,13 @@ u_services() {
   fi
   rm -f "$units"/remote-control-update.service "$units"/remote-control-update.timer "$units"/remote-control-router.service
   need_cmd systemctl && systemctl --user daemon-reload 2>/dev/null || true
+  # root without a user session got them as system units (app/install.sh, router.py).
+  if ((EUID == 0)) && [[ -f /etc/systemd/system/remote-control-update.timer || -f /etc/systemd/system/remote-control-router.service ]]; then
+    systemctl disable --now remote-control-update.timer remote-control-update.service remote-control-router.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/remote-control-update.service /etc/systemd/system/remote-control-update.timer \
+      /etc/systemd/system/remote-control-router.service
+    systemctl daemon-reload 2>/dev/null || true
+  fi
   rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/dev.garoford.RemoteControl-autostart.desktop"
   # The VPS port setting (web_ports) goes back to the system default.
   if [[ -f "$SYSCTL_PORTS" ]]; then

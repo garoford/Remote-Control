@@ -86,6 +86,14 @@ _install_updater() {
     && systemctl --user daemon-reload 2>/dev/null \
     && systemctl --user enable --now remote-control-update.timer >/dev/null 2>&1; then
     :
+  elif ((EUID == 0)) && command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    # root on a server without a user session (no logind/dbus, as on DietPi):
+    # the same timer, as a system one (%h is /root there).
+    install -m 644 "$ROOT/systemd/remote-control-update.service" /etc/systemd/system/remote-control-update.service
+    install -m 644 "$ROOT/systemd/remote-control-update.timer" /etc/systemd/system/remote-control-update.timer
+    systemctl daemon-reload \
+      && systemctl enable --now remote-control-update.timer >/dev/null 2>&1 \
+      || printf '%s\n' "Aviso: no se activó el timer del sistema."
   else
     printf '%s\n' "Aviso: no se activó el timer (sin sesión systemd de usuario)."
   fi

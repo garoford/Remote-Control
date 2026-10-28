@@ -358,8 +358,25 @@ def _tell_container(box: str, url: str | None) -> None:
 # --- the systemd user service ----------------------------------------------------------------
 
 
+def system_scope() -> bool:
+    """root on a server with no user session (no logind/dbus, as on DietPi): the
+    router is a system service there; elsewhere a user one."""
+    systemctl = shutil.which("systemctl")
+    if os.geteuid() != 0 or not systemctl:
+        return False
+    user = subprocess.run([systemctl, "--user", "show-environment"], capture_output=True, check=False)
+    return user.returncode != 0 and Path("/run/systemd/system").is_dir()
+
+
 def unit_path() -> Path:
+    if system_scope():
+        return Path("/etc/systemd/system") / UNIT
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user" / UNIT
+
+
+def _systemctl(*args: str, text: bool = False) -> subprocess.CompletedProcess:
+    scope = [] if system_scope() else ["--user"]
+    return subprocess.run([shutil.which("systemctl") or "systemctl", *scope, *args], capture_output=True, text=text, check=False)
 
 
 def ensure_service() -> None:
@@ -367,7 +384,8 @@ def ensure_service() -> None:
     systemctl = shutil.which("systemctl")
     if not systemctl:
         return
-    run = lambda *args: subprocess.run([systemctl, "--user", *args], capture_output=True, check=False)  # noqa: E731
+    run = _systemctl
+    system = system_scope()
     if not load_routes():
         run("disable", "--now", UNIT)
         return
@@ -382,10 +400,11 @@ def ensure_service() -> None:
         "[Service]\n"
         f"ExecStart={exec_start}\n"
         f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\n"
-        "Restart=on-failure\n"
+        + (f"Environment=HOME={Path.home()}\n" if system else "")
+        + "Restart=on-failure\n"
         "RestartSec=10\n\n"
         "[Install]\n"
-        "WantedBy=default.target\n",
+        + ("WantedBy=multi-user.target\n" if system else "WantedBy=default.target\n"),
         encoding="utf-8",
     )
     run("daemon-reload")
@@ -397,8 +416,7 @@ def service_active() -> bool:
     systemctl = shutil.which("systemctl")
     if not systemctl:
         return False
-    res = subprocess.run([systemctl, "--user", "is-active", UNIT], capture_output=True, text=True, check=False)
-    return res.stdout.strip() == "active"
+    return _systemctl("is-active", UNIT, text=True).stdout.strip() == "active"
 
 
 # --- the router itself -----------------------------------------------------------------------
