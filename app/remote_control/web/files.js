@@ -1028,7 +1028,9 @@
             return x.path;
           });
         if (dragDirs.length) root.classList.add("is-dragging-dirs");
-        ev.dataTransfer.effectAllowed = "copyMove";
+        // "all": "link" is pinning (onto the sidebar); a drop whose effect
+        // is not allowed here is cancelled without a word.
+        ev.dataTransfer.effectAllowed = "all";
         ev.dataTransfer.setData("text/plain", paths.join("\n"));
         ev.dataTransfer.setData("application/x-rc-files", JSON.stringify(paths));
       });
