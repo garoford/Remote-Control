@@ -114,6 +114,24 @@ class PickTests(unittest.TestCase):
             self.assertEqual(item["kind"], "path")
             self.assertIn("/p/web/", item["note"])
 
+    def test_on_a_subdomain_a_cloudflare_tunnel_as_well(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            devlocal.set_subdomain_base("rc.a.com", home)
+            with mock.patch.object(devlocal, "start_tunnel", lambda slug, port, home=None: ("https://x-y.trycloudflare.com/", 4321)):
+                # Not published yet: it is, on its subdomain, and gets the tunnel too.
+                self.assertEqual(devlocal.share_tunnel(3000, True, "tienda", home=home, proxy_port=7681), "")
+            item = devlocal.load_shares(home)["tienda"]
+            self.assertEqual((item["kind"], item["host"], item["cf_host"]), ("sub", "tienda.rc.a.com", "x-y.trycloudflare.com"))
+            killed = []
+            with mock.patch.object(devlocal, "_stop_tunnel", killed.append):
+                self.assertEqual(devlocal.share_tunnel(3000, False, home=home), "")
+            self.assertEqual(killed, [{"cf_pid": 4321}])
+            item = devlocal.load_shares(home)["tienda"]
+            self.assertEqual((item["kind"], item["cf_host"]), ("sub", ""))
+            with mock.patch.object(devlocal, "start_tunnel", mock.Mock(side_effect=OSError("sin cloudflared"))):
+                self.assertIn("sin cloudflared", devlocal.share_tunnel(3000, True, home=home, proxy_port=7681))
+
 
 class HostedTests(unittest.TestCase):
     """An environment on its own name: its key or the password, and only it."""

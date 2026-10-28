@@ -3893,6 +3893,27 @@ html.rc-is-empty #rc-net-badge {
   padding: 0 4px;
 }
 
+.rc-local-switchbox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  color: var(--rc-muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.rc-local-icon.is-mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+}
+
+.rc-local-icon.is-mini svg {
+  width: 13px;
+  height: 13px;
+}
+
 .rc-local-switch:disabled {
   opacity: 0.5;
   cursor: progress;

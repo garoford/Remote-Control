@@ -8792,6 +8792,7 @@
         if (!payload || !Array.isArray(payload.items)) return;
         localState.items = payload.items;
         localState.aliases = payload.aliases || [];
+        localState.subdomains = !!payload.subdomains;
         localState.loaded = true;
         paintLocalRow();
         paintLocal();
@@ -8918,6 +8919,45 @@
     }, 4000);
   }
 
+  function localLabel(entry) {
+    return (entry.web && entry.web.framework && entry.name === entry.process ? entry.web.framework : entry.name) || "";
+  }
+
+  // The extra Cloudflare quick tunnel of one on a subdomain, just in case.
+  function setLocalTunnel(entry, on) {
+    localState.busy[entry.port] = "cf";
+    paintLocal();
+    fetch("/rc-local", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "tunnel", port: entry.port, on: on, addr: entry.addr, label: localLabel(entry) }),
+    })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .catch(function () {
+        return null;
+      })
+      .then(function (payload) {
+        delete localState.busy[entry.port];
+        if (payload && Array.isArray(payload.items)) {
+          localState.items = payload.items;
+          localState.aliases = payload.aliases || [];
+        }
+        paintLocalRow();
+        paintLocal();
+        var now = localState.items.filter(function (e) {
+          return e.port === entry.port;
+        })[0];
+        var cf = now && now.share && now.share.cf;
+        if (!payload) showToast("No pude cambiarlo");
+        else if (payload.error) showToast(payload.error);
+        else if (on && cf) copyLocal({ link: cf.link, url: cf.url }, true);
+        else if (!on) showToast("Túnel de Cloudflare cerrado");
+      });
+  }
+
   function setLocalShare(entry, on) {
     localState.busy[entry.port] = true;
     paintLocal();
@@ -8925,7 +8965,7 @@
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ port: entry.port, on: on, addr: entry.addr, label: (entry.web && entry.web.framework && entry.name === entry.process ? entry.web.framework : entry.name) || "" }),
+      body: JSON.stringify({ port: entry.port, on: on, addr: entry.addr, label: localLabel(entry) }),
     })
       .then(function (resp) {
         return resp.ok ? resp.json() : null;
@@ -9013,6 +9053,14 @@
     );
   }
 
+  function localSwitchBox(sw, text) {
+    var box = document.createElement("label");
+    box.className = "rc-local-switchbox";
+    box.appendChild(sw);
+    box.appendChild(document.createElement("span")).textContent = text;
+    return box;
+  }
+
   function localRow(entry) {
     var row = document.createElement("div");
     row.className = "rc-local-row" + (entry.slug ? " is-on" : "") + (entry.down ? " is-down" : "");
@@ -9074,6 +9122,30 @@
         note.textContent = !share.alive ? "Su túnel se cayó: apaga y enciende el switch" : share.note;
       }
     }
+    var cf = share && share.cf;
+    if (cf) {
+      var cfLine = info.appendChild(document.createElement("div"));
+      cfLine.className = "rc-local-shared";
+      var cfKind = cfLine.appendChild(document.createElement("span"));
+      cfKind.className = "rc-local-chip is-tunnel";
+      cfKind.textContent = "cloudflare";
+      var cfLink = cfLine.appendChild(document.createElement("a"));
+      cfLink.className = "rc-local-link";
+      cfLink.href = cf.link;
+      cfLink.target = "_blank";
+      cfLink.rel = "noopener";
+      cfLink.textContent = cf.url.replace(/^https:\/\//, "");
+      var cfCopy = wsButton("", "rc-local-icon is-mini", "Copiar el link de Cloudflare (entra sin contraseña, solo a este entorno)", function () {
+        copyLocal(cf, false);
+      });
+      cfCopy.innerHTML = LINK_ICON;
+      cfLine.appendChild(cfCopy);
+      if (!cf.alive) {
+        var cfNote = info.appendChild(document.createElement("div"));
+        cfNote.className = "rc-local-note";
+        cfNote.textContent = "El túnel de Cloudflare se cayó: apaga y enciende su switch";
+      }
+    }
     var acts = document.createElement("div");
     acts.className = "rc-local-acts";
     if (share) {
@@ -9105,13 +9177,31 @@
     if (sw.disabled) {
       var wait = info.appendChild(document.createElement("div"));
       wait.className = "rc-local-note is-busy";
-      wait.textContent = localState.busy[entry.port] === "stop" ? "Deteniendo…" : entry.slug ? "Despublicando…" : "Publicando… (un túnel propio tarda unos segundos)";
+      var busy = localState.busy[entry.port];
+      wait.textContent =
+        busy === "stop" ? "Deteniendo…" : busy === "cf" ? (cf ? "Cerrando el túnel de Cloudflare…" : "Abriendo un túnel de Cloudflare… (tarda unos segundos)") : entry.slug ? "Despublicando…" : "Publicando… (un túnel propio tarda unos segundos)";
     }
     sw.innerHTML = '<span class="rc-set-toggle-track"><span></span></span>';
     sw.addEventListener("click", function () {
       setLocalShare(entry, !entry.slug);
     });
-    acts.appendChild(sw);
+    // With subdomains (a VPS) a second switch: a Cloudflare tunnel as well.
+    if (localState.subdomains && (!share || share.kind === "sub")) {
+      var cfSw = document.createElement("button");
+      cfSw.type = "button";
+      cfSw.className = "rc-set-toggle rc-local-switch" + (cf ? " is-on" : "");
+      cfSw.setAttribute("role", "switch");
+      cfSw.setAttribute("aria-checked", cf ? "true" : "false");
+      cfSw.setAttribute("aria-label", (cf ? "Cerrar el túnel de Cloudflare de " : "Abrir también un túnel de Cloudflare para ") + entry.name);
+      cfSw.title = cf ? "Cerrar el túnel de Cloudflare" : "También por un túnel de Cloudflare (por si el subdominio falla)";
+      cfSw.disabled = sw.disabled;
+      cfSw.innerHTML = '<span class="rc-set-toggle-track"><span></span></span>';
+      cfSw.addEventListener("click", function () {
+        setLocalTunnel(entry, !cf);
+      });
+      acts.appendChild(localSwitchBox(sw, "Subdominio"));
+      acts.appendChild(localSwitchBox(cfSw, "Cloudflare"));
+    } else acts.appendChild(sw);
     row.appendChild(info);
     row.appendChild(acts);
     return row;

@@ -1330,6 +1330,12 @@ class Sidecar:
                 error = devlocal.stop(port, self._own_ports())
                 self._json(conn, {**devlocal.payload(self._own_ports(), fresh=True), "ok": not error, "error": error})
                 return
+            if req.get("op") == "tunnel":
+                error = devlocal.share_tunnel(
+                    port, bool(req.get("on")), str(req.get("label") or "")[:60], str(req.get("addr") or "127.0.0.1"), proxy_port=self.listen_port
+                )
+                self._json(conn, {**devlocal.payload(self._own_ports()), "ok": not error, "error": error})
+                return
             devlocal.share(
                 port, bool(req.get("on")), str(req.get("label") or "")[:60], str(req.get("addr") or "127.0.0.1"), proxy_port=self.listen_port
             )

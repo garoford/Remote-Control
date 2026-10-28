@@ -16,6 +16,9 @@ of its own (not Remote Control's), the way it does on localhost. Picked here:
 - "path": /p/<slug>/ on this tunnel, the fallback (cloudflared missing or not
   answering); see the routing notes further down.
 
+A "sub" one can also get a quick tunnel next to its subdomain (cf_*), just in
+case: another way in to the same environment, with the same key.
+
 Each has a key: its link carries it (?rc-key=…) and opens it without the
 password, for that environment only.
 """
@@ -89,7 +92,7 @@ def set_subdomain_base(base: str | None, home: Path | None = None) -> None:
 
 _shares_cache: tuple[float, dict] = (-1.0, {})
 _lock = threading.Lock()
-FIELDS = {"addr": "127.0.0.1", "label": "", "kind": "path", "host": "", "url": "", "key": "", "pid": 0, "note": ""}
+FIELDS = {"addr": "127.0.0.1", "label": "", "kind": "path", "host": "", "url": "", "key": "", "pid": 0, "note": "", "cf_host": "", "cf_url": "", "cf_pid": 0}
 
 
 def load_shares(home: Path | None = None) -> dict[str, dict]:
@@ -127,12 +130,12 @@ def save_shares(shares: dict[str, dict], home: Path | None = None) -> None:
 
 
 def _stop_tunnel(share_: dict) -> None:
-    pid = share_.get("pid") or 0
-    if pid and "cloudflared" in _cmdline(pid):
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    for pid in (share_.get("pid") or 0, share_.get("cf_pid") or 0):
+        if pid and "cloudflared" in _cmdline(pid):
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except OSError:
+                pass
 
 
 def clear_shares(home: Path | None = None) -> None:
@@ -212,13 +215,40 @@ def share(
         return shares
 
 
+def share_tunnel(port: int, on: bool, label: str = "", addr: str = "127.0.0.1", home: Path | None = None, proxy_port: int = 0) -> str:
+    """The extra quick tunnel of a "sub" one, on or off; "" when done, else why
+    not. Switched on before it is published, it is published first."""
+    if on and not any(v["port"] == port for v in load_shares(home).values()):
+        share(port, True, label, addr, home, proxy_port)
+    with _lock:
+        shares = load_shares(home)
+        slug = next((s for s, v in shares.items() if v["port"] == port), "")
+        if not slug:
+            return ""
+        item = dict(shares[slug])
+        if on and item["kind"] != "sub":
+            return "Ya va por un túnel propio" if item["kind"] == "tunnel" else ""
+        _stop_tunnel({"cf_pid": item["cf_pid"]})
+        item.update(cf_host="", cf_url="", cf_pid=0)
+        error = ""
+        if on:
+            try:
+                url, pid = start_tunnel(slug, proxy_port, home)
+                item.update(cf_host=url.split("//", 1)[1].rstrip("/"), cf_url=url, cf_pid=pid)
+            except OSError as exc:
+                error = f"Sin túnel de Cloudflare: {exc}"
+        shares[slug] = item
+        save_shares(shares, home)
+        return error
+
+
 def share_for_host(host: str) -> tuple[str, dict] | None:
     """The published environment that owns this host name (subdomain or its own tunnel)."""
     host = host.lower()
     if not host:
         return None
     for slug, item in load_shares().items():
-        if item["host"] and item["host"] == host:
+        if host in (item["host"], item["cf_host"]) and host:
             return slug, item
     return None
 
@@ -570,7 +600,10 @@ def payload(own_ports: set[int] | None = None, fresh: bool = False) -> dict:
             return None
         item = shares[slug]
         alive = item["kind"] != "tunnel" or "cloudflared" in _cmdline(item["pid"])
-        return {"kind": item["kind"], "url": item["url"] or f"/p/{slug}/", "link": link(slug, item), "note": item["note"], "alive": alive}
+        cf = None
+        if item["cf_url"]:
+            cf = {"url": item["cf_url"], "link": f"{item['cf_url']}?{KEY_PARAM}={item['key']}", "alive": "cloudflared" in _cmdline(item["cf_pid"])}
+        return {"kind": item["kind"], "url": item["url"] or f"/p/{slug}/", "link": link(slug, item), "note": item["note"], "alive": alive, "cf": cf}
 
     items = []
     for entry in scan(own_ports, use_cache=not fresh):
@@ -582,7 +615,7 @@ def payload(own_ports: set[int] | None = None, fresh: bool = False) -> dict:
         if v["port"] not in listed:
             items.append({"port": v["port"], "addrs": [v["addr"]], "addr": v["addr"], "kinds": [addr_kind(v["addr"])], "process": "", "pid": 0,
                           "web": None, "cwd": "", "container": "", "name": v["label"] or f"puerto {v['port']}", "slug": slug, "share": shown(slug), "down": True, "dev": True})
-    return {"items": items, "aliases": host_aliases()}
+    return {"items": items, "aliases": host_aliases(), "subdomains": bool(subdomain_base())}
 
 
 # --- serving a published one (proxy.py) -----------------------------------------------
