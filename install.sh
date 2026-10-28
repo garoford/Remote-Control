@@ -199,7 +199,8 @@ PKGS_zypper=(git python3 python3-pip rsync curl desktop-file-utils tmux ttyd zsh
 HEADLESS=0
 if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! systemctl get-default 2>/dev/null | grep -q graphical; then
   HEADLESS=1
-  GUI_PKGS=" python3-gobject gtk4 libadwaita python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 wl-clipboard "
+  # ImageMagick only draws the launcher's icons.
+  GUI_PKGS=" python3-gobject gtk4 libadwaita python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 wl-clipboard imagemagick ImageMagick "
   without_gui() {
     local p
     for p in "$@"; do
@@ -230,7 +231,7 @@ import brotli, fontTools, PIL
 
 deps_ok() {
   local c
-  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh dig convert; do
+  for c in git python3 rsync curl desktop-file-install tmux ttyd zsh dig; do
     need_cmd "$c" || return 1
   done
   if ((HEADLESS)); then
@@ -258,14 +259,21 @@ install_pkgs() {
       ;;
     apt-get)
       as_root apt-get update -q || true
+      # One apt run (one download, one dpkg pass) with what this release has,
+      # and without the "recommended" extras (fonts, X, docs…).
+      local have=()
       for p in "${PKGS_apt[@]}"; do
-        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$p" >/dev/null || warn "apt: no pude instalar $p"
+        if apt-cache show "$p" >/dev/null 2>&1; then have+=("$p"); else warn "apt: $p no existe aquí"; fi
       done
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${have[@]}" >/dev/null ||
+        warn "apt no instaló todo"
       ;;
     pacman)
+      local have=()
       for p in "${PKGS_pacman[@]}"; do
-        as_root pacman -S --needed --noconfirm "$p" >/dev/null || warn "pacman: no pude instalar $p"
+        if pacman -Si "$p" >/dev/null 2>&1; then have+=("$p"); else warn "pacman: $p no existe aquí"; fi
       done
+      as_root pacman -S --needed --noconfirm "${have[@]}" >/dev/null || warn "pacman no instaló todo"
       ;;
     zypper)
       for p in "${PKGS_zypper[@]}"; do
@@ -425,7 +433,7 @@ summary() {
   done
   ((HEADLESS)) || python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Adw, Gtk' \
     >/dev/null 2>&1 || missing+=" GTK4/libadwaita(PyGObject)"
-  for c in herdr zsh dig convert $( ((HEADLESS)) || echo wl-copy); do
+  for c in herdr zsh dig $( ((HEADLESS)) || echo wl-copy convert); do
     need_cmd "$c" || [[ -x "$HOME/.local/bin/$c" ]] || optional+=" $c"
   done
   python3 -c "import brotli, fontTools, PIL, textual, segno, cryptography" >/dev/null 2>&1 || optional+=" (módulos python)"
@@ -438,7 +446,7 @@ summary() {
     row "Abrir" "${B}${TEAL}remote-control${R}"
     if [[ "$MODE" == multi ]]; then
       row "Modo" "${TEAL}multi${R}  ${MUTED}(contenedores desde la ventana o  remote-control multi)${R}"
-      [[ -f "$STATE/first" ]] && row "Su túnel" "${TEAL}remote-control multi tunnel principal on${R}"
+      row "Contenedores" "${TEAL}remote-control multi create NOMBRE${R}"
     fi
     row "Por SSH" "${TEAL}remote-control cli${R}  ${MUTED}(servidor, sin escritorio)${R}"
     ((onpath)) || row "PATH" "${YELLOW}abre otra terminal o corre${R}  exec \$SHELL -l"
@@ -460,7 +468,7 @@ summary() {
     log "Listo. Arranca con:  remote-control   (por SSH: remote-control cli)"
     if [[ "$MODE" == multi ]]; then
       log "Modo multi: contenedores desde la ventana o  remote-control multi"
-      [[ -f "$STATE/first" ]] && log "Túnel del contenedor «principal»:  remote-control multi tunnel principal on"
+      log "Contenedores:  remote-control multi create NOMBRE   (imagen: $IMAGE_LOG)"
     fi
     ((onpath)) || log "En esta terminal aún no está en PATH: abre otra o corre  exec \$SHELL -l"
     log "Auto-update: cada 3 min + al abrir/enfocar la app."
@@ -757,18 +765,16 @@ web_ports() {
   note "80 y 443 sin root"
 }
 
-# The window and the CLI manage containers; the first one is made now
-# (the first image takes a few minutes: a whole Linux with what it needs).
-first_container() {
+# No container is made here: the user creates them from the window or the
+# CLI. The image they start from (a whole Linux, a few minutes) is built in
+# the background meanwhile, so the installer ends right away and the first
+# create finds it ready (or waits for that same build).
+IMAGE_LOG="$HOME/.cache/remote-control/image.log"
+multi_ready() {
   local rc="$HOME/.local/bin/remote-control"
-  "$rc" multi on
-  if [[ -n "$("$rc" multi list | grep -v '^Sin contenedores')" ]]; then
-    note "ya había contenedores"
-    return
-  fi
-  "$rc" multi create principal --base fedora
-  touch "$STATE/first"
-  note "principal"
+  "$rc" multi on >/dev/null
+  setsid nohup "$rc" multi prepare --base fedora >"$IMAGE_LOG" 2>&1 </dev/null &
+  note "imagen preparándose en segundo plano"
 }
 
 banner
@@ -787,6 +793,6 @@ step "PATH y perfiles de la shell" hook_shells
 if [[ "$MODE" == multi ]]; then
   step "Podman" install_podman
   step "Puertos web (VPS)" web_ports
-  step "Primer contenedor" first_container
+  step "Modo multi" multi_ready
 fi
 summary

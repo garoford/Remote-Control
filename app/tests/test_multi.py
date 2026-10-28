@@ -139,6 +139,19 @@ class InsideTests(unittest.TestCase):
             info = tar.getmembers()[0]
             self.assertEqual((info.name, info.uid, info.mode, tar.extractfile(info).read()), ("gate", 1000, 0o600, b"Nueva123\n"))
 
+    def test_the_image_is_built_once(self) -> None:
+        import tempfile
+
+        built = []
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(multi.Path, "home", lambda: Path(tmp)), \
+             mock.patch.object(multi, "ensure_network", lambda log: None), \
+             mock.patch.object(multi, "has_image", lambda base: bool(built)), \
+             mock.patch.object(multi, "build_image", lambda base, log: built.append(base)):
+            multi.prepare_image("fedora")
+            multi.prepare_image("fedora")
+        self.assertEqual(built, ["fedora"])
+
     def test_next_to_a_dropping_docker_podman_uses_its_iptables_rules(self) -> None:
         import tempfile
 

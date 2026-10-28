@@ -21,6 +21,8 @@ Containers carry labels (LABEL…); nothing else of Podman's is touched.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -62,6 +64,10 @@ RUN printf '%s\\n' '[Unit]' 'Description=Remote Control tunnel' \\
  && systemctl enable remote-control.service
 USER {USER}
 RUN curl -fsSL https://herdr.dev/install.sh | sh || true
+# The PC's terminal (zsh, Oh My Posh, Node, Bun, the AI CLIs), once in the
+# image: each new container starts with it instead of installing it again.
+COPY container_setup.sh /tmp/container_setup.sh
+RUN bash /tmp/container_setup.sh
 USER root
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
@@ -69,7 +75,7 @@ CMD ["/sbin/init"]
 
 CONTAINERFILES = {
     "fedora": f"""FROM registry.fedoraproject.org/fedora:44
-RUN dnf -y install --setopt=install_weak_deps=False systemd systemd-pam dbus-broker sudo git python3 python3-pip \\
+RUN dnf -y install --setopt=install_weak_deps=False --setopt=max_parallel_downloads=20 --nodocs systemd systemd-pam dbus-broker sudo git python3 python3-pip \\
       python3-cryptography python3-pillow python3-fonttools python3-brotli rsync curl tmux ttyd zsh \\
       bind-utils procps-ng which findutils hostname iproute pipewire pipewire-pulseaudio wireplumber \\
       pulseaudio-utils glibc-langpack-en \\
@@ -177,8 +183,24 @@ def image(base: str) -> str:
     return f"{IMAGE}:{base}"
 
 
+SETUP_SCRIPT = Path(__file__).resolve().parent / "container_setup.sh"
+RECIPE_LABEL = "io.remote-control.recipe"
+
+
+def recipe(base: str) -> str:
+    """What the image is built from: a new recipe means a new image (the
+    containers made from the old one keep it)."""
+    digest = hashlib.sha256(CONTAINERFILES[base].encode())
+    digest.update(SETUP_SCRIPT.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def has_image(base: str) -> bool:
-    return subprocess.run(["podman", "image", "exists", image(base)], check=False).returncode == 0
+    res = subprocess.run(
+        ["podman", "image", "inspect", "--format", "{{index .Labels \"" + RECIPE_LABEL + "\"}}", image(base)],
+        capture_output=True, text=True, check=False,
+    )
+    return res.returncode == 0 and res.stdout.strip() == recipe(base)
 
 
 # --- living next to Docker ---------------------------------------------------------------
@@ -223,9 +245,31 @@ def build_image(base: str, log=lambda _line: None) -> None:
         raise MultiError(f"base desconocida: {base}")
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "Containerfile").write_text(CONTAINERFILES[base], encoding="utf-8")
+        shutil.copy(SETUP_SCRIPT, Path(tmp) / "container_setup.sh")
         # The host's network while building: only packages are fetched, and it
         # works whatever the firewall does to the containers' bridge.
-        podman("build", "--network", "host", "-t", image(base), tmp, timeout=3600, log=log)
+        podman("build", "--network", "host", "--label", f"{RECIPE_LABEL}={recipe(base)}", "-t", image(base), tmp, timeout=3600, log=log)
+
+
+def prepare_image(base: str, log=lambda _line: None) -> None:
+    """The image, built once. The installer starts this in the background;
+    a create meanwhile waits for that build instead of doing its own."""
+    if base not in CONTAINERFILES:
+        raise MultiError(f"base desconocida: {base}")
+    ensure_network(log)
+    if has_image(base):
+        return
+    lock = Path.home() / ".cache" / "remote-control" / f"image-{base}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log(f"Terminando de preparar la imagen {BASES[base]}…")
+            fcntl.flock(held, fcntl.LOCK_EX)
+        if not has_image(base):
+            log(f"Preparando la imagen {BASES[base]} (solo la primera vez)…")
+            build_image(base, log)
 
 
 def list_boxes() -> list[Box]:
@@ -280,10 +324,7 @@ def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
     boxes = list_boxes()
     if any(b.name == name for b in boxes):
         raise MultiError(f"ya existe un contenedor {name}")
-    ensure_network(log)
-    if not has_image(base):
-        log(f"Preparando la imagen {BASES[base]} (solo la primera vez)…")
-        build_image(base, log)
+    prepare_image(base, log)
     port = _free_port({b.port for b in boxes})
     log(f"Creando {name}…")
     podman(
@@ -300,7 +341,7 @@ def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
         image(base),
     )
     start(name, log)
-    install_rc(name, log)
+    install_rc(name, log, env=False)
     return get(name)
 
 
@@ -353,8 +394,9 @@ def run(name: str, *args: str, user: str = USER, timeout: float | None = 120, ch
     return podman("exec", "--user", user, "--workdir", HOME if user != "root" else "/", *env, container(name), *args, timeout=timeout, check=check, log=log)
 
 
-def install_rc(name: str, log=lambda _line: None) -> None:
-    """This machine's installed Remote Control, copied in (create and update)."""
+def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
+    """This machine's installed Remote Control, copied in (create and update).
+    A new container already has the environment from its image (env=False)."""
     package = Path(__file__).resolve().parent
     log("Copiando Remote Control…")
     run(name, "mkdir", "-p", f"{HOME}/.local/share/remote-control", f"{HOME}/.local/bin")
@@ -374,7 +416,8 @@ def install_rc(name: str, log=lambda _line: None) -> None:
     run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local", user="root")
     run(name, "chmod", "755", RC_BIN)
     log("Remote Control listo")
-    setup_env(name, log)
+    if env:
+        setup_env(name, log)
 
 
 def setup_env(name: str, log=lambda _line: None) -> None:
@@ -505,6 +548,7 @@ CLI_USAGE = """uso: remote-control multi COMANDO
   on | off                      la ventana y el CLI administran contenedores (o esta máquina)
   list                          los contenedores, su estado y tamaño
   create NOMBRE [--base fedora|ubuntu]
+  prepare [--base fedora|ubuntu] dejar lista la imagen (el instalador lo hace en segundo plano)
   start | stop NOMBRE           encender / apagar el contenedor
   rm NOMBRE                     borrarlo con todo lo que tiene
   rename NOMBRE NUEVO
@@ -542,6 +586,11 @@ def cli(argv: list[str]) -> int:
             for b in boxes:
                 mark = "●" if b.running else "○"
                 print(f"{mark} {b.name:<20} {BASES.get(b.base, b.base):<14} {human_size(b.size):>9}  local http://localhost:{b.port}/")
+            return 0
+        if cmd == "prepare":
+            base = args[args.index("--base") + 1] if "--base" in args else "fedora"
+            prepare_image(base, log=out)
+            print(f"Imagen {BASES.get(base, base)} lista")
             return 0
         if not args:
             print(CLI_USAGE, file=sys.stderr)
