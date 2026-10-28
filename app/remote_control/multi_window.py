@@ -56,6 +56,7 @@ class MultiWindow(Adw.ApplicationWindow):
         # Can the internet reach this machine (domains.direct_reach)? Asked once.
         self._reach: domains.Reach | None = None
         self._shown_domain_for: str | None = None
+        self._refreshing = False
         self._load_css()
         self._build()
         self.refresh()
@@ -469,8 +470,10 @@ class MultiWindow(Adw.ApplicationWindow):
         return True
 
     def refresh(self) -> None:
-        if not multi.available():
+        # One at a time: with podman slow they piled up otherwise.
+        if not multi.available() or self._refreshing:
             return
+        self._refreshing = True
 
         def work():
             boxes = multi.list_boxes()
@@ -480,6 +483,7 @@ class MultiWindow(Adw.ApplicationWindow):
             return boxes, tunnel, auto
 
         def done(result, error):
+            self._refreshing = False
             if error:
                 return
             boxes, tunnel, auto = result

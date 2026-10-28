@@ -7,6 +7,7 @@ from remote_control import multi
 
 PS = [
     {
+        "Id": "aaa",
         "Names": ["rc-backend"],
         "State": "running",
         "CreatedAt": "hace 2 días",
@@ -14,6 +15,7 @@ PS = [
         "Size": {"rootFsSize": 900_000_000, "rwSize": 2_400_000_000},
     },
     {
+        "Id": "bbb",
         "Names": ["rc-ia"],
         "State": "exited",
         "CreatedAt": "ayer",
@@ -40,12 +42,22 @@ class FakePodman:
 class ListTests(unittest.TestCase):
     def test_reads_our_containers_only_and_sorts_them(self) -> None:
         fake = FakePodman()
-        with mock.patch.object(multi, "podman", fake):
-            boxes = multi.list_boxes()
+        with mock.patch.object(multi, "podman", fake), mock.patch.object(multi, "_sizes", {}), \
+                mock.patch.object(multi, "_sizes_at", 0.0):
+            boxes = multi.list_boxes(wait_sizes=True)
         self.assertEqual([b.name for b in boxes], ["backend", "ia"])
         self.assertTrue(boxes[0].running)
         self.assertEqual((boxes[0].port, boxes[0].size, boxes[1].base), (17700, 2_400_000_000, "ubuntu"))
         self.assertIn(f"label={multi.LABEL}", fake.calls[0])
+
+    def test_the_listing_never_waits_for_the_sizes(self) -> None:
+        # --size walks every file of a container: minutes with a big one.
+        fake = FakePodman()
+        with mock.patch.object(multi, "podman", fake), mock.patch.object(multi, "_sizes", {}), \
+                mock.patch.object(multi, "_sizes_at", 1e18), mock.patch.object(multi.time, "monotonic", lambda: 1e18):
+            boxes = multi.list_boxes()
+        self.assertEqual([c for c in fake.calls if "--size" in c], [])
+        self.assertEqual(multi.human_size(boxes[0].size), "midiendo…")
 
     def test_sizes_read_well(self) -> None:
         self.assertEqual(multi.human_size(1024), "1 KB")

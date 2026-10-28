@@ -30,6 +30,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -272,21 +273,53 @@ def prepare_image(base: str, log=lambda _line: None) -> None:
             build_image(base, log)
 
 
-def list_boxes() -> list[Box]:
-    out = podman("ps", "-a", "--size", "--filter", f"label={LABEL}", "--format", "json")
+# `podman ps --size` walks every file a container wrote: with hundreds of
+# thousands it takes minutes and holds podman's lock, so the listing is the
+# plain `ps` and the sizes come from a scan of their own, at most one at a time
+# and every SIZE_TTL_S, kept here.
+SIZE_TTL_S = 300
+_sizes: dict[str, int] = {}
+_sizes_at = 0.0
+_sizes_lock = threading.Lock()
+
+
+def _scan_sizes() -> None:
+    global _sizes_at
+    if not _sizes_lock.acquire(blocking=False):
+        return
+    try:
+        out = podman("ps", "-a", "--size", "--filter", f"label={LABEL}", "--format", "json", timeout=1800, check=False)
+        found = {}
+        for item in json.loads(out or "[]"):
+            size = item.get("Size") or {}
+            found[item.get("Id", "")] = int(size.get("rwSize") or 0) if isinstance(size, dict) else 0
+        _sizes.clear()
+        _sizes.update(found)
+    except (MultiError, ValueError):
+        pass
+    finally:
+        _sizes_at = time.monotonic()
+        _sizes_lock.release()
+
+
+def list_boxes(wait_sizes: bool = False) -> list[Box]:
+    out = podman("ps", "-a", "--filter", f"label={LABEL}", "--format", "json")
+    if wait_sizes:
+        _scan_sizes()
+    elif not _sizes_at or time.monotonic() - _sizes_at > SIZE_TTL_S:
+        threading.Thread(target=_scan_sizes, daemon=True).start()
     boxes = []
     for item in json.loads(out or "[]"):
         labels = item.get("Labels") or {}
         # The container's own name first: a rename changes it, not the label.
         name = (item.get("Names") or [""])[0].removeprefix(PREFIX) or labels.get(f"{LABEL}.name", "")
-        size = item.get("Size") or {}
         boxes.append(
             Box(
                 name=name,
                 base=labels.get(f"{LABEL}.base", ""),
                 state=item.get("State", ""),
                 port=int(labels.get(f"{LABEL}.port") or 0),
-                size=int(size.get("rwSize") or 0) if isinstance(size, dict) else 0,
+                size=_sizes.get(item.get("Id", ""), -1),
                 created=item.get("CreatedAt", ""),
             )
         )
@@ -551,6 +584,8 @@ def set_autostart(name: str, on: bool) -> None:
 
 
 def human_size(size: int) -> str:
+    if size < 0:
+        return "midiendo…"
     value = float(size)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if value < 1024 or unit == "TB":

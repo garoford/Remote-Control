@@ -219,6 +219,7 @@ class MultiTUI(App):
         self.tunnel: dict = {}
         self.busy_name: str | None = None
         self.busy_text = ""
+        self.refreshing = False
         self._qr_for = ""
 
     def compose(self) -> ComposeResult:
@@ -296,18 +297,25 @@ class MultiTUI(App):
     # --- state ---------------------------------------------------------------
 
     def refresh_boxes(self) -> None:
+        # A thread worker is not stopped by a newer one: with podman slow they
+        # piled up, each with its podman calls. One at a time.
+        if self.refreshing:
+            return
+        self.refreshing = True
+
         def work() -> None:
             try:
                 boxes = multi.list_boxes()
+                box = next((b for b in boxes if b.name == self.selected), None) or (boxes[0] if boxes and not self.selected else None)
+                tunnel = multi.tunnel_status(box.name) if box and box.running and box.name != self.busy_name else None
+                auto = multi.autostart(box.name) if box and box.running else None
+                self.call_from_thread(self.paint, boxes, tunnel, auto)
             except multi.MultiError as exc:
                 self.call_from_thread(self.notify, str(exc), severity="error")
-                return
-            box = next((b for b in boxes if b.name == self.selected), None) or (boxes[0] if boxes and not self.selected else None)
-            tunnel = multi.tunnel_status(box.name) if box and box.running and box.name != self.busy_name else None
-            auto = multi.autostart(box.name) if box and box.running else None
-            self.call_from_thread(self.paint, boxes, tunnel, auto)
+            finally:
+                self.refreshing = False
 
-        self.run_worker(work, thread=True, group="refresh", exclusive=True)
+        self.run_worker(work, thread=True, group="refresh")
 
     def paint(self, boxes: list[multi.Box], tunnel: dict | None, auto: bool | None) -> None:
         view = self.query_one("#boxes", ListView)
