@@ -20,9 +20,9 @@ _RC_ACTIVE="$_RC_BASE/profile-active"
 (( ${path[(Ie)$HOME/.local/bin]} )) || path+=("$HOME/.local/bin")
 export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
 
-_rc_cli() {
-  local cli="$1"
-  shift
+# The profile this terminal belongs to: sets id (empty for the primary user)
+# and home (that profile's folder). Callers declare both local.
+_rc_profile() {
   # The account is the terminal's owner's, never the device that typed last
   # (that only decides who owns the terminals a device opens):
   # - an explicit RC_PROFILE, empty included (the primary user): an agent
@@ -33,12 +33,8 @@ _rc_cli() {
   #   profile that just opened it, the active one, noted here for good;
   # - a Remote Control tab: its owner, @rc_prof on its tmux session;
   # - any other terminal: the primary user.
-  local id="" home="" pin=""
-  # Sounds of a Remote Control terminal go to its devices, not this
-  # computer's speakers (sound.py records that silent sink).
-  if [[ -n "${HERDR_PANE_ID-}" || "${TMUX-}" == */cf-remote,* ]]; then
-    local -x PULSE_SINK=rc_terminal_audio
-  fi
+  local pin=""
+  id="" home=""
   if (( ${+RC_PROFILE} )); then
     id="$RC_PROFILE"
   elif [[ "${HERDR_PANE_ID-}" =~ '^w[0-9A-Za-z]+:p[0-9A-Za-z]+$' ]]; then
@@ -57,6 +53,18 @@ _rc_cli() {
     home="$_RC_BASE/profiles/$id"
     [[ "$id" =~ '^[a-z0-9][a-z0-9_-]*$' && -d "$home" ]] || { id=""; home=""; }
   fi
+}
+
+_rc_cli() {
+  local cli="$1"
+  shift
+  local id="" home=""
+  # Sounds of a Remote Control terminal go to its devices, not this
+  # computer's speakers (sound.py records that silent sink).
+  if [[ -n "${HERDR_PANE_ID-}" || "${TMUX-}" == */cf-remote,* ]]; then
+    local -x PULSE_SINK=rc_terminal_audio
+  fi
+  _rc_profile
   # Every profile's chats show up in everyone's resume list
   # (rc_sharechats.py hardlinks them across HOMEs).
   if [[ -r "$_RC_BASE/rc_sharechats.py" ]] && (( $+commands[python3] )); then
@@ -82,6 +90,27 @@ _rc_cli() {
     ARGV0="$cli" \
     command "${pre[@]}" "$cli" "$@"
 }
+
+# git and gh of a profile's terminal are that user's: its ~/.gitconfig
+# (identity, aliases, credential helper and the credentials it stores) and its
+# gh login live in its HOME, the same one its AI CLIs commit with. SSH keys
+# stay shared: ssh reads them from the system user's home, not from $HOME.
+_rc_vcs() {
+  local tool="$1"
+  shift
+  local id="" home=""
+  _rc_profile
+  if [[ -z "$id" ]]; then
+    command "$tool" "$@"
+    return
+  fi
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" command "$tool" "$@"
+}
+
+for _rc_name in git gh; do
+  (( $+commands[$_rc_name] )) || continue
+  eval "function $_rc_name { _rc_vcs $_rc_name \"\$@\" }"
+done
 
 for _rc_name in claude agent cursor-agent codex gemini agy aider opencode crush goose qwen amp copilot pi; do
   (( $+commands[$_rc_name] )) || continue
