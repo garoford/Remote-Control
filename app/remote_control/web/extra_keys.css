@@ -3897,10 +3897,37 @@ html.rc-is-empty #rc-net-badge {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 4px;
+}
+
+.rc-local-switchbox > label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 2px;
   color: var(--rc-muted);
   font-size: 10px;
   font-weight: 600;
+  cursor: pointer;
+}
+
+.rc-local-linkbtns {
+  display: flex;
+  gap: 4px;
+}
+
+.rc-local-tools {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.rc-local-fold svg {
+  transition: transform 160ms ease;
+}
+
+.rc-local-fold.is-open svg {
+  transform: rotate(180deg);
 }
 
 .rc-local-icon.is-mini {

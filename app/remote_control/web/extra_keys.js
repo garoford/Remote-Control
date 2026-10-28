@@ -8765,16 +8765,16 @@
   // one on this tunnel at /p/<slug>/ (behind the same password).
   var LOCAL_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="2.6" width="12.4" height="8.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 13.6h5M8 11.2v2.4M5 6.9l1.6-1.5L5 3.9M8 8.2h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  var LINK_ICON =
-    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2.2-2.2a2.6 2.6 0 0 0-3.7-3.7l-.9.9M9.2 6.8a2.6 2.6 0 0 0-3.7 0L3.3 9a2.6 2.6 0 0 0 3.7 3.7l.9-.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   var OPEN_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2.8h4.2V7M13.2 2.8 7.4 8.6M11.5 9.5v2.8a1 1 0 0 1-1 1H3.7a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1h2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var REFRESH_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v2.6h-2.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var COPY_ICON =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 3.6V3.4a1 1 0 0 0-1-1H3.4a1 1 0 0 0-1 1v6.1a1 1 0 0 0 1 1h.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   var TRASH_ICON =
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.3h10.4M6.3 4.3V3a.8.8 0 0 1 .8-.8h1.8a.8.8 0 0 1 .8.8v1.3M4.2 4.3l.6 8.4a1 1 0 0 0 1 .9h4.4a1 1 0 0 0 1-.9l.6-8.4M6.7 6.8v4.2M9.3 6.8v4.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var KIND_LABEL = { localhost: "localhost", loopback: "loopback", todas: "todas las redes", red: "red" };
-  var localState = { items: [], aliases: [], all: false, busy: {}, loaded: false };
+  var localState = { items: [], aliases: [], all: false, busy: {}, open: {}, loaded: false };
   var localTimer = 0;
 
   var SHARE_KIND = { sub: "subdominio", tunnel: "túnel propio", path: "ruta" };
@@ -9053,12 +9053,42 @@
     );
   }
 
-  function localSwitchBox(sw, text) {
-    var box = document.createElement("label");
+  // A switch with its name, and under it copy and open for its link once on.
+  function localSwitchBox(sw, text, target, what) {
+    var box = document.createElement("div");
     box.className = "rc-local-switchbox";
-    box.appendChild(sw);
-    box.appendChild(document.createElement("span")).textContent = text;
+    var top = box.appendChild(document.createElement("label"));
+    top.appendChild(sw);
+    top.appendChild(document.createElement("span")).textContent = text;
+    var btns = box.appendChild(document.createElement("div"));
+    btns.className = "rc-local-linkbtns";
+    var copy = wsButton("", "rc-local-icon is-mini", "Copiar el link " + what, function () {
+      copyLocal(target, false);
+    });
+    copy.innerHTML = COPY_ICON;
+    var open = wsButton("", "rc-local-icon is-mini", "Abrir el link " + what + " en otra pestaña", function () {
+      window.open(shareHref(target.link), "_blank", "noopener");
+    });
+    open.innerHTML = OPEN_ICON;
+    copy.disabled = open.disabled = !target;
+    btns.appendChild(copy);
+    btns.appendChild(open);
     return box;
+  }
+
+  function localLinkLine(chip, cls, target) {
+    var line = document.createElement("div");
+    line.className = "rc-local-shared";
+    var kind = line.appendChild(document.createElement("span"));
+    kind.className = "rc-local-chip " + cls;
+    kind.textContent = chip;
+    var link = line.appendChild(document.createElement("a"));
+    link.className = "rc-local-link";
+    link.href = shareHref(target.link);
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = shareHref(target.url).replace(/^https:\/\//, "");
+    return line;
   }
 
   function localRow(entry) {
@@ -9100,72 +9130,47 @@
       chip.textContent = kind === "todas" ? KIND_LABEL.todas : a.indexOf(":") >= 0 ? "[" + a + "]" : a;
       chip.title = KIND_LABEL[kind];
     });
-    info.appendChild(top);
-    if (bits.length) info.appendChild(meta);
-    info.appendChild(addrs);
     var share = entry.share;
-    if (share) {
-      var line = info.appendChild(document.createElement("div"));
-      line.className = "rc-local-shared";
-      var kind = line.appendChild(document.createElement("span"));
-      kind.className = "rc-local-chip is-" + share.kind;
-      kind.textContent = SHARE_KIND[share.kind] || share.kind;
-      var link = line.appendChild(document.createElement("a"));
-      link.className = "rc-local-link";
-      link.href = shareHref(share.link);
-      link.target = "_blank";
-      link.rel = "noopener";
-      link.textContent = shareHref(share.url).replace(/^https:\/\//, "");
-      if (share.note || !share.alive) {
-        var note = info.appendChild(document.createElement("div"));
-        note.className = "rc-local-note";
-        note.textContent = !share.alive ? "Su túnel se cayó: apaga y enciende el switch" : share.note;
-      }
-    }
     var cf = share && share.cf;
-    if (cf) {
-      var cfLine = info.appendChild(document.createElement("div"));
-      cfLine.className = "rc-local-shared";
-      var cfKind = cfLine.appendChild(document.createElement("span"));
-      cfKind.className = "rc-local-chip is-tunnel";
-      cfKind.textContent = "cloudflare";
-      var cfLink = cfLine.appendChild(document.createElement("a"));
-      cfLink.className = "rc-local-link";
-      cfLink.href = cf.link;
-      cfLink.target = "_blank";
-      cfLink.rel = "noopener";
-      cfLink.textContent = cf.url.replace(/^https:\/\//, "");
-      var cfCopy = wsButton("", "rc-local-icon is-mini", "Copiar el link de Cloudflare (entra sin contraseña, solo a este entorno)", function () {
-        copyLocal(cf, false);
-      });
-      cfCopy.innerHTML = LINK_ICON;
-      cfLine.appendChild(cfCopy);
-      if (!cf.alive) {
-        var cfNote = info.appendChild(document.createElement("div"));
-        cfNote.className = "rc-local-note";
-        cfNote.textContent = "El túnel de Cloudflare se cayó: apaga y enciende su switch";
-      }
-    }
-    var acts = document.createElement("div");
-    acts.className = "rc-local-acts";
+    // Folded by default: the arrow shows its full links.
+    var tools = top.appendChild(document.createElement("span"));
+    tools.className = "rc-local-tools";
+    var opened = !!(share && localState.open[entry.port]);
     if (share) {
-      var copy = wsButton("", "rc-local-icon", share.kind === "path" ? "Copiar el link (pide la contraseña)" : "Copiar el link (entra sin contraseña, solo a este entorno)", function () {
-        copyLocal(share, false);
+      var fold = wsButton("", "rc-local-icon is-mini rc-local-fold" + (opened ? " is-open" : ""), opened ? "Ocultar los links" : "Ver los links", function () {
+        if (localState.open[entry.port]) delete localState.open[entry.port];
+        else localState.open[entry.port] = true;
+        paintLocal();
       });
-      copy.innerHTML = LINK_ICON;
-      var open = wsButton("", "rc-local-icon", "Abrir en otra pestaña", function () {
-        window.open(shareHref(share.link), "_blank", "noopener");
-      });
-      open.innerHTML = OPEN_ICON;
-      acts.appendChild(copy);
-      acts.appendChild(open);
+      fold.innerHTML = WS_CARET;
+      fold.setAttribute("aria-expanded", opened ? "true" : "false");
+      tools.appendChild(fold);
     }
-    var del = wsButton("", "rc-local-icon is-danger", entry.down ? "Quitar" : "Detener este entorno", function () {
+    var del = wsButton("", "rc-local-icon is-mini is-danger", entry.down ? "Quitar" : "Detener este entorno", function () {
       confirmStopLocal(entry);
     });
     del.innerHTML = TRASH_ICON;
     del.disabled = !!localState.busy[entry.port];
-    acts.appendChild(del);
+    tools.appendChild(del);
+    info.appendChild(top);
+    if (bits.length) info.appendChild(meta);
+    info.appendChild(addrs);
+    if (opened) {
+      info.appendChild(localLinkLine(SHARE_KIND[share.kind] || share.kind, "is-" + share.kind, share));
+      if (cf) info.appendChild(localLinkLine("cloudflare", "is-tunnel", cf));
+    }
+    if (share && (share.note || !share.alive)) {
+      var note = info.appendChild(document.createElement("div"));
+      note.className = "rc-local-note";
+      note.textContent = !share.alive ? "Su túnel se cayó: apaga y enciende el switch" : share.note;
+    }
+    if (cf && !cf.alive) {
+      var cfNote = info.appendChild(document.createElement("div"));
+      cfNote.className = "rc-local-note";
+      cfNote.textContent = "El túnel de Cloudflare se cayó: apaga y enciende su switch";
+    }
+    var acts = document.createElement("div");
+    acts.className = "rc-local-acts";
     var sw = document.createElement("button");
     sw.type = "button";
     sw.className = "rc-set-toggle rc-local-switch" + (entry.slug ? " is-on" : "");
@@ -9185,6 +9190,7 @@
     sw.addEventListener("click", function () {
       setLocalShare(entry, !entry.slug);
     });
+    var what = share && share.kind === "path" ? "(pide la contraseña)" : "(entra sin contraseña, solo a este entorno)";
     // With subdomains (a VPS) a second switch: a Cloudflare tunnel as well.
     if (localState.subdomains && (!share || share.kind === "sub")) {
       var cfSw = document.createElement("button");
@@ -9199,9 +9205,9 @@
       cfSw.addEventListener("click", function () {
         setLocalTunnel(entry, !cf);
       });
-      acts.appendChild(localSwitchBox(sw, "Subdominio"));
-      acts.appendChild(localSwitchBox(cfSw, "Cloudflare"));
-    } else acts.appendChild(sw);
+      acts.appendChild(localSwitchBox(sw, "Subdominio", share, "del subdominio " + what));
+      acts.appendChild(localSwitchBox(cfSw, "Cloudflare", cf, "de Cloudflare " + what));
+    } else acts.appendChild(localSwitchBox(sw, share ? SHARE_KIND[share.kind] || "Publicado" : "Publicar", share, what));
     row.appendChild(info);
     row.appendChild(acts);
     return row;
