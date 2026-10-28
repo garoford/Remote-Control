@@ -796,8 +796,12 @@ class TunnelService:
         wrapper = self.run_dir / "tab_session.sh"
         conf = self.run_dir / "tmux.tab.conf"
         if wrapper_src.is_file():
-            wrapper.write_text(wrapper_src.read_text(encoding="utf-8"), encoding="utf-8")
-            wrapper.chmod(0o755)
+            # Replaced, not rewritten: bash reads a script as it runs it, and a
+            # running tunnel has one per open tab (remote-control reload).
+            tmp = wrapper.with_name(f".{wrapper.name}.tmp")
+            tmp.write_text(wrapper_src.read_text(encoding="utf-8"), encoding="utf-8")
+            tmp.chmod(0o755)
+            tmp.replace(wrapper)
         if conf_src.is_file():
             conf.write_text(conf_src.read_text(encoding="utf-8"), encoding="utf-8")
         # zsh tabs load web/zdot, which wraps CLIs with rc_keephistory.py.

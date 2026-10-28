@@ -415,8 +415,8 @@ def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
         podman("cp", str(wrapper), f"{container(name)}:{RC_BIN}")
     run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local", user="root")
     run(name, "chmod", "755", RC_BIN)
-    # Its running tunnel serves the new page from the next reload.
-    run(name, RC_BIN, "page", check=False)
+    # Its running tunnel onto the new code (page and proxy), terminals untouched.
+    run(name, RC_BIN, "reload", check=False)
     log("Remote Control listo")
     if env:
         setup_env(name, log)

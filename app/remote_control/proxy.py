@@ -1569,11 +1569,37 @@ def main(argv: list[str] | None = None) -> int:
         front = TlsFront((pub_host, pub_port), (listen_host, listen_port), Path(args.tls_cert), Path(args.tls_key))
         front.start()
         threading.Thread(target=keep_domain, args=(front,), daemon=True).start()
+    allow_reload()
     try:
         sidecar.serve_forever()
     except KeyboardInterrupt:
         sidecar.stop()
     return 0
+
+
+def reload_marker(pid: int, home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".cache" / "cf-quick-tunnel" / "pids" / "reloadable" / str(pid)
+
+
+def allow_reload() -> None:
+    """SIGHUP: run again as the same process (same arguments, password file
+    included; same environment and service), with the code installed now.
+    tmux keeps the terminals: browsers only reconnect. The marker tells
+    `remote-control reload` this proxy knows the signal (an older one would
+    just die of it)."""
+    import os
+    import signal
+
+    def again(_sig, _frame) -> None:
+        os.execv(sys.executable, sys.orig_argv)
+
+    signal.signal(signal.SIGHUP, again)
+    try:
+        marker = reload_marker(os.getpid())
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

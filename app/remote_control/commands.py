@@ -188,9 +188,16 @@ def update(argv: list[str]) -> int:
     from remote_control import router
 
     wrapper = Path.home() / ".local" / "bin" / "remote-control"
+    stale = False
     if updated:
-        # The new code builds it (this process still runs the old one).
-        ui.run("Página web", lambda detail: subprocess.run([str(wrapper), "page"], capture_output=True, check=False) and "al día · recarga el navegador")
+        # The new code does it (this process still runs the old one).
+        def live(detail) -> str:
+            nonlocal stale
+            done = subprocess.run([str(wrapper), "reload"], capture_output=True, text=True, check=False)
+            stale = done.returncode == 3
+            return "apágalo y enciéndelo una vez" if stale else "recargado, sin cortar las terminales"
+
+        ui.run("Túnel", live)
     if updated and router.service_active():
         # The domains' router runs the code it started with.
         ui.run("Router de dominios", lambda detail: router.ensure_service() or "reiniciado")
@@ -233,10 +240,10 @@ def update(argv: list[str]) -> int:
                 print(f"      {ui.MUTED}{text}{ui.R}")
     total = int(time.monotonic() - began)
     hint = ""
-    if boxes:
-        hint = "Los túneles encendidos usan el código nuevo cuando los apagas y enciendes."
-    elif updated:
-        hint = "Si el túnel está encendido, apágalo y enciéndelo para usar el código nuevo."
+    if updated or boxes:
+        hint = "Recarga el navegador para ver lo nuevo."
+    if stale:
+        hint = "Este túnel venía de antes: apágalo y enciéndelo una vez; desde ahí se actualiza solo."
     print()
     if ui.tty:
         state = f"{ui.RED}con errores{ui.R}" if failed else f"{ui.GREEN}listo{ui.R}"
@@ -249,9 +256,15 @@ def update(argv: list[str]) -> int:
     return 1 if failed else 0
 
 
-def page(_argv: list[str]) -> int:
-    """The page a running tunnel serves, rebuilt from the installed code. ttyd
-    reads it on every load: page fixes reach a reload, no tunnel restart."""
+def reload(_argv: list[str]) -> int:
+    """A running tunnel onto the installed code, terminals untouched: its page
+    rebuilt (ttyd reads it on every load) and its proxy run again (SIGHUP,
+    proxy.allow_reload). Exit 0 all of it, 3 the proxy needs a tunnel restart
+    (one from before this existed)."""
+    import os
+    import signal
+
+    from remote_control.proxy import reload_marker
     from remote_control.tunnel import TunnelService
 
     service = TunnelService()
@@ -259,8 +272,17 @@ def page(_argv: list[str]) -> int:
         return 0  # no tunnel has run here: the next start builds it
     service._prepare_rc_assets()
     service._prepare_ttyd_index()
-    print("Página web al día (recarga el navegador)")
+    service._prepare_tab_session()
+    pid = service._alive_pid(service.proxy_pid_file)
+    if not pid:
+        print("Página al día")
+        return 0
+    if not reload_marker(pid).exists():
+        print("Página al día; el proxy necesita apagar y encender el túnel una vez")
+        return 3
+    os.kill(pid, signal.SIGHUP)
+    print("Página y proxy al día (recarga el navegador)")
     return 0
 
 
-COMMANDS = {"status": status, "stop": stop, "password": password, "update": update, "page": page}
+COMMANDS = {"status": status, "stop": stop, "password": password, "update": update, "reload": reload, "page": reload}
