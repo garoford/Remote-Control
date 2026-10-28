@@ -35,6 +35,21 @@ def write_all(fd: int, data: bytes) -> None:
         data = data[n:]
 
 
+def sane(attrs: list) -> list:
+    """attrs with the usual line settings: output post-processing (a newline
+    goes back to the start of the line), line editing, echo and signal keys.
+    A terminal some program left raw is not passed on nor given back raw:
+    under it every program would draw in steps."""
+    attrs = list(attrs)
+    attrs[0] |= termios.ICRNL | termios.BRKINT
+    attrs[1] |= termios.OPOST | termios.ONLCR
+    attrs[3] |= termios.ICANON | termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ISIG | termios.IEXTEN
+    cc = list(attrs[6])
+    cc[termios.VMIN], cc[termios.VTIME] = b"\x01", b"\x00"
+    attrs[6] = cc
+    return attrs
+
+
 def main() -> int:
     argv = sys.argv[1:]
     if not argv:
@@ -61,9 +76,10 @@ def main() -> int:
 
     # The child starts with our terminal settings, then takes over from there.
     try:
-        termios.tcsetattr(fd, termios.TCSANOW, termios.tcgetattr(0))
+        saved = sane(termios.tcgetattr(0))
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
     except termios.error:
-        pass
+        saved = termios.tcgetattr(0)
     sync_size()
     signal.signal(signal.SIGWINCH, sync_size)
 
@@ -80,7 +96,6 @@ def main() -> int:
 
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
         signal.signal(signum, pass_on)
-    saved = termios.tcgetattr(0)
     tty.setraw(0)
     tail = b""
     try:
