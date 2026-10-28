@@ -4322,6 +4322,28 @@
     if (closedTabs[tabId()]) forgetSession(tabId());
   }
 
+  // A shell that ended (exit, Ctrl+D) takes its tmux session with it, and with
+  // the last one the whole tmux server. Nothing marks it closed, so ttyd would
+  // reconnect to it forever: when the socket drops, ask the server whether the
+  // tab still exists, and if not leave it like a closed one.
+  function checkCurrentTab() {
+    var id = tabId();
+    if (!id || closedTabs[id]) return;
+    fetch("/rc-workspaces", { cache: "no-store" })
+      .then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      })
+      .then(function (payload) {
+        takeWorkspaces(payload);
+        if (!payload || !Array.isArray(payload.sessions) || id !== tabId() || closedTabs[id]) return;
+        var alive = payload.sessions.some(function (item) {
+          return item.id === id;
+        });
+        if (!alive) forgetSession(id);
+      })
+      .catch(function () {});
+  }
+
   function forgetSession(id) {
     closedTabs[id] = true;
     var host = document.getElementById("rc-session-tabs");
@@ -9062,6 +9084,15 @@
       if (!document.hidden) pullSessions();
     }, 3000);
     window.addEventListener("rc-ws-open", pullSessions);
+    // One check at a time: a dead tab reconnects faster than any debounce.
+    var aliveCheck = 0;
+    window.addEventListener("rc-ws-close", function () {
+      if (aliveCheck) return;
+      aliveCheck = setTimeout(function () {
+        aliveCheck = 0;
+        checkCurrentTab();
+      }, 300);
+    });
     window.addEventListener("rc-tab-changed", function () {
       paintSessions(sessionCache);
     });

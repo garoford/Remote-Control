@@ -369,8 +369,7 @@ class MultiWindow(Adw.ApplicationWindow):
             self.dom_state.add_css_class("on")
             self.dom_state.set_label("Activo")
             port = self._reach.public_port if self._reach else 443
-            tail = "apaga el túnel para cambiarlo" if on else ("router activo" if router.service_active() else "se usa al encender el túnel")
-            self.dom_hint.set_label(f"{router.public_url(host, port)}  ·  {tail}")
+            self.dom_hint.set_label(router.public_url(host, port))
             return
         self.dom_btn.set_label("Activar")
         self.dom_btn.remove_css_class("rc-btn-danger")

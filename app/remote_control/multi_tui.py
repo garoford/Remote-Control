@@ -173,7 +173,9 @@ class MultiTUI(App):
     #mhero-top { height: auto; }
     #mhero.on { border: round #21c7a8; }
     #mhero.busy { border: round #82aaff; }
-    #mname { width: 1fr; height: 3; content-align: left middle; text-style: bold; }
+    #mtitle { width: 1fr; height: 3; padding-left: 2; }
+    #mname { width: 1fr; height: 1; margin-top: 0; text-style: bold; }
+    #mtitle #chips { height: 1; margin-top: 1; }
     #power-col { width: 12; height: auto; align-horizontal: center; }
     #state-text { width: 100%; color: #8a9bb3; text-align: center; }
     #step-chip { margin-left: 1; }
@@ -230,14 +232,16 @@ class MultiTUI(App):
                     with Vertical(id="mhero", classes="card off"):
                         with Horizontal(id="mhero-top"):
                             yield Static(">_", id="badge")
-                            yield Static("", id="mname")
+                            # Its name, and under it its base, size and what it is doing.
+                            with Vertical(id="mtitle"):
+                                yield Static("", id="mname")
+                                with Horizontal(id="chips"):
+                                    yield Static("", id="minfo", classes="chip")
+                                    yield Static("", id="step-chip", classes="chip busy")
                             # One switch: on starts the container and its tunnel, off stops both.
                             with Vertical(id="power-col"):
                                 yield Switch(id="switch", animate=False)
                                 yield Static("Apagado", id="state-text")
-                        with Horizontal(id="chips"):
-                            yield Static("", id="minfo", classes="chip")
-                            yield Static("", id="step-chip", classes="chip busy")
                     with Horizontal(id="mmid"):
                         with Vertical(id="mleft"):
                             with Vertical(id="share", classes="card"):
@@ -411,7 +415,7 @@ class MultiTUI(App):
             state.set_classes("chip on")
             state.update("Activo")
             url = router.public_url(host, self.reach.public_port if self.reach else 443)
-            hint.update(url + ("  ·  apaga el túnel para cambiarlo" if on else ""))
+            hint.update(url)
             return
         btn.label = "Activar"
         if self.dom_for != b.name:
