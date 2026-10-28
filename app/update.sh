@@ -57,6 +57,8 @@ log "updating ${LOCAL:0:12} -> ${REMOTE:0:12}"
 git -C "$SRC" checkout -q main 2>>"$LOG" || git -C "$SRC" checkout -q -B main origin/main
 git -C "$SRC" reset --hard origin/main >>"$LOG" 2>&1
 bash "$SRC/app/install.sh" >>"$LOG" 2>&1
+# A running tunnel serves the new page from the next reload (commands.page).
+"$HOME/.local/bin/remote-control" page >>"$LOG" 2>&1 || true
 log "updated to $(git -C "$SRC" rev-parse --short HEAD)"
 trim_log
 exit "$UPDATED"

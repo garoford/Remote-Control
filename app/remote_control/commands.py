@@ -187,6 +187,10 @@ def update(argv: list[str]) -> int:
     updated = result["code"] == UPDATED_EXIT
     from remote_control import router
 
+    wrapper = Path.home() / ".local" / "bin" / "remote-control"
+    if updated:
+        # The new code builds it (this process still runs the old one).
+        ui.run("Página web", lambda detail: subprocess.run([str(wrapper), "page"], capture_output=True, check=False) and "al día · recarga el navegador")
     if updated and router.service_active():
         # The domains' router runs the code it started with.
         ui.run("Router de dominios", lambda detail: router.ensure_service() or "reiniciado")
@@ -196,7 +200,6 @@ def update(argv: list[str]) -> int:
             boxes = multi.list_boxes()
         except multi.MultiError:
             boxes = []
-    wrapper = Path.home() / ".local" / "bin" / "remote-control"
     failed = False
     if boxes:
         ui.section("Contenedores")
@@ -246,4 +249,18 @@ def update(argv: list[str]) -> int:
     return 1 if failed else 0
 
 
-COMMANDS = {"status": status, "stop": stop, "password": password, "update": update}
+def page(_argv: list[str]) -> int:
+    """The page a running tunnel serves, rebuilt from the installed code. ttyd
+    reads it on every load: page fixes reach a reload, no tunnel restart."""
+    from remote_control.tunnel import TunnelService
+
+    service = TunnelService()
+    if not service.ttyd_index.is_file():
+        return 0  # no tunnel has run here: the next start builds it
+    service._prepare_rc_assets()
+    service._prepare_ttyd_index()
+    print("Página web al día (recarga el navegador)")
+    return 0
+
+
+COMMANDS = {"status": status, "stop": stop, "password": password, "update": update, "page": page}
