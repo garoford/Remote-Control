@@ -420,12 +420,28 @@ def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
         setup_env(name, log)
 
 
-def setup_env(name: str, log=lambda _line: None) -> None:
+ENV_DONE = f"{HOME}/.config/remote-control/env-done"
+
+
+def setup_env(name: str, log=lambda _line: None, force: bool = False) -> None:
     """The PC's terminal inside: zsh, Oh My Posh, plugins, tools, Node, Bun and
-    the AI CLIs (container_setup.sh). Skips what is there: quick on updates."""
+    the AI CLIs (container_setup.sh). Only when that script changed since its
+    last complete run here (or something was left to install): an update is
+    otherwise just copying Remote Control."""
     script = f"{HOME}/.local/share/remote-control/remote_control/container_setup.sh"
+    digest = hashlib.sha256(SETUP_SCRIPT.read_bytes()).hexdigest()[:16]
+    if not force:
+        try:
+            if run(name, "cat", ENV_DONE, check=False).strip() == digest:
+                log("Entorno al día")
+                return
+        except MultiError:
+            pass
+    log("Preparando el entorno (zsh, Node, CLIs de IA)…")
     # Streamed: it takes minutes the first time, each step shows as it starts.
-    run(name, "bash", script, timeout=1800, check=False, log=log)
+    out = run(name, "bash", script, timeout=1800, check=False, log=log)
+    if "Sin instalar" not in out and "Entorno listo" in out:
+        run(name, "sh", "-c", f'printf %s "$1" > {ENV_DONE}', "sh", digest, check=False)
 
 
 def tunnel_status(name: str) -> dict:

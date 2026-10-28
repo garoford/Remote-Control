@@ -563,7 +563,7 @@ class MultiWindow(Adw.ApplicationWindow):
             self.state_chip.remove_css_class(cls)
             self.hero.remove_css_class(cls)
         if busy:
-            kind, text = "busy", "Un momento…"
+            kind, text = "busy", getattr(self, "_busy_text", "") or "Un momento…"
         elif not b.running:
             kind, text = "off", "Contenedor apagado"
         elif on:
@@ -612,6 +612,7 @@ class MultiWindow(Adw.ApplicationWindow):
 
         def done(result, error):
             self._busy.discard(name)
+            self._busy_text = ""
             if error:
                 self._toast(f"No se pudo: {error.splitlines()[0]}", 6)
             elif ok:
@@ -681,7 +682,13 @@ class MultiWindow(Adw.ApplicationWindow):
         if not b.running:
             self._toast("Enciende el contenedor primero")
             return
-        self._do(b.name, lambda: multi.install_rc(b.name), "Remote Control actualizado adentro (aplica al reiniciar su túnel)")
+        def step(line: str) -> None:
+            # What it is doing, in the status chip (the environment can take minutes).
+            if line.strip():
+                self._busy_text = line.strip()[:60]
+                GLib.idle_add(lambda: self._paint_panel() and False)
+
+        self._do(b.name, lambda: multi.install_rc(b.name, log=step), "Remote Control actualizado adentro (aplica al reiniciar su túnel)")
 
     def _copy(self, text: str, message: str) -> None:
         display = Gdk.Display.get_default()

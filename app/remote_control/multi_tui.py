@@ -213,6 +213,7 @@ class MultiTUI(App):
         self.selected: str | None = None
         self.tunnel: dict = {}
         self.busy_name: str | None = None
+        self.busy_text = ""
         self._qr_for = ""
 
     def compose(self) -> ComposeResult:
@@ -345,7 +346,7 @@ class MultiTUI(App):
         hero = self.query_one("#mhero")
         hero.set_classes(f"card {kind}")
         self.query_one("#mname", Static).update(b.name)
-        text = "● Un momento…" if busy else "● En línea" if on else "● Túnel apagado" if b.running else "● Contenedor apagado"
+        text = f"● {self.busy_text or 'Un momento…'}" if busy else "● En línea" if on else "● Túnel apagado" if b.running else "● Contenedor apagado"
         chip = self.query_one("#status-chip", Static)
         chip.set_classes(f"chip {kind}")
         chip.update(text)
@@ -550,6 +551,7 @@ class MultiTUI(App):
                     self.call_from_thread(after, result)
             finally:
                 self.busy_name = None
+                self.busy_text = ""
                 self.call_from_thread(self.refresh_boxes)
 
         self.run_worker(run, thread=True, group="act")
@@ -600,7 +602,13 @@ class MultiTUI(App):
     def update_rc(self) -> None:
         b = self.box()
         if b is not None and b.running:
-            self.act(lambda: multi.install_rc(b.name), "Remote Control actualizado adentro")
+            def step(line: str) -> None:
+                # What it is doing, in the status chip (the environment can take minutes).
+                if line.strip():
+                    self.busy_text = line.strip()[:60]
+                    self.call_from_thread(self.paint_panel)
+
+            self.act(lambda: multi.install_rc(b.name, log=step), "Remote Control actualizado adentro")
         elif b is not None:
             self.notify("Enciende el contenedor primero", severity="warning")
 

@@ -14,22 +14,31 @@ FAILED=()
 have() { command -v "$1" >/dev/null 2>&1; }
 step() { printf '%s\n' "$*"; }
 try() {
-  # One part failing (no network for one site…) does not stop the rest.
-  local what="$1"
+  # One part failing (no network for one site…) does not stop the rest; its
+  # last line says why.
+  local what="$1" out
   shift
-  "$@" >/dev/null 2>&1 || FAILED+=("$what")
+  if ! out=$("$@" 2>&1); then
+    FAILED+=("$what")
+    step "  ✗ $what: $(printf '%s\n' "$out" | grep -v '^\s*$' | tail -n 1 | cut -c1-160)"
+  fi
 }
 
 mkdir -p "$HOME/.local/bin" "$HOME/.zsh" "$HOME/.config/oh-my-posh" "$HOME/.config/remote-control"
 
 # --- system packages -------------------------------------------------------------
 step "Herramientas del sistema…"
+# The package manager only when something is missing: even with nothing to
+# install it downloads the distro's indexes first (~100 MB on Fedora).
 if have dnf; then
-  try "paquetes" sudo dnf -y -q install zsh git curl unzip tar which fzf bat ripgrep jq htop nano vim-enhanced less
+  PKGS=(zsh git curl unzip tar which fzf bat ripgrep jq htop nano vim-enhanced less)
+  rpm -q "${PKGS[@]}" >/dev/null 2>&1 || try "paquetes" sudo dnf -y -q install "${PKGS[@]}"
 elif have apt-get; then
-  try "apt update" sudo apt-get update -q
-  try "paquetes" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-    zsh git curl unzip tar fzf bat ripgrep jq htop nano vim less
+  PKGS=(zsh git curl unzip tar fzf bat ripgrep jq htop nano vim less)
+  if ! dpkg -s "${PKGS[@]}" >/dev/null 2>&1; then
+    try "apt update" sudo apt-get update -q
+    try "paquetes" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${PKGS[@]}"
+  fi
   # Debian/Ubuntu call bat "batcat".
   have bat || { have batcat && ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"; }
 fi

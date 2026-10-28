@@ -139,6 +139,26 @@ class InsideTests(unittest.TestCase):
             info = tar.getmembers()[0]
             self.assertEqual((info.name, info.uid, info.mode, tar.extractfile(info).read()), ("gate", 1000, 0o600, b"Nueva123\n"))
 
+    def test_the_environment_only_runs_when_its_script_changed(self) -> None:
+        digest = __import__("hashlib").sha256(multi.SETUP_SCRIPT.read_bytes()).hexdigest()[:16]
+        calls = []
+
+        def fake_run(name, *args, **kw):
+            calls.append(args)
+            if args[0] == "cat":
+                return digest if done else ""
+            return "Entorno listo\n" if args[0] == "bash" else ""
+
+        lines = []
+        done = True
+        with mock.patch.object(multi, "run", fake_run):
+            multi.setup_env("ia", log=lines.append)
+            self.assertEqual([c[0] for c in calls], ["cat"])
+            self.assertEqual(lines, ["Entorno al día"])
+            done, calls[:] = False, []
+            multi.setup_env("ia")
+        self.assertEqual([c[0] for c in calls], ["cat", "bash", "sh"])  # ran, then remembered
+
     def test_the_image_is_built_once(self) -> None:
         import tempfile
 
