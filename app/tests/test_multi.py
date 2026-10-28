@@ -34,6 +34,8 @@ class FakePodman:
         self.calls.append(args)
         if args[0] == "ps":
             return json.dumps(self.ps)
+        if args[0] == "inspect":
+            return "".join(f"{item['Id']} /layers/{item['Id']}\n" for item in self.ps)
         if args[:2] == ("exec", "rc-nuevo") and "is-system-running" in args:
             return "running\n"
         return ""
@@ -42,8 +44,9 @@ class FakePodman:
 class ListTests(unittest.TestCase):
     def test_reads_our_containers_only_and_sorts_them(self) -> None:
         fake = FakePodman()
+        sizes = {"/layers/aaa": 2_400_000_000, "/layers/bbb": 1024}
         with mock.patch.object(multi, "podman", fake), mock.patch.object(multi, "_sizes", {}), \
-                mock.patch.object(multi, "_sizes_at", 0.0):
+                mock.patch.object(multi, "_sizes_at", 0.0), mock.patch.object(multi, "_layer_size", sizes.get):
             boxes = multi.list_boxes(wait_sizes=True)
         self.assertEqual([b.name for b in boxes], ["backend", "ia"])
         self.assertTrue(boxes[0].running)
@@ -54,7 +57,7 @@ class ListTests(unittest.TestCase):
         # --size walks every file of a container: minutes with a big one.
         fake = FakePodman()
         with mock.patch.object(multi, "podman", fake), mock.patch.object(multi, "_sizes", {}), \
-                mock.patch.object(multi, "_sizes_at", 1e18), mock.patch.object(multi.time, "monotonic", lambda: 1e18):
+                mock.patch.object(multi, "_sizes_lock", mock.Mock(acquire=lambda blocking: False)):
             boxes = multi.list_boxes()
         self.assertEqual([c for c in fake.calls if "--size" in c], [])
         self.assertEqual(multi.human_size(boxes[0].size), "midiendo…")

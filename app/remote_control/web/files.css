@@ -219,6 +219,34 @@ html.rc-touch .rcf-win {
   background: var(--rc-red);
 }
 
+.rcf-pin-zone {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 4px 0;
+  padding: 10px 12px;
+  border: 1.5px dashed var(--rcf-line);
+  border-radius: 8px;
+  color: var(--rc-muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.rcf-pin-zone svg {
+  width: 17px;
+  height: 17px;
+}
+
+.is-dragging-dirs .rcf-pin-zone {
+  display: flex;
+}
+
+.rcf-places.is-pin .rcf-pin-zone {
+  border-color: var(--rcf-accent);
+  background: var(--rcf-sel-strong);
+  color: var(--rc-text);
+}
+
 .rcf-sep {
   height: 1px;
   margin: 8px 12px;

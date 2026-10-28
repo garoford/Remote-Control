@@ -306,6 +306,8 @@ class MultiTUI(App):
         def work() -> None:
             try:
                 boxes = multi.list_boxes()
+                # The list first: the tunnel and autostart asks below can wait on podman.
+                self.call_from_thread(self.paint, boxes, None, None)
                 box = next((b for b in boxes if b.name == self.selected), None) or (boxes[0] if boxes and not self.selected else None)
                 tunnel = multi.tunnel_status(box.name) if box and box.running and box.name != self.busy_name else None
                 auto = multi.autostart(box.name) if box and box.running else None

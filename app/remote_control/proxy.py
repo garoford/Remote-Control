@@ -1134,6 +1134,7 @@ class Sidecar:
                 self._json(conn, fs.search(arg("path"), arg("q"), arg("hidden") == "1"))
             elif method == "GET" and route == "text":
                 self._json(conn, fs.text_preview(arg("path")))
+                fs.note_recent(fs.resolve(arg("path")))
             elif method == "GET" and route == "thumb":
                 found = fs.thumb(arg("path"))
                 if found is None:
@@ -1145,6 +1146,9 @@ class Sidecar:
                 )
             elif method in ("GET", "HEAD") and route == "file":
                 path, size, mime = fs.file_for_read(arg("path"))
+                # Once per opening: a video asks again for every stretch it plays.
+                if method == "GET" and headers.get("range", "bytes=0-").startswith("bytes=0-"):
+                    fs.note_recent(path)
                 name = path.name
                 self._send_file(conn, path, size, mime, headers, name if arg("dl") == "1" else "", method == "HEAD")
             elif method == "POST" and route == "op":
@@ -1181,7 +1185,10 @@ class Sidecar:
                 else:
                     self._json(conn, unpack.cancel(str(req.get("token") or "")))
             elif method == "GET" and route == "extract-status":
-                self._json(conn, unpack.status(arg("token")))
+                status = unpack.status(arg("token"))
+                self._json(conn, status)
+                if status.get("state") == "done" and status.get("path"):
+                    fs.note_recent(status["path"])
             elif method == "GET" and route == "zip-status":
                 self._json(conn, fs.zip_status(arg("token")))
             elif method == "GET" and route == "zip":

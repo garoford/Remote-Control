@@ -477,6 +477,8 @@ class MultiWindow(Adw.ApplicationWindow):
 
         def work():
             boxes = multi.list_boxes()
+            # The list first: the tunnel and autostart asks below can wait on podman.
+            GLib.idle_add(lambda: self._paint_list(boxes) and False)
             box = next((b for b in boxes if b.name == self.selected), None)
             tunnel = multi.tunnel_status(box.name) if box and box.running and box.name not in self._busy else None
             auto = multi.autostart(box.name) if box and box.running else None

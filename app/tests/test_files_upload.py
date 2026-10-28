@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from remote_control import files as fs
 
@@ -13,6 +14,10 @@ class FolderUploadTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        # Uploads go to the recents, in the home: this one's.
+        patch = mock.patch.object(fs, "_home", lambda: self.root)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_files_land_in_their_subfolders(self) -> None:
         made = fs.apply_op({"op": "mkdir", "dir": str(self.root), "name": "Proyecto"})

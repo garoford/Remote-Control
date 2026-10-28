@@ -7,14 +7,15 @@ password gate like the rest of /rc-.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
+import json
 import mimetypes
 import os
 import re
 import secrets
 import shutil
 import stat
-import subprocess
 import tempfile
 import threading
 import time
@@ -234,18 +235,11 @@ def places() -> dict:
         if os.path.isdir(path) and path != home:
             main.append({"name": label, "path": path, "icon": icon})
     main.append({"name": "Papelera", "path": "trash://", "icon": "trash"})
-    marks = []
-    try:
-        lines = (_home() / ".config" / "gtk-3.0" / "bookmarks").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
-        uri, _, label = line.strip().partition(" ")
-        if not uri.startswith("file://"):
-            continue
-        path = unquote(urlparse(uri).path)
-        if os.path.isdir(path):
-            marks.append({"name": label or os.path.basename(path) or path, "path": path, "icon": "folder"})
+    marks = [
+        {"name": label or os.path.basename(path) or path, "path": path, "icon": "folder", "pinned": True}
+        for path, label in _bookmarks()
+        if os.path.isdir(path)
+    ]
     other = [{"name": "Equipo", "path": "/", "icon": "drive", "usage": _usage("/")}]
     seen = {"/"}
     try:
@@ -264,19 +258,119 @@ def places() -> dict:
     return {"home": home, "main": main, "bookmarks": marks, "other": other}
 
 
-def recent() -> dict:
+# Recents: what was opened, previewed, downloaded, uploaded, created or
+# extracted here, plus GNOME's own list when there is one (on a server or a
+# container nothing writes it, so the explorer keeps its own).
+RECENT_KEEP = 200
+_recent_lock = threading.Lock()
+
+
+def _recent_file() -> Path:
+    return _home() / ".local" / "share" / "remote-control" / "recent.json"
+
+
+def _own_recent() -> dict[str, float]:
+    try:
+        data = json.loads(_recent_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: float(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, (int, float))} if isinstance(data, dict) else {}
+
+
+def note_recent(path: str | Path) -> None:
+    """Never fails: a recent not kept is no reason to fail what was asked."""
+    path = str(path)
+    try:
+        with _recent_lock:
+            seen = _own_recent()
+            seen[path] = time.time()
+            kept = dict(sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:RECENT_KEEP])
+            target = _recent_file()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(kept), encoding="utf-8")
+            tmp.replace(target)
+    except OSError:
+        pass
+
+
+def _gnome_recent() -> dict[str, float]:
     try:
         text = (_home() / ".local" / "share" / "recently-used.xbel").read_text(encoding="utf-8", errors="replace")
     except OSError:
-        text = ""
-    found: dict[str, str] = {}
+        return {}
+    found: dict[str, float] = {}
     for match in re.finditer(r'<bookmark href="([^"]+)"[^>]*?modified="([^"]+)"', text):
         uri, modified = match.group(1), match.group(2)
         if not uri.startswith("file://"):
             continue
+        try:
+            when = calendar.timegm(time.strptime(modified[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            continue
         path = unquote(urlparse(uri).path)
-        if found.get(path, "") < modified:
-            found[path] = modified
+        found[path] = max(found.get(path, 0.0), float(when))
+    return found
+
+
+# Folders pinned to the sidebar: GTK's bookmarks, the ones Nautilus shows too.
+
+def _bookmarks_file() -> Path:
+    return _home() / ".config" / "gtk-3.0" / "bookmarks"
+
+
+def _bookmarks() -> list[tuple[str, str]]:
+    """[(path, label)] in their order; other kinds (sftp://…) are kept by _pin, not listed."""
+    try:
+        lines = _bookmarks_file().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    marks = []
+    for line in lines:
+        uri, _, label = line.strip().partition(" ")
+        if uri.startswith("file://"):
+            marks.append((unquote(urlparse(uri).path), label))
+    return marks
+
+
+def _pin(paths: list[Path], on: bool, before: str = "") -> None:
+    """Pins (at the end, or before that pinned path) or unpins these folders."""
+    target = _bookmarks_file()
+    try:
+        lines = [l for l in target.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        lines = []
+    wanted = {str(p) for p in paths}
+
+    def path_of(line: str) -> str:
+        uri = line.strip().partition(" ")[0]
+        return unquote(urlparse(uri).path) if uri.startswith("file://") else ""
+
+    have = {path_of(l) for l in lines}
+    if not on:
+        lines = [l for l in lines if path_of(l) not in wanted]
+    elif before:
+        # Moved there, the pinned ones as well.
+        moved = [l for l in lines if path_of(l) in wanted]
+        lines = [l for l in lines if path_of(l) not in wanted]
+        new = moved + ["file://" + quote(str(p)) for p in paths if str(p) not in have]
+        at = next((i for i, l in enumerate(lines) if path_of(l) == before), len(lines))
+        lines[at:at] = new
+    else:
+        lines += ["file://" + quote(str(p)) for p in paths if str(p) not in have]
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+        tmp.replace(target)
+    except OSError as exc:
+        raise _err(exc, "fijar en la barra lateral")
+
+
+def recent() -> dict:
+    found = _gnome_recent()
+    for path, when in _own_recent().items():
+        found[path] = max(found.get(path, 0.0), when)
     entries = []
     for path, _ in sorted(found.items(), key=lambda kv: kv[1], reverse=True):
         if len(entries) >= RECENT_MAX:
@@ -311,73 +405,228 @@ def _stat_item(path: Path) -> dict | None:
     return item
 
 
-# --- trash (gio, so every mount's .Trash-1000 is included) --------------------
+# --- trash -----------------------------------------------------------------------
+# The freedesktop.org trash, by hand: gio lists trash:/// only with gvfs running
+# (containers and servers have none), and moved things into it anyway, so they
+# were there and the page never showed them. Same layout as Nautilus: files/ and
+# info/<name>.trashinfo in ~/.local/share/Trash, and .Trash-<uid> at the top of
+# another disk (a USB, /mnt/…). A trashed item's address is
+# trash:///<its path in files/, quoted>.
 
-GIO_ATTR_RE = re.compile(r" (?=(?:standard|trash)::[a-z-]+=)")
+TRASH_URI = "trash:///"
+# A disk of these gets a trash of its own; others (/, /tmp, /boot…) have none.
+TRASH_MOUNTS = ("/run/media/", "/media/", "/mnt/")
+NO_TRASH_MOUNTS = ("/proc", "/sys", "/dev", "/run/credentials", "/run/user")
+
+
+class NoTrash(FsError):
+    pass
+
+
+def _home_trash() -> Path:
+    return _home() / ".local" / "share" / "Trash"
+
+
+def _mount_points() -> list[str]:
+    try:
+        lines = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return []
+    points = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2:
+            points.append(parts[1].encode("latin1").decode("unicode_escape"))
+    return points
+
+
+def _top_trash(top: Path, create: bool) -> Path | None:
+    uid = os.getuid()
+    shared = top / ".Trash"
+    try:
+        st = os.lstat(shared)
+        if stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and (shared / str(uid)).is_dir():
+            return shared / str(uid)
+    except OSError:
+        pass
+    own = top / f".Trash-{uid}"
+    if own.is_dir() and not own.is_symlink():
+        return own
+    if create:
+        try:
+            own.mkdir(mode=0o700)
+            return own
+        except OSError:
+            return None
+    return None
+
+
+def _trash_dirs() -> list[Path]:
+    dirs = [_home_trash()]
+    for point in _mount_points():
+        if point != "/" and not point.startswith(NO_TRASH_MOUNTS):
+            found = _top_trash(Path(point), False)
+            if found:
+                dirs.append(found)
+    return dirs
+
+
+def _trash_for(path: Path) -> Path:
+    """Where this item goes: the home trash on the home's disk, else its disk's own."""
+    home_trash = _home_trash()
+    try:
+        home_trash.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.lstat(path).st_dev == os.stat(home_trash).st_dev:
+            return home_trash
+    except OSError as exc:
+        raise _err(exc, "mover a la papelera " + path.name)
+    dev = os.lstat(path).st_dev
+    top = path.parent
+    while top.parent != top and os.stat(top.parent).st_dev == dev:
+        top = top.parent
+    if str(top).startswith(TRASH_MOUNTS) or top.is_relative_to(_home()):
+        found = _top_trash(top, True)
+        if found:
+            return found
+    raise NoTrash("Aquí no hay papelera")
+
+
+def _trash_one(path: Path) -> str:
+    trash = _trash_for(path)
+    files, info = trash / "files", trash / "info"
+    files.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # On another disk the path is relative to it, as the spec asks.
+    orig = str(path) if trash == _home_trash() else os.path.relpath(path, trash.parent)
+    stem, ext = os.path.splitext(path.name) if path.is_file() else (path.name, "")
+    for n in range(1, 10000):
+        name = path.name if n == 1 else f"{stem}.{n}{ext}"
+        try:
+            fd = os.open(info / f"{name}.trashinfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise _err(exc, "mover a la papelera " + path.name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(f"[Trash Info]\nPath={quote(orig)}\nDeletionDate={time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+        try:
+            os.rename(path, files / name)
+        except OSError as exc:
+            (info / f"{name}.trashinfo").unlink(missing_ok=True)
+            raise _err(exc, "mover a la papelera " + path.name)
+        return TRASH_URI + quote(str(files / name), safe="")
+    raise FsError("La papelera tiene demasiados con ese nombre")
+
+
+def _trashed(uri: str) -> tuple[Path, Path, Path]:
+    """(the item in files/, its .trashinfo, its trash) of a trash:/// address."""
+    if not isinstance(uri, str) or not uri.startswith(TRASH_URI):
+        raise FsError("No está en la papelera")
+    item = Path(os.path.normpath(unquote(uri[len(TRASH_URI):])))
+    for trash in _trash_dirs():
+        if item.parent == trash / "files" and item.name not in ("", ".", ".."):
+            return item, trash / "info" / f"{item.name}.trashinfo", trash
+    raise FsError("No está en la papelera")
+
+
+def _read_info(info: Path, trash: Path) -> tuple[str, int]:
+    """(its original path, when it was trashed)."""
+    orig, when = "", 0
+    try:
+        lines = info.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return orig, when
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key == "Path":
+            orig = unquote(value.strip())
+            if orig and not orig.startswith("/"):
+                orig = os.path.normpath(str(trash.parent / orig))
+        elif key == "DeletionDate":
+            try:
+                when = int(time.mktime(time.strptime(value.strip(), "%Y-%m-%dT%H:%M:%S")))
+            except ValueError:
+                pass
+    return orig, when
 
 
 def trash_list() -> dict:
-    result = subprocess.run(
-        [
-            "gio", "list", "-u", "-a",
-            "standard::size,standard::type,standard::display-name,standard::content-type,"
-            "trash::orig-path,trash::deletion-date",
-            "trash:///",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
     entries = []
-    for line in result.stdout.splitlines():
-        parts = line.split("\t", 3)
-        if len(parts) < 4:
-            continue
-        uri, size, kind, attrs = parts
-        info: dict[str, str] = {}
-        for chunk in GIO_ATTR_RE.split(attrs):
-            key, _, value = chunk.partition("=")
-            info[key.strip()] = value
-        is_dir = "directory" in kind
-        deleted = info.get("trash::deletion-date", "")
+    for trash in _trash_dirs():
         try:
-            mtime = int(time.mktime(time.strptime(deleted, "%Y-%m-%dT%H:%M:%S")))
-        except ValueError:
-            mtime = 0
-        name = info.get("standard::display-name") or uri.rsplit("/", 1)[-1]
-        entries.append(
-            {
-                "name": name,
-                "path": uri,
-                "kind": "dir" if is_dir else "file",
-                "link": False,
-                "broken": False,
-                "size": 0 if is_dir else int(size or 0),
-                "mtime": mtime,
-                "mime": info.get("standard::content-type") or "application/octet-stream",
-                "hidden": False,
-                "orig": info.get("trash::orig-path", ""),
-            }
-        )
+            names = os.listdir(trash / "files")
+        except OSError:
+            continue
+        for name in names:
+            item = trash / "files" / name
+            orig, when = _read_info(trash / "info" / f"{name}.trashinfo", trash)
+            try:
+                st = os.lstat(item)
+            except OSError:
+                continue
+            is_dir = stat.S_ISDIR(st.st_mode)
+            entries.append(
+                {
+                    "name": os.path.basename(orig) or name,
+                    "path": TRASH_URI + quote(str(item), safe=""),
+                    "kind": "dir" if is_dir else "file",
+                    "link": stat.S_ISLNK(st.st_mode),
+                    "broken": False,
+                    "size": 0 if is_dir else st.st_size,
+                    "mtime": when or int(st.st_mtime),
+                    "mime": _mime(item, is_dir),
+                    "hidden": False,
+                    "orig": orig,
+                }
+            )
     return {"path": "trash://", "parent": "", "writable": False, "entries": entries}
 
 
-def _trash_uris() -> dict[str, str]:
-    result = subprocess.run(["gio", "trash", "--list"], capture_output=True, text=True, timeout=15, check=False)
-    out = {}
-    for line in result.stdout.splitlines():
-        uri, _, orig = line.partition("\t")
-        if uri.startswith("trash:///"):
-            out[uri] = orig
-    return out
+def _trash_restore(uri: str) -> str:
+    item, info, trash = _trashed(uri)
+    orig, _ = _read_info(info, trash)
+    if not orig:
+        raise FsError("No sé de dónde vino " + item.name)
+    target = Path(orig)
+    if os.path.lexists(target):
+        raise FsError(f"Ya existe «{target.name}» en {target.parent}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(item, target)
+    except OSError as exc:
+        raise _err(exc, "restaurar " + target.name)
+    info.unlink(missing_ok=True)
+    return str(target)
 
 
-def _gio(*args: str) -> None:
-    result = subprocess.run(["gio", *args], capture_output=True, text=True, timeout=120, check=False)
-    if result.returncode != 0:
-        msg = (result.stderr or "").strip().splitlines()
-        raise FsError(msg[-1] if msg else "gio falló")
+def _remove_tree(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _trash_delete(uri: str) -> None:
+    item, info, _ = _trashed(uri)
+    try:
+        _remove_tree(item)
+    except OSError as exc:
+        raise _err(exc, "eliminar " + item.name)
+    info.unlink(missing_ok=True)
+
+
+def _trash_empty() -> None:
+    for trash in _trash_dirs():
+        for sub in ("files", "info"):
+            try:
+                children = list((trash / sub).iterdir())
+            except OSError:
+                continue
+            for child in children:
+                try:
+                    _remove_tree(child)
+                except OSError as exc:
+                    raise _err(exc, "vaciar la papelera")
 
 
 # --- search ----------------------------------------------------------------------
@@ -532,6 +781,8 @@ def apply_op(op: dict) -> dict:
                 target.touch(exist_ok=False)
         except OSError as exc:
             raise _err(exc, "crear " + target.name)
+        if kind == "newfile":
+            note_recent(target)
         return {"ok": True, "path": str(target)}
     if kind == "rename":
         src = _existing(op.get("path"))
@@ -567,19 +818,23 @@ def apply_op(op: dict) -> dict:
         for src in paths:
             if _protected(src):
                 raise FsError("Esa carpeta no se puede mover a la papelera")
-        before = set(_trash_uris())
         try:
-            _gio("trash", "--", *[str(p) for p in paths])
-        except FsError as exc:
-            if "not supported" in str(exc) or "no soporta" in str(exc):
-                # /tmp and other system mounts have no trash: the page offers
-                # deleting for good instead, like Nautilus.
-                return {"ok": False, "noTrash": True, "error": "Aquí no hay papelera"}
-            raise
-        after = _trash_uris()
-        wanted = {str(p) for p in paths}
-        uris = [uri for uri, orig in after.items() if uri not in before and orig in wanted]
-        return {"ok": True, "trashed": uris}
+            for src in paths:
+                _trash_for(src)
+        except NoTrash:
+            # /tmp and other system disks have no trash: the page offers
+            # deleting for good instead, like Nautilus.
+            return {"ok": False, "noTrash": True, "error": "Aquí no hay papelera"}
+        return {"ok": True, "trashed": [_trash_one(src) for src in paths]}
+    if kind == "pin":
+        raw = [p for p in (op.get("paths") or []) if isinstance(p, str)][:100]
+        on = bool(op.get("on", True))
+        # Unpinning one that no longer exists is fine; pinning asks for a folder.
+        paths = [_folder(p) if on else resolve(p) for p in raw]
+        if not paths:
+            raise FsError("No hay carpetas que fijar")
+        _pin(paths, on, str(op.get("before") or ""))
+        return {"ok": True}
     if kind == "delete":
         paths = [_existing(p) for p in (op.get("paths") or [])][:5000]
         for src in paths:
@@ -595,17 +850,14 @@ def apply_op(op: dict) -> dict:
                 raise _err(exc, "eliminar " + src.name)
         return {"ok": True}
     if kind == "restore":
-        uris = [u for u in (op.get("uris") or []) if isinstance(u, str) and u.startswith("trash:///")]
-        for uri in uris:
-            _gio("trash", "--restore", uri)
-        return {"ok": True}
+        uris = [u for u in (op.get("uris") or []) if isinstance(u, str)]
+        return {"ok": True, "paths": [_trash_restore(uri) for uri in uris]}
     if kind == "deleteForever":
-        uris = [u for u in (op.get("uris") or []) if isinstance(u, str) and u.startswith("trash:///")]
-        for uri in uris:
-            _gio("remove", "-f", uri)
+        for uri in [u for u in (op.get("uris") or []) if isinstance(u, str)]:
+            _trash_delete(uri)
         return {"ok": True}
     if kind == "emptyTrash":
-        _gio("trash", "--empty")
+        _trash_empty()
         return {"ok": True}
     if kind == "props":
         path = _existing(op.get("path"))
@@ -691,6 +943,7 @@ def upload_chunk(dir_raw: str, name_raw: str, offset: int, total: int, body: byt
         return {"ok": True, "done": False, "received": offset + len(body)}
     target = free_name(folder, name)
     os.replace(part, target)
+    note_recent(target)
     return {"ok": True, "done": True, "path": str(target), "name": target.name}
 
 

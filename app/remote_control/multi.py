@@ -273,29 +273,38 @@ def prepare_image(base: str, log=lambda _line: None) -> None:
             build_image(base, log)
 
 
-# `podman ps --size` walks every file a container wrote: with hundreds of
-# thousands it takes minutes and holds podman's lock, so the listing is the
-# plain `ps` and the sizes come from a scan of their own, at most one at a time
-# and every SIZE_TTL_S, kept here.
+# `podman ps --size` walks every file a container wrote and holds podman's
+# lock meanwhile (an exec waits for it). So the listing is the plain `ps`, and
+# the sizes are `du` of each container's own layer, outside podman: one scan at
+# a time, every SIZE_TTL_S, kept here.
 SIZE_TTL_S = 300
 _sizes: dict[str, int] = {}
 _sizes_at = 0.0
 _sizes_lock = threading.Lock()
 
 
-def _scan_sizes() -> None:
+def _layer_size(path: str) -> int:
+    # du ends with 1 on a file it cannot read but still prints the total.
+    res = subprocess.run(["du", "-sbx", path], capture_output=True, text=True, timeout=1800, check=False)
+    first = res.stdout.split(None, 1)
+    return int(first[0]) if first and first[0].isdigit() else -1
+
+
+def _scan_sizes(ids: list[str]) -> None:
     global _sizes_at
     if not _sizes_lock.acquire(blocking=False):
         return
     try:
-        out = podman("ps", "-a", "--size", "--filter", f"label={LABEL}", "--format", "json", timeout=1800, check=False)
         found = {}
-        for item in json.loads(out or "[]"):
-            size = item.get("Size") or {}
-            found[item.get("Id", "")] = int(size.get("rwSize") or 0) if isinstance(size, dict) else 0
+        if ids:
+            out = podman("inspect", "--format", "{{.Id}} {{.GraphDriver.Data.UpperDir}}", *ids, check=False)
+            for line in out.splitlines():
+                cid, _, upper = line.partition(" ")
+                if cid in ids and upper.startswith("/"):
+                    found[cid] = _layer_size(upper)
         _sizes.clear()
         _sizes.update(found)
-    except (MultiError, ValueError):
+    except (MultiError, OSError, subprocess.SubprocessError):
         pass
     finally:
         _sizes_at = time.monotonic()
@@ -303,13 +312,14 @@ def _scan_sizes() -> None:
 
 
 def list_boxes(wait_sizes: bool = False) -> list[Box]:
-    out = podman("ps", "-a", "--filter", f"label={LABEL}", "--format", "json")
+    items = json.loads(podman("ps", "-a", "--filter", f"label={LABEL}", "--format", "json") or "[]")
+    ids = [item.get("Id", "") for item in items if item.get("Id")]
     if wait_sizes:
-        _scan_sizes()
-    elif not _sizes_at or time.monotonic() - _sizes_at > SIZE_TTL_S:
-        threading.Thread(target=_scan_sizes, daemon=True).start()
+        _scan_sizes(ids)
+    elif not _sizes_at or time.monotonic() - _sizes_at > SIZE_TTL_S or any(i not in _sizes for i in ids):
+        threading.Thread(target=_scan_sizes, args=(ids,), daemon=True).start()
     boxes = []
-    for item in json.loads(out or "[]"):
+    for item in items:
         labels = item.get("Labels") or {}
         # The container's own name first: a rename changes it, not the label.
         name = (item.get("Names") or [""])[0].removeprefix(PREFIX) or labels.get(f"{LABEL}.name", "")

@@ -62,6 +62,8 @@
     videos: stroke("M4 6h12v12H4zM16 10l4-2v8l-4-2"),
     drive: stroke("M3 14h18v5H3zM5 14l2-9h10l2 9M7 16.5h.01"),
     folder: stroke("M4 6h6l2 2h8v10H4z"),
+    pin: stroke("M9 4h6l-1 6 3 3H7l3-3zM12 13v7"),
+    unpin: stroke("M9 4h6l-1 6 3 3H7l3-3zM12 13v7M4 4l16 16"),
     star: stroke("M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"),
   };
 
@@ -381,6 +383,33 @@
     side.appendChild(sideHead);
     ui.places = el("nav", "rcf-places");
     side.appendChild(ui.places);
+    // Folders dropped on the sidebar (not onto a place, that moves them in) are pinned.
+    ui.places.addEventListener("dragover", function (ev) {
+      if (!dragDirs.length || ev.target.closest("[data-drop]")) {
+        ui.places.classList.remove("is-pin");
+        return;
+      }
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "link";
+      ui.places.classList.add("is-pin");
+    });
+    ui.places.addEventListener("dragleave", function (ev) {
+      if (!ui.places.contains(ev.relatedTarget)) ui.places.classList.remove("is-pin");
+    });
+    ui.places.addEventListener("drop", function (ev) {
+      ui.places.classList.remove("is-pin");
+      if (!dragDirs.length || ev.target.closest("[data-drop]")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var dirs = dragDirs.filter(function (d) {
+        return !isPinned(d);
+      });
+      dragPaths = null;
+      dragDirs = [];
+      root.classList.remove("is-dragging-dirs");
+      if (dirs.length) pinFolders(dirs, true);
+      else toast("Ya está en la barra lateral");
+    });
     ui.side = side;
     ui.sideShade = el("div", "rcf-side-shade");
     ui.sideShade.addEventListener("click", function () {
@@ -761,6 +790,7 @@
         }
       });
       if (item.path.indexOf("://") === -1) dropTarget(b, item.path);
+      if (item.pinned) pinnedMenu(b, item);
       return b;
     }
     places.main.forEach(function (p) {
@@ -772,11 +802,76 @@
         nav.appendChild(row(Object.assign({ icon: "folder" }, p)));
       });
     }
+    // Shown while folders are dragged: dropped here they are pinned.
+    var zone = el("div", "rcf-pin-zone");
+    zone.innerHTML = I.pin;
+    zone.appendChild(el("span", "", "Suelta aquí para fijar"));
+    nav.appendChild(zone);
     nav.appendChild(el("div", "rcf-sep"));
     nav.appendChild(el("div", "rcf-place-title", "Otras ubicaciones"));
     places.other.forEach(function (p) {
       nav.appendChild(row(p));
     });
+  }
+
+  function isPinned(path) {
+    return !!(places && places.bookmarks.some(function (b) {
+      return b.path === path;
+    }));
+  }
+  function pinFolders(paths, on) {
+    if (!paths.length) return;
+    op({ op: "pin", paths: paths, on: on }).then(function (r) {
+      if (!r.ok) return toast(r.error || "No pude cambiar la barra lateral");
+      toast(
+        (paths.length === 1 ? "«" + baseName(paths[0]) + "»" : paths.length + " carpetas") +
+          (on ? " fijada" + (paths.length === 1 ? "" : "s") + " en la barra lateral" : " ya no está" + (paths.length === 1 ? "" : "n") + " en la barra lateral")
+      );
+      loadPlaces();
+    });
+  }
+  function pinnedMenu(b, item) {
+    function show(point) {
+      popover(null, point, [
+        { icon: I.tab, label: "Abrir en pestaña nueva", fn: function () { openInNewTab(item.path); } },
+        { icon: I.terminal, label: "Abrir en terminal", fn: function () { openTerminal(item.path); } },
+        "-",
+        { icon: I.unpin, label: "Quitar de la barra lateral", fn: function () { pinFolders([item.path], false); } },
+      ]);
+    }
+    b.addEventListener("contextmenu", function (ev) {
+      ev.preventDefault();
+      show({ x: ev.clientX, y: ev.clientY });
+    });
+    // iOS has no contextmenu: a long press of our own.
+    var timer = 0;
+    var fired = false;
+    b.addEventListener("pointerdown", function (ev) {
+      if (ev.pointerType === "mouse") return;
+      fired = false;
+      var x = ev.clientX;
+      var y = ev.clientY;
+      timer = setTimeout(function () {
+        fired = true;
+        if (navigator.vibrate) {
+          try {
+            navigator.vibrate(12);
+          } catch (_) {}
+        }
+        show({ x: x, y: y });
+      }, 450);
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach(function (type) {
+      b.addEventListener(type, function () {
+        clearTimeout(timer);
+      });
+    });
+    b.addEventListener("click", function (ev) {
+      if (!fired) return;
+      fired = false;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }, true);
   }
 
   // --- rendering ------------------------------------------------------------------------------
@@ -925,12 +1020,22 @@
         if (!t.sel[it.path]) selectOnly(t, it.path);
         var paths = selPaths(t);
         dragPaths = paths;
+        dragDirs = selItems(t)
+          .filter(function (x) {
+            return x.kind === "dir";
+          })
+          .map(function (x) {
+            return x.path;
+          });
+        if (dragDirs.length) root.classList.add("is-dragging-dirs");
         ev.dataTransfer.effectAllowed = "copyMove";
         ev.dataTransfer.setData("text/plain", paths.join("\n"));
         ev.dataTransfer.setData("application/x-rc-files", JSON.stringify(paths));
       });
       node.addEventListener("dragend", function () {
         dragPaths = null;
+        dragDirs = [];
+        root.classList.remove("is-dragging-dirs");
       });
       if (it.kind === "dir") dropTarget(node, it.path);
     }
@@ -1298,6 +1403,7 @@
   // --- body events: click, double click, rubber band, long press ----------------------------------
 
   var dragPaths = null;
+  var dragDirs = [];
 
   function bootBody() {
     var body = ui.body;
@@ -1599,11 +1705,27 @@
       dir && clip ? { icon: I.paste, label: "Pegar en la carpeta", fn: function () { pasteInto(one.path); } } : null,
       { icon: I.copy, label: items.length > 1 ? "Copiar rutas" : "Copiar ruta", fn: copyPathText },
       "-",
+      pinItem(items),
       one ? { icon: I.rename, label: "Renombrar…", fn: function () { renameItem(one); }, key: "F2" } : null,
       { icon: I.trash, label: "Mover a la papelera", fn: trashSel, key: "Supr", danger: true },
       "-",
       { icon: I.info, label: "Propiedades", fn: function () { properties(one || null); } },
     ]);
+  }
+
+  function pinItem(items) {
+    var dirs = items
+      .filter(function (x) {
+        return x.kind === "dir";
+      })
+      .map(function (x) {
+        return x.path;
+      });
+    if (!dirs.length || dirs.length !== items.length) return null;
+    var all = dirs.every(isPinned);
+    return all
+      ? { icon: I.unpin, label: "Quitar de la barra lateral", fn: function () { pinFolders(dirs, false); } }
+      : { icon: I.pin, label: "Fijar en la barra lateral", fn: function () { pinFolders(dirs.filter(function (d) { return !isPinned(d); }), true); } };
   }
 
   function bgMenu(point) {
