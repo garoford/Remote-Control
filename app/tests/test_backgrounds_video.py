@@ -324,5 +324,34 @@ class StillSourceTests(unittest.TestCase):
 
 
 
+class CompleteTests(unittest.TestCase):
+    """A video kept as it came (no ffmpeg then) gets its still and light version later."""
+
+    def test_missing_poster_and_light_are_made_when_asked(self) -> None:
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from remote_control import backgrounds
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("sin ffmpeg")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(backgrounds, "folder", lambda: Path(tmp)):
+            vid = "0123456789abcdef"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "2",
+                            "-pix_fmt", "yuv420p", str(Path(tmp) / f"{vid}.mp4")], check=True)
+            poster = backgrounds.video_file(vid, "poster")
+            self.assertTrue(poster and poster.name == f"{vid}.poster.jpg" and poster.stat().st_size > 0)
+            self.assertEqual(backgrounds.video_file(vid, "light").name, f"{vid}.mp4")  # meanwhile
+            for _ in range(200):
+                if backgrounds.video_file(vid, "light").name.startswith(f"{vid}.light."):
+                    break
+                time.sleep(0.1)
+            self.assertTrue(backgrounds.video_file(vid, "light").name.startswith(f"{vid}.light."))
+
+
 if __name__ == "__main__":
     unittest.main()

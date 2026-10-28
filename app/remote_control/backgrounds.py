@@ -428,12 +428,13 @@ def video_file(vid: str, which: str) -> Path | None:
     base = folder()
     if which == "poster":
         path = base / f"{vid}.poster.jpg"
-        return path if path.is_file() else None
+        return path if path.is_file() else _complete_poster(vid)
     if which == "light":
         for ext in ("mp4", "webm"):
             path = base / f"{vid}.light.{ext}"
             if path.is_file():
                 return path
+        _complete_light(vid)
         which = "full"
     if which == "full":
         for ext in ("mp4", "webm"):
@@ -831,6 +832,72 @@ def _process(work: Path, vid: str, source: str) -> None:
         work.unlink(missing_ok=True)
         with _jobs_lock:
             _jobs.discard(vid)
+
+
+# A video kept as it came (added while this machine had no ffmpeg) gets what
+# it lacks the first time it is asked for: its still now, its light version
+# for phones in the background (the full one is served meanwhile).
+_completing: set[str] = set()
+
+
+def _full_file(vid: str) -> Path | None:
+    for ext in ("mp4", "webm"):
+        path = folder() / f"{vid}.{ext}"
+        if path.is_file():
+            return path
+    return None
+
+
+def _complete_poster(vid: str) -> Path | None:
+    full, ffmpeg = _full_file(vid), shutil.which("ffmpeg")
+    if full is None or not ffmpeg:
+        return None
+    path = folder() / f"{vid}.poster.jpg"
+    with _thumb_lock:
+        if path.is_file():
+            return path
+        tmp = folder() / f".{vid}.poster.jpg"
+        try:
+            subprocess.run(
+                [ffmpeg, "-v", "error", "-y", "-ss", "1", "-i", str(full), "-frames:v", "1", "-vf", f"scale=640:-2:{STILL_FILTER}", "-q:v", "4", "-f", "image2", str(tmp)],
+                capture_output=True,
+                timeout=60,
+                check=True,
+            )
+            os.replace(tmp, path)
+        except (OSError, subprocess.SubprocessError):
+            tmp.unlink(missing_ok=True)
+            return None
+    return path
+
+
+def _complete_light(vid: str) -> None:
+    full, ffmpeg = _full_file(vid), shutil.which("ffmpeg")
+    if full is None or not ffmpeg:
+        return
+    with _jobs_lock:
+        if vid in _completing or vid in _jobs:
+            return
+        _completing.add(vid)
+
+    def work() -> None:
+        try:
+            with _encode_lock:
+                for enc in encoders(ffmpeg):
+                    tmp = folder() / f".{vid}.light.{enc[1]}"
+                    try:
+                        done = subprocess.run(encode_cmd(ffmpeg, full, tmp, enc, LIGHT), capture_output=True, timeout=3600, check=False)
+                    except (OSError, subprocess.SubprocessError):
+                        done = None
+                    if done is not None and done.returncode == 0 and tmp.is_file():
+                        os.replace(tmp, folder() / f"{vid}.light.{enc[1]}")
+                        return
+                    tmp.unlink(missing_ok=True)
+        finally:
+            with _jobs_lock:
+                _completing.discard(vid)
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 def delete_video(vid: str) -> bool:
