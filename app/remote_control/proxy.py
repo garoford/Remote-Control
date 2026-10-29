@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from remote_control.gate import COOKIE_MAX_AGE, LOGIN_PAGE, Gate, clear_cookie, load_gate, set_cookie
+from remote_control.gate import LOGIN_PAGE, Gate, clear_cookie, load_gate, set_cookie
 from remote_control.history import (
     cancel_copy_mode,
     close_session,
@@ -1358,38 +1358,10 @@ class Sidecar:
         raw_target: str,
         hosted: tuple[str, dict],
     ) -> None:
-        """A local environment on its own name. Its key (from the link, then a
-        cookie of that name only) or the password lets in; nothing else here."""
+        """A local environment on its own name: public, everything there is
+        that server's (see devlocal)."""
         slug, share = hosted
-        path, _, query = raw_target.partition("?")
-        params = parse_qs(query)
-        cookie_key = devlocal._cookie(headers.get("cookie", ""), devlocal.KEY_COOKIE)
-        if self.gate is None or (cookie_key and secrets.compare_digest(cookie_key, share["key"])):
-            self._serve_dev(conn, method, header, body, headers, (slug, share, raw_target, False), hosted=True)
-            return
-        cookie = f"{devlocal.KEY_COOKIE}={share['key']}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={COOKIE_MAX_AGE}"
-        given = (params.get(devlocal.KEY_PARAM) or [""])[0]
-        if given and secrets.compare_digest(given, share["key"]):
-            rest = "&".join(p for p in query.split("&") if p and not p.startswith(devlocal.KEY_PARAM + "="))
-            where = path + ("?" + rest if rest else "")
-            conn.sendall(_http_response("302 Found", b"", "text/plain", [("Location", where), ("Set-Cookie", cookie), ("Cache-Control", "no-store")]))
-            return
-        if method == "OPTIONS" and path == "/rc-login":
-            self._serve_options(conn)
-            return
-        if method == "POST" and path == "/rc-login":
-            password = _login_password(body)
-            if password is None or not self.gate.check(password):
-                self._json(conn, {"error": "contraseña incorrecta"}, "401 Unauthorized")
-                return
-            conn.sendall(
-                _http_response("200 OK", b'{"ok":true}', "application/json; charset=utf-8", [("Cache-Control", "no-store"), ("Set-Cookie", cookie)])
-            )
-            return
-        if method in {"GET", "HEAD"} and "text/html" in (headers.get("accept") or ""):
-            self._serve_gate_page(conn, method == "HEAD")
-            return
-        conn.sendall(_http_response("401 Unauthorized", b'{"error":"unauthorized"}', "application/json; charset=utf-8", [("Cache-Control", "no-store")]))
+        self._serve_dev(conn, method, header, body, headers, (slug, share, raw_target, False), hosted=True)
 
     def _serve_dev(
         self,

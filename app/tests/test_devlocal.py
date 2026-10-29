@@ -101,7 +101,7 @@ class PickTests(unittest.TestCase):
             devlocal.set_subdomain_base("rc.a.com:8443", home)
             item = devlocal.share(3000, True, "Tienda", home=home, proxy_port=7681)["tienda"]
         self.assertEqual((item["kind"], item["host"], item["url"]), ("sub", "tienda.rc.a.com", "https://tienda.rc.a.com:8443/"))
-        self.assertTrue(devlocal.link("tienda", item).startswith("https://tienda.rc.a.com:8443/?rc-key="))
+        self.assertEqual(devlocal.link("tienda", item), "https://tienda.rc.a.com:8443/")
 
     def test_without_a_domain_its_own_tunnel_and_else_the_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,7 +134,7 @@ class PickTests(unittest.TestCase):
 
 
 class HostedTests(unittest.TestCase):
-    """An environment on its own name: its key or the password, and only it."""
+    """An environment on its own name: public, and only it."""
 
     def setUp(self) -> None:
         DevHandler.seen = []
@@ -142,7 +142,7 @@ class HostedTests(unittest.TestCase):
         threading.Thread(target=self.dev.serve_forever, daemon=True).start()
         self.addCleanup(self.dev.shutdown)
         self.share = {**devlocal.FIELDS, "port": self.dev.server_port, "label": "app", "kind": "sub",
-                      "host": "app.rc.a.com", "url": "https://app.rc.a.com/", "key": "llave123"}
+                      "host": "app.rc.a.com", "url": "https://app.rc.a.com/"}
         patch = mock.patch.object(devlocal, "load_shares", lambda home=None: {"app": self.share})
         patch.start()
         self.addCleanup(patch.stop)
@@ -167,28 +167,18 @@ class HostedTests(unittest.TestCase):
         resp = conn.getresponse()
         return resp, resp.read()
 
-    def test_the_link_key_lets_in_and_becomes_a_cookie(self) -> None:
-        resp, _ = self.req("GET", "/x?a=1&rc-key=llave123")
-        self.assertEqual((resp.status, resp.headers["Location"]), (302, "/x?a=1"))
-        self.assertIn("rc_dev_key=llave123", resp.headers["Set-Cookie"])
-        resp, body = self.req("GET", "/", {"Cookie": "rc_dev_key=llave123", "Accept": "text/html"})
-        self.assertEqual(resp.status, 200)
-        self.assertIn(b"Mi app", body)
-        self.assertNotIn(b"history", body)  # at the root already: no moving around
-        self.assertIsNone(DevHandler.seen[-1][2])  # its key never reaches the server
-
-    def test_without_it_the_password_page_and_nothing_of_remote_control(self) -> None:
+    def test_anyone_with_the_address_sees_it_without_the_password(self) -> None:
         resp, body = self.req("GET", "/", {"Accept": "text/html"})
         self.assertEqual(resp.status, 200)
-        self.assertIn(b"password", body)
-        self.assertEqual(self.req("GET", "/assets/app.js")[0].status, 401)
-        self.assertEqual(self.req("GET", "/x?rc-key=otra")[0].status, 401)
-        resp, _ = self.req("POST", "/rc-login", {"Content-Type": "application/json"}, b'{"password":"clave"}')
-        self.assertEqual(resp.status, 200)
-        self.assertIn("rc_dev_key=llave123", resp.headers["Set-Cookie"])
-        # Remote Control's own paths there are the server's.
-        resp, _ = self.req("GET", "/rc-sessions", {"Cookie": "rc_dev_key=llave123"})
+        self.assertIn(b"Mi app", body)
+        self.assertNotIn(b"password", body)
+        self.assertNotIn(b"history", body)  # at the root already: no moving around
+
+    def test_remote_control_is_not_reachable_through_it(self) -> None:
+        # Its own paths there are the server's, and its cookies never get through.
+        self.req("GET", "/rc-sessions", {"Cookie": "rc_gate=x; a=1"})
         self.assertEqual(DevHandler.seen[-1][0], "/rc-sessions")
+        self.assertNotIn("rc_gate", DevHandler.seen[-1][2] or "")
 
 
 class ServeTests(unittest.TestCase):

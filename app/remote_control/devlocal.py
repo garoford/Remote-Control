@@ -17,10 +17,11 @@ of its own (not Remote Control's), the way it does on localhost. Picked here:
   answering); see the routing notes further down.
 
 A "sub" one can also get a quick tunnel next to its subdomain (cf_*), just in
-case: another way in to the same environment, with the same key.
+case: another way in to the same environment.
 
-Each has a key: its link carries it (?rc-key=…) and opens it without the
-password, for that environment only.
+On a name of its own it is public: publishing one is sharing it, and whoever
+gets the address sees it without Remote Control's password (and only it).
+"/p/<slug>/" is on Remote Control's own origin, so it stays behind the password.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
 import shutil
 import signal
 import socket
@@ -55,7 +55,7 @@ DEV_PROCESSES = re.compile(
     r"java|dotnet|go|air|cargo|hugo|jekyll|caddy|esbuild|webpack|astro|nuxt|expo|ng|vue-cli-service|docker-proxy|conmon|rootlessport)$"
 )
 CONTAINER_PROCESSES = ("docker-proxy", "conmon", "rootlessport", "pasta", "slirp4netns")
-KEY_PARAM = "rc-key"
+# What links of earlier versions carried: dropped on the way to the server.
 KEY_COOKIE = "rc_dev_key"
 
 
@@ -92,11 +92,11 @@ def set_subdomain_base(base: str | None, home: Path | None = None) -> None:
 
 _shares_cache: tuple[float, dict] = (-1.0, {})
 _lock = threading.Lock()
-FIELDS = {"addr": "127.0.0.1", "label": "", "kind": "path", "host": "", "url": "", "key": "", "pid": 0, "note": "", "cf_host": "", "cf_url": "", "cf_pid": 0}
+FIELDS = {"addr": "127.0.0.1", "label": "", "kind": "path", "host": "", "url": "", "pid": 0, "note": "", "cf_host": "", "cf_url": "", "cf_pid": 0}
 
 
 def load_shares(home: Path | None = None) -> dict[str, dict]:
-    """{slug: {port, addr, label, kind, host, url, key, pid, note}}, re-read when it changes."""
+    """{slug: {port, addr, label, kind, host, url, pid, note, cf_*}}, re-read when it changes."""
     global _shares_cache
     path = shares_path(home)
     try:
@@ -122,7 +122,6 @@ def save_shares(shares: dict[str, dict], home: Path | None = None) -> None:
     path = shares_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
-    # The keys open the environments: only this user reads them.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(shares, indent=1))
@@ -200,7 +199,7 @@ def share(
             slug = base = slugify(label or f"puerto-{port}")
             if slug in shares:
                 slug = f"{base}-{port}"
-            item = {"port": port, **FIELDS, "addr": addr, "label": label, "key": secrets.token_urlsafe(18)}
+            item = {"port": port, **FIELDS, "addr": addr, "label": label}
             sub = subdomain_base(home)
             if sub:
                 item.update(kind="sub", host=f"{slug}.{sub.split(':', 1)[0]}", url=f"https://{slug}.{sub}/")
@@ -254,10 +253,10 @@ def share_for_host(host: str) -> tuple[str, dict] | None:
 
 
 def link(slug: str, item: dict) -> str:
-    """What the panel copies: the address with its key ("path": no key, the password)."""
+    """What the panel copies: its address ("path": on this tunnel, behind the password)."""
     if item["kind"] == "path" or not item["url"]:
         return f"/p/{slug}/"
-    return f"{item['url']}?{KEY_PARAM}={item['key']}"
+    return item["url"]
 
 
 # --- what is listening ------------------------------------------------------------
@@ -602,7 +601,7 @@ def payload(own_ports: set[int] | None = None, fresh: bool = False) -> dict:
         alive = item["kind"] != "tunnel" or "cloudflared" in _cmdline(item["pid"])
         cf = None
         if item["cf_url"]:
-            cf = {"url": item["cf_url"], "link": f"{item['cf_url']}?{KEY_PARAM}={item['key']}", "alive": "cloudflared" in _cmdline(item["cf_pid"])}
+            cf = {"url": item["cf_url"], "link": item["cf_url"], "alive": "cloudflared" in _cmdline(item["cf_pid"])}
         return {"kind": item["kind"], "url": item["url"] or f"/p/{slug}/", "link": link(slug, item), "note": item["note"], "alive": alive, "cf": cf}
 
     items = []
