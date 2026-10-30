@@ -455,9 +455,11 @@ def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
             "from remote_control.app import main\n\nif __name__ == '__main__':\n    raise SystemExit(main())\n",
             encoding="utf-8",
         )
+        wrapper.chmod(0o755)
         podman("cp", str(wrapper), f"{container(name)}:{RC_BIN}")
-    run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local", user="root")
-    run(name, "chmod", "755", RC_BIN)
+    # Only what was copied in: all of ~/.local (the AI CLIs, Node…) is about a
+    # GB, and touching each file of the image copies it up, minutes on a VPS.
+    run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local/share/remote-control/remote_control", RC_BIN, user="root")
     # Its running tunnel onto the new code (page and proxy), terminals untouched.
     run(name, RC_BIN, "reload", check=False)
     log("Remote Control listo")
