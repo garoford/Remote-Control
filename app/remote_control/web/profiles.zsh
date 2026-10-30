@@ -71,9 +71,11 @@ _rc_cli() {
     python3 "$_RC_BASE/rc_sharechats.py" "$_RC_BASE" 2>/dev/null
   fi
   # Remote Control tabs also keep Cursor Agent's scrollback (rc_keephistory.py).
+  # Not in herdr panes: herdr spots agents by their process, and behind the
+  # python3 wrapper it would not see Cursor Agent (nor would `rc agents`).
   local -a pre
   pre=()
-  if [[ ( "$cli" == agent || "$cli" == cursor-agent ) && -r "$RC_KEEPHISTORY" ]] && (( $+commands[python3] )); then
+  if [[ ( "$cli" == agent || "$cli" == cursor-agent ) && -z "${HERDR_PANE_ID-}" && -r "$RC_KEEPHISTORY" ]] && (( $+commands[python3] )); then
     pre=(python3 "$RC_KEEPHISTORY")
   fi
   if [[ -z "$id" ]]; then
