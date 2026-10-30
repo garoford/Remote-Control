@@ -44,6 +44,7 @@ USER = "rc"
 UID = 1000
 HOME = f"/home/{USER}"
 RC_BIN = f"{HOME}/.local/bin/remote-control"
+OOM_DROPIN = "/etc/systemd/system/remote-control.service.d/oom.conf"
 AUTOSTART_FLAG = f"{HOME}/.config/remote-control/container-autostart"
 # Shown in the UI, in this order.
 BASES = {"fedora": "Fedora 44", "ubuntu": "Ubuntu 24.04"}
@@ -359,6 +360,15 @@ def _free_port(taken: set[int]) -> int:
 # --- lifecycle ---------------------------------------------------------------------------
 
 
+def shm_size() -> str:
+    """Half the machine's memory, what /dev/shm gets on a plain Linux."""
+    try:
+        kib = next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return "1g"
+    return f"{max(64, kib // 2048)}m"
+
+
 def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
     if not valid_name(name):
         raise MultiError("nombre inválido: minúsculas, números y guiones (máx. 31)")
@@ -379,6 +389,11 @@ def create(name: str, base: str = "fedora", log=lambda _line: None) -> Box:
         "--label", f"{LABEL}.base={base}",
         "--label", f"{LABEL}.port={port}",
         "--systemd", "always",
+        # The whole machine for each one, as on the PC: no cap on processes
+        # and threads (podman's 2048 is a few builds and a browser), and a
+        # /dev/shm a browser or a build fits in (tmpfs: it uses what is written).
+        "--pids-limit", "-1",
+        "--shm-size", shm_size(),
         # Its local URL from this machine (the tunnel itself needs no port).
         "--publish", f"127.0.0.1:{port}:7681",
         image(base),
@@ -441,6 +456,8 @@ def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
     """This machine's installed Remote Control, copied in (create and update).
     A new container already has the environment from its image (env=False)."""
     package = Path(__file__).resolve().parent
+    # Containers made before it had no cap lifted (see create): processes now.
+    podman("update", "--pids-limit", "-1", container(name), check=False)
     log("Copiando Remote Control…")
     run(name, "mkdir", "-p", f"{HOME}/.local/share/remote-control", f"{HOME}/.local/bin")
     with tempfile.TemporaryDirectory() as tmp:
@@ -460,6 +477,10 @@ def install_rc(name: str, log=lambda _line: None, env: bool = True) -> None:
     # Only what was copied in: all of ~/.local (the AI CLIs, Node…) is about a
     # GB, and touching each file of the image copies it up, minutes on a VPS.
     run(name, "chown", "-R", f"{USER}:{USER}", f"{HOME}/.local/share/remote-control/remote_control", RC_BIN, user="root")
+    # A dev server that runs out of memory is killed by the kernel, and with
+    # systemd's default (OOMPolicy=stop) the whole tunnel went with it: 502.
+    run(name, "sh", "-c", f"mkdir -p {OOM_DROPIN.rsplit('/', 1)[0]} && printf '[Service]\\nOOMPolicy=continue\\n' > {OOM_DROPIN}"
+        " && systemctl daemon-reload", user="root", check=False)
     # Its running tunnel onto the new code (page and proxy), terminals untouched.
     run(name, RC_BIN, "reload", check=False)
     log("Remote Control listo")

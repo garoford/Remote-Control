@@ -701,6 +701,21 @@ def detect_traefik() -> Edge | None:
     return Edge(name, dynamic_dir, entry["443"], entry["80"], resolver, gateway, inside, not re.match(r"v?[12]\.", tag))
 
 
+def traefik_exists() -> bool | None:
+    """A Traefik container here, running or not (at boot Docker starts it a
+    little after us); None while Docker is installed but not answering yet."""
+    docker = shutil.which("docker")
+    if not docker:
+        return False
+    try:
+        res = subprocess.run([docker, "ps", "-a", "--format", "{{.Names}}\t{{.Image}}"], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return any("traefik" in line.lower() or line.partition("\t")[0] == "coolify-proxy" for line in res.stdout.splitlines())
+
+
 def port_holder(port: int) -> str:
     """The program listening on ``port`` here ("" if none, or not visible)."""
     ss = shutil.which("ss")

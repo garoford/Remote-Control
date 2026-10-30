@@ -396,7 +396,8 @@ def ensure_service() -> None:
     unit.write_text(
         "[Unit]\n"
         "Description=Remote Control: dominio propio de los contenedores\n"
-        "After=network-online.target\n\n"
+        # Docker first: its proxy, when there is one, owns 80/443.
+        "After=network-online.target docker.service\n\n"
         "[Service]\n"
         f"ExecStart={exec_start}\n"
         f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\n"
@@ -670,6 +671,16 @@ def _bridge_loop(edge: domains.Edge) -> None:
 
 def main(_argv: list[str] | None = None) -> int:
     edge = domains.detect_traefik()
+    # Never 443 while the machine has its own proxy: at boot it is not running
+    # yet, and taking its ports left it (and every site behind it) down.
+    # Docker still starting counts too, for a few minutes (a Docker that never
+    # answers must not keep the containers' names down for good).
+    docker_wait = time.monotonic() + 180
+    while edge is None and (exists := domains.traefik_exists()) is not False:
+        if exists is None and time.monotonic() > docker_wait:
+            break
+        time.sleep(5)
+        edge = domains.detect_traefik()
     threading.Thread(target=_wildcard_keeper, args=(edge,), daemon=True).start()
     if edge:
         print(f"router: rutas en {edge.dynamic_dir} ({edge.name}), puente en {edge.gateway}", file=sys.stderr, flush=True)

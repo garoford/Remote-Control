@@ -86,6 +86,7 @@ class CreateTests(unittest.TestCase):
         self.assertIn("rc-nuevo", create)
         self.assertIn(f"{multi.LABEL}.base=ubuntu", create)
         self.assertIn("127.0.0.1:17702:7681", create)
+        self.assertEqual(create[create.index("--pids-limit") + 1], "-1")  # the whole machine
         self.assertEqual(create[-1], "localhost/remote-control-multi:ubuntu")
         self.assertIn(("start", "rc-nuevo"), fake.calls)
         install.assert_called_once()
