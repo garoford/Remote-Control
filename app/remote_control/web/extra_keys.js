@@ -3374,7 +3374,9 @@
     writeBusy = true;
     var pending = writeQ;
     writeQ = "";
-    beginWriting().then(function () {
+    // "Ver historial" live: the keys go to its terminal; the one behind stays as it is.
+    var ready = liveView ? Promise.resolve() : beginWriting();
+    ready.then(function () {
       if (pending) sendInput(normalizePaste(pending));
       writeBusy = false;
       if (writeQ) pumpWrite();
@@ -4867,7 +4869,10 @@
   ["keydown", "paste", "beforeinput"].forEach(function (type) {
     document.addEventListener(
       type,
-      function () {
+      function (ev) {
+        // Typing in "Ver historial" works on its scaled copy: it must not make
+        // this screen's size the pane's (herdr.hold_pane follows who typed).
+        if (liveView || (ev.target && ev.target.closest && ev.target.closest("#rc-log-view"))) return;
         typedAt = Date.now();
       },
       true
