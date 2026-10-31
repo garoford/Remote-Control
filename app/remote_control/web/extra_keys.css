@@ -4029,3 +4029,191 @@ html.rc-is-empty #rc-net-badge {
 .rc-ws-profile.is-renaming .rc-ws-input {
   height: 32px;
 }
+
+/* This device follows the size of the one that typed last (extra_keys.js
+   paintTakeChip): a tap takes the size for this screen without typing. */
+#rc-size-take {
+  position: fixed;
+  z-index: 2147483002;
+  top: calc(var(--rc-bar-h, 40px) + 8px);
+  right: 10px;
+  max-width: calc(100vw - 20px);
+  padding: 5px 11px;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.12);
+  border-radius: 999px;
+  background: rgb(var(--rc-surface-rgb) / 0.82);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  backdrop-filter: blur(14px) saturate(1.4);
+  color: var(--rc-text);
+  font: 600 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+#rc-size-take:hover,
+#rc-size-take:focus-visible {
+  opacity: 1;
+  border-color: var(--rc-blue);
+}
+
+#rc-size-take[hidden] {
+  display: none;
+}
+
+/* A locked herdr pane: a small padlock on its owner's mark. */
+#rc-pane-marks .rc-ws-profile-dot.is-locked::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--rc-orange)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23111214' stroke-width='3' stroke-linecap='round'%3E%3Crect x='5' y='11' width='14' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E")
+    center / 7px no-repeat;
+  box-shadow: 0 0 0 1.5px rgb(var(--rc-surface-rgb) / 0.95);
+}
+
+/* The owner menu's title row: the title, then the lock and "Ver historial". */
+.rc-profile-pop-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 4px;
+}
+
+.rc-profile-pop-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rc-pop-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--rc-muted);
+  cursor: pointer;
+}
+
+.rc-pop-icon:hover:not(:disabled),
+.rc-pop-icon:focus-visible {
+  background: rgb(var(--rc-text-rgb) / 0.08);
+  color: var(--rc-text);
+}
+
+.rc-pop-icon.is-on {
+  color: var(--rc-orange);
+}
+
+.rc-pop-icon:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.rc-profile-pop-item[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* "Ver historial": a read-only terminal, scaled to fit, over everything. */
+#rc-log-view {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483010;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(var(--rc-shade) / 0.55);
+}
+
+.rc-log-box {
+  display: flex;
+  flex-direction: column;
+  width: min(1400px, 100%);
+  height: min(900px, 100%);
+  overflow: hidden;
+  border: 1px solid rgb(var(--rc-text-rgb) / 0.1);
+  border-radius: 14px;
+  background: var(--rc-bg);
+  box-shadow: 0 24px 60px -12px rgb(var(--rc-shade) / 0.8);
+}
+
+.rc-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid rgb(var(--rc-text-rgb) / 0.08);
+  color: var(--rc-muted);
+  font: 600 13px/1.3 ui-sans-serif, system-ui, sans-serif;
+}
+
+.rc-log-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-log-close {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rc-muted);
+  font: 600 15px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rc-log-close:hover,
+.rc-log-close:focus-visible {
+  background: rgb(var(--rc-text-rgb) / 0.08);
+  color: var(--rc-text);
+}
+
+.rc-log-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.rc-log-note {
+  padding: 18px;
+  color: var(--rc-muted);
+  font: 500 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+
+@media (max-width: 600px) {
+  #rc-log-view {
+    padding: 0;
+  }
+
+  .rc-log-box {
+    border-radius: 0;
+  }
+}
+
+/* Where this device's keys go in a shared herdr tab (extra_keys.js
+   routeHerdrInput): herdr's own focus frame is everyone's. */
+#rc-my-pane {
+  position: fixed;
+  z-index: 2147482996;
+  box-sizing: border-box;
+  border: 2px solid rgb(var(--rc-teal-rgb) / 0.7);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+#rc-my-pane[hidden] {
+  display: none;
+}

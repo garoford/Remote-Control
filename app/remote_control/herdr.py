@@ -221,7 +221,7 @@ def _shape_match(boxes: list[dict], panes: list[tuple[str, tuple]]) -> list[str]
     return found[0] if found else None
 
 
-def _shape_fit(boxes: list[dict], panes: list[tuple[str, tuple]]) -> tuple[list[str], float] | None:
+def _shape_fit(boxes: list[dict], panes: list[tuple[str, tuple]], tolerance: float = SHAPE_TOLERANCE) -> tuple[list[str], float] | None:
     """Pane id for each box and how far off the shape is, None past the tolerance."""
     if len(panes) != len(boxes):
         return None
@@ -238,7 +238,7 @@ def _shape_fit(boxes: list[dict], panes: list[tuple[str, tuple]]) -> tuple[list[
             d = max(abs(a - b) for a, b in zip(box, rect))
             if d < best_d:
                 best, best_d = i, d
-        if best < 0 or best_d > SHAPE_TOLERANCE:
+        if best < 0 or best_d > tolerance:
             return None
         used.add(best)
         worst = max(worst, best_d)
@@ -293,6 +293,55 @@ def _pane_text(pane_id: str) -> str:
     return " ".join(result.stdout.split()) if result.returncode == 0 else ""
 
 
+# --- which tab each device sees ----------------------------------------------------
+# No guessing from shapes when herdr can say it. Each device looks through its
+# own herdr client: a tmux session hv-<device>-<tab> (tab_session.sh), or the
+# tab itself for the device that opened it. herdr titles that client's
+# terminal "workspace: <name>", and a workspace's active tab and focused
+# pane are the same for every client (session.json keeps one of each). So:
+# device -> its client -> its workspace -> that workspace's active tab, whose
+# layout lists exactly the panes on that screen.
+
+WORKSPACE_TITLE_RE = re.compile(r"^workspace: (.+)$")
+# The page's frames, from this device's screen, against the snapshot's
+# layout, computed at another client's size: same tab, so only rounding
+# separates them (more on a narrow phone).
+VIEW_TOLERANCE = 0.3
+
+
+def _device_client(dev: str, tab: str) -> str:
+    """The tmux session where this device's herdr client runs, "" if unknown."""
+    from .history import TAB_RE, TMUX_SOCKET, _tmux
+
+    if not DEVICE_ID_RE.match(dev or "") or not TAB_RE.match(tab or ""):
+        return ""
+    listing = _tmux(TMUX_SOCKET, "list-sessions", "-F", "#{session_name}\t#{@rc_dev}", text=True)
+    sessions = dict(line.split("\t", 1) for line in (listing.stdout or "").splitlines() if "\t" in line)
+    view = f"hv-{dev}-{tab}"
+    if view in sessions:
+        return view
+    return tab if sessions.get(tab) == dev else ""
+
+
+def device_view(dev: str, tab: str, snap: dict) -> dict | None:
+    """The layout of the herdr tab this device is looking at, None if herdr does not say."""
+    from .history import TMUX_SOCKET, _tmux
+
+    session = _device_client(dev, tab)
+    if not session:
+        return None
+    title = _tmux(TMUX_SOCKET, "display-message", "-p", "-t", f"={session}:", "#{pane_title}", text=True).stdout.strip()
+    m = WORKSPACE_TITLE_RE.match(title)
+    if not m:
+        return None
+    named = [w for w in snap.get("workspaces") or [] if isinstance(w, dict) and w.get("label") == m.group(1)]
+    # Two workspaces with that name: the title cannot tell them apart.
+    if len(named) != 1:
+        return None
+    active = named[0].get("active_tab_id")
+    return next((lay for lay in snap.get("layouts") or [] if isinstance(lay, dict) and lay.get("tab_id") == active), None)
+
+
 def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     """Owner profile of each pane frame the page sees ("" is the primary user).
 
@@ -307,6 +356,7 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
         return {"ok": True, "marks": []}
     live = {p["pane_id"] for p in snap.get("panes") or [] if isinstance(p, dict) and isinstance(p.get("pane_id"), str)}
     _drop_dead_holds(live)
+    _drop_dead_locks(live)
     if not live:
         return {"ok": True, "marks": []}
     owners = _load_owners()
@@ -319,21 +369,41 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
         _save_owners(fresh)
         _drop_dead_pins(live)
     _write_missing_pins(fresh)
-    candidates = []
-    for layout in snap.get("layouts") or []:
-        if isinstance(layout, dict) and (found := _shape_fit(boxes, _layout_panes(layout))):
-            candidates.append((layout, found[0], found[1]))
     dev = str(viewer.get("dev") or "") if isinstance(viewer, dict) else ""
-    ids = _pick_layout(boxes, candidates, dev) if candidates else None
+    tab = str(viewer.get("tab") or "") if isinstance(viewer, dict) else ""
+    layout = device_view(dev, tab, snap)
+    ids: list[str] | None = None
+    exact = layout is not None
+    if layout is not None:
+        # Known tab: its frames are its panes, or the page misread its screen.
+        found = _shape_fit(boxes, _layout_panes(layout), VIEW_TOLERANCE)
+        ids = found[0] if found else None
+    else:
+        # An older page (no tab) or herdr without the title: by shape, as before.
+        candidates = []
+        for lay in snap.get("layouts") or []:
+            if isinstance(lay, dict) and (found := _shape_fit(boxes, _layout_panes(lay))):
+                candidates.append((lay, found[0], found[1]))
+        ids = _pick_layout(boxes, candidates, dev) if candidates else None
+        if ids and DEVICE_ID_RE.match(dev):
+            for lay, cand, _ in candidates:
+                if cand == ids and isinstance(lay.get("tab_id"), str):
+                    _last_tab[dev] = lay["tab_id"]
+                    layout = lay
     if not ids:
         return {"ok": True, "marks": []}
-    if DEVICE_ID_RE.match(dev):
-        for layout, cand, _ in candidates:
-            if cand == ids and isinstance(layout.get("tab_id"), str):
-                _last_tab[dev] = layout["tab_id"]
     if isinstance(viewer, dict):
         _hold_owned(boxes, ids, fresh, viewer)
-    return {"ok": True, "marks": [{"box": i, "pane": pid, "owner": fresh.get(pid, "")} for i, pid in enumerate(ids)]}
+    locks = _load_locks()
+    focused = layout.get("focused_pane_id") if isinstance(layout, dict) else None
+    return {
+        "ok": True,
+        "exact": exact,
+        "marks": [
+            {"box": i, "pane": pid, "owner": fresh.get(pid, ""), "locked": pid in locks, "focused": pid == focused}
+            for i, pid in enumerate(ids)
+        ],
+    }
 
 
 # --- each pane keeps its owner's size ------------------------------------------------
@@ -417,6 +487,45 @@ def hold_pane(pane: str, cols: int, rows: int, dev: str, typed_at: float) -> boo
             return False
         _holds[pane] = {"proc": proc, "size": (cols, rows), "dev": dev, "typed_at": typed_at}
         return True
+
+
+# --- each device types into its own pane ------------------------------------------
+# herdr keeps one focused pane per tab for every client: when two people share
+# a tab and one clicks another pane, the other one's keys follow that focus.
+# So the page sends what its person types with the pane it meant (the one
+# they last clicked), and it goes straight into that pane through its
+# terminal controller (the one that holds its size, or a new one), whatever
+# herdr has focused.
+
+
+def send_input(pane: str, text: str) -> bool:
+    if not PANE_RE.match(pane or "") or not text:
+        return False
+    with _holds_lock:
+        hold = _holds.get(pane)
+        if hold is None or hold["proc"].poll() is not None:
+            try:
+                # No size: the pane keeps the one it has until its owner's page holds it.
+                proc = subprocess.Popen(
+                    [_herdr_bin(), "terminal", "session", "control", pane, "--takeover"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    start_new_session=True,
+                )
+            except OSError:
+                _holds.pop(pane, None)
+                return False
+            hold = {"proc": proc, "size": None, "dev": "", "typed_at": 0.0}
+            _holds[pane] = hold
+        try:
+            hold["proc"].stdin.write(json.dumps({"type": "terminal.input", "text": text}) + "\n")
+            hold["proc"].stdin.flush()
+            return True
+        except (OSError, ValueError):
+            _holds.pop(pane, None)
+            return False
 
 
 def _stop(hold: dict) -> None:
@@ -579,12 +688,15 @@ def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
     return {"restarted": True, "cli": name}
 
 
-def set_pane_owner(pane: object, prof: object) -> dict:
+def set_pane_owner(pane: object, prof: object, by: object = None) -> dict:
     """Make a herdr pane another profile's: its mark, and the account its CLIs use."""
     from .profiles import home_of
 
     if not isinstance(pane, str) or not PANE_RE.match(pane):
         return {"ok": False, "error": "Panel no válido"}
+    holder = lock_owner(pane)
+    if holder is not None and str(by or "") != "p" + holder:
+        return {"ok": False, "error": "Panel bloqueado por " + _label(holder)}
     prof = str(prof or "")
     if prof and home_of(prof) is None:
         return {"ok": False, "error": "Ese perfil no existe"}
@@ -598,6 +710,9 @@ def set_pane_owner(pane: object, prof: object) -> dict:
         release_pane(pane)
     owners[pane] = prof
     _save_owners(owners)
+    # A lock is its owner's: a new owner starts unlocked.
+    if pane_locked(pane):
+        _save_locks(_load_locks() - {pane})
     try:
         _pins_dir().mkdir(parents=True, exist_ok=True)
         (_pins_dir() / pane).write_text(prof + "\n", encoding="utf-8")
@@ -624,13 +739,16 @@ def _client_key(client: str) -> str:
     return "@rc_cprof_" + re.sub(r"[^a-z0-9]", "_", client)
 
 
-def set_tab_owner(tab: object, prof: object) -> dict:
+def set_tab_owner(tab: object, prof: object, by: object = None) -> dict:
     """Make a tab another profile's: its size, its dot and the account its CLIs use."""
     from .history import TAB_RE, TMUX_SOCKET, _tmux
     from .profiles import home_of
 
     if not isinstance(tab, str) or not TAB_RE.match(tab):
         return {"ok": False, "error": "Pestaña no válida"}
+    holder = lock_owner("rc:" + tab)
+    if holder is not None and str(by or "") != "p" + holder:
+        return {"ok": False, "error": "Pestaña bloqueada por " + _label(holder)}
     prof = str(prof or "")
     if prof and home_of(prof) is None:
         return {"ok": False, "error": "Ese perfil no existe"}
@@ -643,6 +761,10 @@ def set_tab_owner(tab: object, prof: object) -> dict:
     if parts[1] == "herdr":
         return {"ok": False, "error": "En herdr se cambia el usuario de cada panel"}
     _tmux(TMUX_SOCKET, "set-option", "-t", f"={tab}:", "@rc_prof", "p" + prof)
+    # A lock is its owner's: a new owner starts unlocked.
+    if tab_locked(tab):
+        _tmux(TMUX_SOCKET, "set-option", "-t", f"={tab}:", "-u", "@rc_lock")
+        apply_tab_lock(tab)
     # The new owner's devices size the tab; everyone else's only watch it.
     clients = _tmux(TMUX_SOCKET, "list-clients", "-t", f"={tab}", "-F", "#{client_name}\t#{client_width}\t#{client_height}", text=True)
     owner_size = None
@@ -670,3 +792,153 @@ def set_tab_owner(tab: object, prof: object) -> dict:
     screen = _tmux(TMUX_SOCKET, "capture-pane", "-p", "-t", f"={tab}:", text=True).stdout or ""
     working = bool(WORKING_RE.search("\n".join(screen.rstrip().splitlines()[-15:])))
     return {"ok": True, **_restart_cli(shell_pid, prof, working, run)}
+
+
+# --- locks: only the owner types ---------------------------------------------------
+# The owner of a herdr pane or a plain tab can lock it: then only their own
+# devices and agents type there; everyone else (people and `rc prompt`) only
+# watches. A tab: its other clients turn read-only (tmux). A herdr pane: herdr
+# has one input per client, not per pane, so each page sees which of its
+# panes is focused (herdr draws that frame in the accent color) and drops the
+# keys meant for a locked one that is not its profile's (extra_keys.js).
+
+
+def _locks_file() -> Path:
+    from .profiles import base_dir
+
+    return base_dir() / "herdr-locks.json"
+
+
+def _load_locks() -> set[str]:
+    try:
+        data = json.loads(_locks_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {p for p in data if isinstance(p, str) and PANE_RE.match(p)} if isinstance(data, list) else set()
+
+
+def _save_locks(locks: set[str]) -> None:
+    path = _locks_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(locks)), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _drop_dead_locks(live: set[str]) -> None:
+    locks = _load_locks()
+    if locks - live:
+        _save_locks(locks & live)
+
+
+def pane_locked(pane: str) -> bool:
+    return pane in _load_locks()
+
+
+def tab_locked(tab: str) -> bool:
+    from .history import TMUX_SOCKET, _tmux
+
+    out = _tmux(TMUX_SOCKET, "show-options", "-t", f"={tab}:", "-qv", "@rc_lock", text=True)
+    return out.returncode == 0 and out.stdout.strip() == "1"
+
+
+def _tab_owner(tab: str) -> str | None:
+    """The tab's owner profile id ("" the primary), None if the tab is gone."""
+    from .history import TMUX_SOCKET, _tmux
+
+    out = _tmux(TMUX_SOCKET, "show-options", "-t", f"={tab}:", "-v", "@rc_prof", text=True)
+    if out.returncode != 0:
+        return None
+    raw = out.stdout.strip()
+    return raw[1:] if raw.startswith("p") else ""
+
+
+def _set_readonly(client: str, on: bool, ignore_size: bool) -> None:
+    """tmux 3.8 sets read-only with refresh-client -f but only clears it with
+    switch-client -r, which flips ignore-size too: put that one back after."""
+    from .history import TMUX_SOCKET, _tmux
+
+    listing = _tmux(TMUX_SOCKET, "list-clients", "-F", "#{client_name}\t#{client_flags}", text=True).stdout or ""
+    for raw in listing.splitlines():
+        name, _, flags = raw.partition("\t")
+        if name == client:
+            break
+    else:
+        return
+    ro = "read-only" in flags.split(",")
+    if on and not ro:
+        _tmux(TMUX_SOCKET, "refresh-client", "-t", client, "-f", "read-only")
+    elif not on and ro:
+        _tmux(TMUX_SOCKET, "switch-client", "-c", client, "-r")
+    _tmux(TMUX_SOCKET, "refresh-client", "-t", client, "-f", "ignore-size" if ignore_size else "!ignore-size")
+
+
+def apply_tab_lock(tab: str) -> None:
+    """Read-only for every client of the tab that is not its owner's, while locked."""
+    from .history import TMUX_SOCKET, _tmux
+
+    owner = _tab_owner(tab)
+    if owner is None:
+        return
+    locked = tab_locked(tab)
+    clients = _tmux(TMUX_SOCKET, "list-clients", "-t", f"={tab}", "-F", "#{client_name}", text=True)
+    for name in (clients.stdout or "").split():
+        seen = _tmux(TMUX_SOCKET, "show-options", "-sv", _client_key(name), text=True).stdout.strip()
+        # A page that never said its profile is not the owner's.
+        mine = seen == "p" + owner
+        _set_readonly(name, locked and not mine, ignore_size=not mine)
+
+
+def set_lock(kind: object, target: object, locked: object, by: object) -> dict:
+    """Lock or unlock a herdr pane or a plain tab; only its owner may."""
+    from .history import TAB_RE, TMUX_SOCKET, _tmux
+
+    by = str(by or "")
+    if not PROF_ARG_RE.match(by):
+        return {"ok": False, "error": "Perfil no válido"}
+    me = by[1:]
+    on = locked is True
+    if kind == "pane":
+        if not isinstance(target, str) or not PANE_RE.match(target):
+            return {"ok": False, "error": "Panel no válido"}
+        owner = _load_owners().get(target, "")
+        if owner != me:
+            return {"ok": False, "error": "Solo " + _label(owner) + " puede bloquear este panel"}
+        locks = _load_locks()
+        locks = locks | {target} if on else locks - {target}
+        _save_locks(locks)
+        return {"ok": True, "locked": on}
+    if kind == "tab":
+        if not isinstance(target, str) or not TAB_RE.match(target):
+            return {"ok": False, "error": "Pestaña no válida"}
+        owner = _tab_owner(target)
+        if owner is None:
+            return {"ok": False, "error": "Esa pestaña ya no existe"}
+        if owner != me:
+            return {"ok": False, "error": "Solo " + _label(owner) + " puede bloquear esta pestaña"}
+        if on:
+            _tmux(TMUX_SOCKET, "set-option", "-t", f"={target}:", "@rc_lock", "1")
+        else:
+            _tmux(TMUX_SOCKET, "set-option", "-t", f"={target}:", "-u", "@rc_lock")
+        apply_tab_lock(target)
+        return {"ok": True, "locked": on}
+    return {"ok": False, "error": "No se puede bloquear eso"}
+
+
+def lock_owner(target: str) -> str | None:
+    """Whose lock keeps others out of a pane (herdr id) or tab (rc:<name>); None if unlocked."""
+    if PANE_RE.match(target):
+        return _load_owners().get(target, "") if pane_locked(target) else None
+    if target.startswith("rc:"):
+        tab = target[3:]
+        return _tab_owner(tab) if tab_locked(tab) else None
+    return None
+
+
+def _label(pid: str) -> str:
+    from .agents import label_of
+
+    return label_of(pid)

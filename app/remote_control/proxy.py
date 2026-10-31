@@ -216,6 +216,10 @@ def _http_response(
     return ("\r\n".join(headers)).encode("latin1") + body
 
 
+# A paste larger than this goes in pieces (extra_keys.js keeps them smaller).
+HERDR_INPUT_MAX = 1 << 20
+
+
 def _ws_accept(key: str) -> str:
     digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("latin1")).digest()
     return base64.b64encode(digest).decode("ascii")
@@ -419,6 +423,26 @@ class Sidecar:
                     ),
                 )
                 return
+            if method == "POST" and path == "/rc-tab-claim":
+                from remote_control.history import claim_tab_size
+
+                query = parse_qs(parsed_url.query)
+                try:
+                    cols = int((query.get("cols") or ["0"])[0])
+                    rows = int((query.get("rows") or ["0"])[0])
+                except ValueError:
+                    cols = rows = 0
+                self._json(
+                    conn,
+                    claim_tab_size(
+                        (query.get("tab") or [""])[0],
+                        (query.get("prof") or [""])[0],
+                        cols,
+                        rows,
+                        socket=self.tmux_socket,
+                    ),
+                )
+                return
             if method == "GET" and path.rstrip("/").endswith("/rc-hist-size"):
                 self._serve_hist_size(conn, parse_qs(parsed_url.query))
                 return
@@ -441,6 +465,9 @@ class Sidecar:
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
+                return
+            if path == "/rc-herdr-input" and method == "GET":
+                self._serve_herdr_input(conn, parse_qs(parsed_url.query), headers)
                 return
             if path == "/rc-sound" and method == "GET":
                 self._serve_sound(conn, parse_qs(parsed_url.query), headers)
@@ -465,7 +492,24 @@ class Sidecar:
                     req = {}
                 if not isinstance(req, dict):
                     req = {}
-                self._json(conn, set_tab_owner(req.get("tab"), req.get("profile")))
+                self._json(conn, set_tab_owner(req.get("tab"), req.get("profile"), req.get("by")))
+                return
+            if path == "/rc-lock" and method == "POST":
+                from remote_control.herdr import set_lock
+
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, ValueError):
+                    req = {}
+                if not isinstance(req, dict):
+                    req = {}
+                self._json(conn, set_lock(req.get("kind"), req.get("target"), req.get("locked"), req.get("by")))
+                return
+            if path == "/rc-log" and method == "GET":
+                from remote_control.history import pane_log
+
+                query = parse_qs(parsed_url.query)
+                self._json(conn, pane_log((query.get("tab") or [""])[0], (query.get("pane") or [""])[0], socket=self.tmux_socket))
                 return
             if path == "/rc-herdr-owner" and method == "POST":
                 from remote_control.herdr import set_pane_owner
@@ -476,7 +520,7 @@ class Sidecar:
                     req = {}
                 if not isinstance(req, dict):
                     req = {}
-                self._json(conn, set_pane_owner(req.get("pane"), req.get("profile")))
+                self._json(conn, set_pane_owner(req.get("pane"), req.get("profile"), req.get("by")))
                 return
             if path == "/rc-profile-ping" and method == "POST":
                 try:
@@ -1068,6 +1112,75 @@ class Sidecar:
         finally:
             gone.set()
             sound.unlisten(item)
+
+    def _serve_herdr_input(self, conn: socket.socket, query: dict, headers: dict[str, str]) -> None:
+        """What a page types in a herdr tab, each message for the pane it meant
+        ({"pane", "text"}), over a WebSocket: herdr's own focus is shared by
+        everyone in the tab (herdr.send_input)."""
+        from remote_control import herdr
+
+        key = headers.get("sec-websocket-key", "")
+        if headers.get("upgrade", "").lower() != "websocket" or not key:
+            self._json(conn, {"ok": False, "error": "websocket"}, "400 Bad Request")
+            return
+        prof = (query.get("prof") or [""])[0]
+        me = prof[1:] if herdr.PROF_ARG_RE.match(prof) else None
+        try:
+            conn.sendall(
+                "\r\n".join(
+                    [
+                        "HTTP/1.1 101 Switching Protocols",
+                        "Upgrade: websocket",
+                        "Connection: Upgrade",
+                        "Sec-WebSocket-Accept: " + _ws_accept(key),
+                        "",
+                        "",
+                    ]
+                ).encode("latin1")
+            )
+            conn.settimeout(None)
+            while not self._stop.is_set():
+                head = _recv_exact(conn, 2)
+                if head is None:
+                    break
+                opcode = head[0] & 0x0F
+                size = head[1] & 0x7F
+                if size == 126:
+                    size = int.from_bytes(_recv_exact(conn, 2) or b"\0\0", "big")
+                elif size == 127:
+                    size = int.from_bytes(_recv_exact(conn, 8) or bytes(8), "big")
+                if size > HERDR_INPUT_MAX:
+                    break
+                mask = _recv_exact(conn, 4) if head[1] & 0x80 else b"\0\0\0\0"
+                data = _recv_exact(conn, size) if size else b""
+                if mask is None or data is None or opcode == 0x8:
+                    break
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                if opcode == 0x9:
+                    conn.sendall(_ws_frame(payload, 0xA))
+                    continue
+                if opcode != 0x1:
+                    continue
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                pane = str(msg.get("pane") or "")
+                text = msg.get("text")
+                if not isinstance(text, str):
+                    continue
+                # Its owner locked it: nobody else's keys go in.
+                holder = herdr.lock_owner(pane) if herdr.PANE_RE.match(pane) else None
+                if holder is not None and holder != me:
+                    reply = {"pane": pane, "blocked": herdr._label(holder)}
+                else:
+                    reply = {"pane": pane, "ok": herdr.send_input(pane, text)}
+                if msg.get("ack") or not reply.get("ok"):
+                    conn.sendall(_ws_frame(json.dumps(reply).encode(), 0x1))
+        except OSError:
+            pass
 
     def _json(self, conn: socket.socket, payload: dict, status: str = "200 OK") -> None:
         conn.sendall(

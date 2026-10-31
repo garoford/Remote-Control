@@ -437,6 +437,47 @@ class TabSizeTests(unittest.TestCase):
         self.assertEqual(self.size("", "p"), {"guest": False})
 
 
+class ClaimTabSizeTests(unittest.TestCase):
+    def claim(self, out: str, prof: str, cols: int = 100, rows: int = 30) -> tuple[dict, list]:
+        from unittest import mock
+
+        from remote_control import history
+
+        calls = []
+
+        def fake(socket, *args, **kw):
+            calls.append(args)
+            return subprocess.CompletedProcess([], 0, stdout=out if args[0] == "display-message" else "", stderr="")
+
+        with mock.patch.object(history, "_tmux", fake):
+            return history.claim_tab_size("rcabcdefghij", prof, cols, rows), calls
+
+    def test_owner_device_takes_the_size(self):
+        result, calls = self.claim("120\t40\tpcuenta2\tzsh\n", "pcuenta2")
+        self.assertEqual(result, {"ok": True})
+        self.assertIn(("resize-window", "-t", "=rcabcdefghij:", "-x", "100", "-y", "30"), calls)
+
+    def test_other_profile_only_watches(self):
+        result, calls = self.claim("120\t40\tpcuenta2\tzsh\n", "p")
+        self.assertEqual(result, {"ok": False})
+        self.assertFalse(any(c[0] == "resize-window" for c in calls))
+
+    def test_same_size_is_not_resized(self):
+        result, calls = self.claim("100\t30\tp\tzsh\n", "p")
+        self.assertEqual(result, {"ok": True})
+        self.assertFalse(any(c[0] == "resize-window" for c in calls))
+
+    def test_herdr_tab_is_skipped(self):
+        result, calls = self.claim("120\t40\tp\therdr\n", "p")
+        self.assertEqual(result, {"ok": False})
+        self.assertFalse(any(c[0] == "resize-window" for c in calls))
+
+    def test_bad_size_is_rejected(self):
+        result, calls = self.claim("120\t40\tp\tzsh\n", "p", cols=0)
+        self.assertEqual(result, {"ok": False})
+        self.assertEqual(calls, [])
+
+
 class HerdrSizeTests(unittest.TestCase):
     def test_view_gets_its_own_screen_size_back(self):
         from unittest import mock

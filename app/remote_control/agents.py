@@ -570,6 +570,12 @@ def prompt(agent: dict, text: str, me: dict, wait: int | None = None) -> dict:
     text starts to end. Returns {"sent", "foreign", "status"}.
     """
     foreign = agent["owner"] != me["profile"]
+    # Its owner locked that pane or tab: only their own agents write there.
+    from .herdr import lock_owner
+
+    holder = lock_owner(agent["id"])
+    if holder is not None and holder != me["profile"]:
+        return {"sent": False, "foreign": foreign, "status": "error:locked", "holder": label_of(holder)}
     if foreign:
         text = f"[Mensaje del agente de {label_of(me['profile'])}] {text}"
     status = ""
@@ -827,6 +833,9 @@ def _send(agent: dict, text: str, me: dict, wait: int | None, lines: int) -> int
     if not result["sent"]:
         if result["status"] == "error:agent_blocked":
             return report(agent, result["status"], lines, 0)
+        if result["status"] == "error:locked":
+            print(f"rc: {result['holder']} locked {agent['id']}: only their own agents can write there; nothing was sent.", file=sys.stderr)
+            return 1
         print(f"rc: could not send to {agent['id']} ({result['status']})", file=sys.stderr)
         return 1
     if result["foreign"]:

@@ -419,3 +419,194 @@ class PickLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LockTests(unittest.TestCase):
+    TAB = "rcabcdefghij"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        (self.base / "profiles" / "cuenta2").mkdir(parents=True)
+        (self.base / "herdr-owners.json").write_text(json.dumps({"w1:p2": "cuenta2", "w1:p3": ""}))
+        self.calls = []
+        self.opts = {"@rc_prof": "pcuenta2"}
+        self.clients = {"/dev/pts/6": ("pcuenta2", "attached"), "/dev/pts/7": ("p", "attached,ignore-size")}
+        from remote_control import history
+
+        for p in (
+            mock.patch.object(profiles, "base_dir", lambda: self.base),
+            mock.patch.object(history, "_tmux", self.fake_tmux),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_tmux(self, socket, *args, text=False):
+        self.calls.append(args)
+        out = ""
+        if args[0] == "set-option":
+            if "-u" in args:
+                self.opts.pop(args[-1], None)
+            else:
+                self.opts[args[-2]] = args[-1]
+        elif args[0] == "show-options" and args[1] == "-sv":
+            name = "/dev/pts/" + args[2].rsplit("_", 1)[1]
+            out = self.clients.get(name, ("", ""))[0]
+        elif args[0] == "show-options":
+            out = self.opts.get(args[-1], "")
+        elif args[0] == "list-clients" and "-t" in args:
+            out = "\n".join(self.clients)
+        elif args[0] == "list-clients":
+            out = "\n".join(f"{n}\t{f}" for n, (_, f) in self.clients.items())
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    def test_only_the_owner_locks_a_pane(self) -> None:
+        self.assertFalse(herdr.set_lock("pane", "w1:p2", True, "p")["ok"])
+        self.assertTrue(herdr.set_lock("pane", "w1:p2", True, "pcuenta2")["ok"])
+        self.assertEqual(herdr.lock_owner("w1:p2"), "cuenta2")
+        self.assertIsNone(herdr.lock_owner("w1:p3"))
+        self.assertTrue(herdr.set_lock("pane", "w1:p2", False, "pcuenta2")["ok"])
+        self.assertIsNone(herdr.lock_owner("w1:p2"))
+
+    def test_locked_pane_keeps_its_owner(self) -> None:
+        herdr.set_lock("pane", "w1:p2", True, "pcuenta2")
+        res = herdr.set_pane_owner("w1:p2", "", by="p")
+        self.assertFalse(res["ok"])
+        self.assertIn("bloqueado", res["error"])
+
+    def test_locked_tab_turns_other_clients_read_only(self) -> None:
+        self.assertFalse(herdr.set_lock("tab", self.TAB, True, "p")["ok"])
+        self.assertTrue(herdr.set_lock("tab", self.TAB, True, "pcuenta2")["ok"])
+        self.assertEqual(self.opts.get("@rc_lock"), "1")
+        self.assertEqual(herdr.lock_owner("rc:" + self.TAB), "cuenta2")
+        self.assertIn(("refresh-client", "-t", "/dev/pts/7", "-f", "read-only"), self.calls)
+        self.assertFalse(any(c[:4] == ("refresh-client", "-t", "/dev/pts/6", "-f") and c[4] == "read-only" for c in self.calls))
+
+    def test_unlock_clears_read_only_and_keeps_ignore_size(self) -> None:
+        self.opts["@rc_lock"] = "1"
+        self.clients["/dev/pts/7"] = ("p", "attached,ignore-size,read-only")
+        self.assertTrue(herdr.set_lock("tab", self.TAB, False, "pcuenta2")["ok"])
+        self.assertNotIn("@rc_lock", self.opts)
+        self.assertIn(("switch-client", "-c", "/dev/pts/7", "-r"), self.calls)
+        self.assertIn(("refresh-client", "-t", "/dev/pts/7", "-f", "ignore-size"), self.calls)
+
+    def test_locks_of_closed_panes_go(self) -> None:
+        herdr.set_lock("pane", "w1:p2", True, "pcuenta2")
+        herdr._drop_dead_locks({"w1:p3"})
+        self.assertIsNone(herdr.lock_owner("w1:p2"))
+
+
+class SendInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.started = []
+        herdr._holds.clear()
+        self.addCleanup(herdr._holds.clear)
+
+    def fake(self):
+        import io
+
+        proc = FakeProc([])
+        proc.stdin = io.StringIO()
+        return proc
+
+    def popen(self, cmd, **kw):
+        proc = self.fake()
+        self.started.append((cmd, proc))
+        return proc
+
+    def written(self, proc) -> list:
+        return [json.loads(line) for line in proc.stdin.getvalue().splitlines()]
+
+    def test_goes_into_that_pane_whatever_herdr_has_focused(self) -> None:
+        with mock.patch.object(herdr.subprocess, "Popen", self.popen):
+            self.assertTrue(herdr.send_input("w1:p2", "hola\x1b[D"))
+            self.assertTrue(herdr.send_input("w1:p2", "\r"))
+        self.assertEqual(len(self.started), 1)
+        cmd, proc = self.started[0]
+        self.assertEqual(cmd[1:], ["terminal", "session", "control", "w1:p2", "--takeover"])
+        self.assertEqual(self.written(proc), [{"type": "terminal.input", "text": "hola\x1b[D"}, {"type": "terminal.input", "text": "\r"}])
+
+    def test_reuses_the_controller_that_holds_its_size(self) -> None:
+        held = self.fake()
+        herdr._holds["w1:p2"] = {"proc": held, "size": (80, 24), "dev": "dabcdefgh1", "typed_at": 1.0}
+        with mock.patch.object(herdr.subprocess, "Popen", self.popen):
+            self.assertTrue(herdr.send_input("w1:p2", "x"))
+        self.assertEqual(self.started, [])
+        self.assertEqual(self.written(held), [{"type": "terminal.input", "text": "x"}])
+
+    def test_rejects_bad_input(self) -> None:
+        with mock.patch.object(herdr.subprocess, "Popen", self.popen):
+            self.assertFalse(herdr.send_input("../x", "x"))
+            self.assertFalse(herdr.send_input("w1:p2", ""))
+        self.assertEqual(self.started, [])
+
+
+class DeviceViewTests(unittest.TestCase):
+    """The tab on a device's screen, from herdr itself: no shape guessing."""
+
+    TAB = "rcabcdefghij"
+    DEV = "dabcdef0123"
+    BOXES = PickLayoutTests.BOXES
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        # Two tabs with exactly the same shape, in two workspaces.
+        one = PickLayoutTests.layout(None, "w3:t1", 73, 17)
+        two = PickLayoutTests.layout(None, "w4:t1", 73, 17)
+        one["focused_pane_id"] = "w3:t1:b"
+        two["focused_pane_id"] = "w4:t1:a"
+        self.snap = {
+            "workspaces": [
+                {"workspace_id": "w3", "label": "FOFA", "active_tab_id": "w3:t1"},
+                {"workspace_id": "w4", "label": "Quoruz", "active_tab_id": "w4:t1"},
+            ],
+            "layouts": [one, two],
+            "panes": [{"pane_id": p["pane_id"]} for lay in (one, two) for p in lay["panes"]],
+        }
+        self.sessions = f"hv-{self.DEV}-{self.TAB}\t\n{self.TAB}\tdzzzzzzzz9\n"
+        self.title = "workspace: Quoruz"
+        from remote_control import history
+
+        for p in (
+            mock.patch.object(profiles, "base_dir", lambda: self.base),
+            mock.patch.object(history, "_tmux", self.fake_tmux),
+            mock.patch.object(herdr, "_api", lambda *a: {"snapshot": self.snap}),
+            mock.patch.object(herdr, "_hold_owned", lambda *a: None),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_tmux(self, socket, *args, text=False):
+        out = ""
+        if args[0] == "list-sessions":
+            out = self.sessions
+        elif args[0] == "display-message":
+            out = self.title + "\n"
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    def marks(self, tab=TAB):
+        return herdr.pane_marks(self.BOXES, {"prof": "p", "dev": self.DEV, "tab": tab})
+
+    def test_same_shape_tabs_are_told_apart_by_the_clients_workspace(self) -> None:
+        res = self.marks()
+        self.assertTrue(res["exact"])
+        self.assertEqual([m["pane"] for m in res["marks"]], ["w4:t1:a", "w4:t1:b", "w4:t1:c"])
+        self.assertEqual([m["focused"] for m in res["marks"]], [True, False, False])
+        self.title = "workspace: FOFA"
+        self.assertEqual([m["pane"] for m in self.marks()["marks"]], ["w3:t1:a", "w3:t1:b", "w3:t1:c"])
+
+    def test_the_device_that_opened_the_tab_uses_the_tab_itself(self) -> None:
+        self.sessions = f"{self.TAB}\t{self.DEV}\n"
+        self.assertEqual(herdr._device_client(self.DEV, self.TAB), self.TAB)
+        self.assertTrue(self.marks()["exact"])
+
+    def test_frames_that_do_not_fit_its_tab_get_no_marks(self) -> None:
+        res = herdr.pane_marks(self.BOXES[:2], {"prof": "p", "dev": self.DEV, "tab": self.TAB})
+        self.assertEqual(res["marks"], [])
+
+    def test_two_workspaces_with_one_name_fall_back_to_shapes(self) -> None:
+        self.snap["workspaces"][0]["label"] = "Quoruz"
+        self.assertIsNone(herdr.device_view(self.DEV, self.TAB, self.snap))

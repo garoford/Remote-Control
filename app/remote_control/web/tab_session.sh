@@ -85,6 +85,10 @@ fi
 if [[ -n "$prof" && "$prof" != "$owner_prof" ]]; then
   attach_flags=(-f ignore-size)
 fi
+# Its owner locked the tab (herdr.set_lock): anyone else only watches.
+if [[ "$prof" != "$owner_prof" && "$(tmux "${args[@]}" show-options -t "=$name:" -qv @rc_lock 2>/dev/null || true)" == "1" ]]; then
+  attach_flags=(-f ignore-size,read-only)
+fi
 # Whose this client is, so its ignore-size can follow when the tab changes
 # owner (herdr.set_tab_owner). The client's name is this terminal.
 client_tty="$(tty 2>/dev/null || true)"

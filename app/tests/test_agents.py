@@ -89,6 +89,22 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(sent, [["herdr", "agent", "prompt", "w1:p1", "hola"]])
         self.assertEqual(agents.recent_notes(), [])
 
+    def test_prompt_to_a_locked_pane_of_another_user_is_refused(self) -> None:
+        from remote_control import herdr
+
+        sent = []
+        target = {"id": "w1:p2", "where": "herdr", "cli": "pi", "owner": "rosa", "owner_label": "Rosa"}
+        with (
+            mock.patch.object(agents, "_run", lambda cmd, timeout=5: sent.append(cmd) or done("")),
+            mock.patch.object(agents, "label_of", lambda pid: pid or "main"),
+            mock.patch.object(herdr, "lock_owner", lambda target: "rosa"),
+        ):
+            res = agents.prompt(target, "hola", {"profile": "", "pane": "w1:p1"})
+            self.assertEqual((res["sent"], res["status"], res["holder"]), (False, "error:locked", "rosa"))
+            # Its owner's own agents still write there.
+            self.assertTrue(agents.prompt(target, "hola", {"profile": "rosa", "pane": "w1:p1"})["sent"])
+        self.assertEqual(len(sent), 1)
+
     def test_herdr_status_after_a_wait(self) -> None:
         ok = done(json.dumps({"result": {"agent": {"agent_status": "done"}}}))
         late = done(json.dumps({"error": {"code": "timeout"}}), code=1)

@@ -363,7 +363,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_activity}\t#{pane_current_path}\t"
-        "#{pane_current_command}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@rc_prof}",
+        "#{pane_current_command}\t#{session_attached}\t#{session_created}\t#{window_activity}\t#{@rc_prof}\t#{@rc_lock}",
         text=True,
     )
     now = time.time()
@@ -416,6 +416,7 @@ def list_sessions(socket: str = TMUX_SOCKET) -> list[dict]:
                 "created": created,
                 "busy": busy,
                 "owner": prof[1:] if prof.startswith("p") else None,
+                "locked": len(parts) > 8 and parts[8].strip() == "1",
             }
         )
     sessions.sort(key=lambda item: item["activity"], reverse=True)
@@ -452,6 +453,78 @@ def tab_size(tab: str, prof: str, socket: str = TMUX_SOCKET, dev: str = "") -> d
         # follows it, scaled (extra_keys.js), instead of tmux's dots.
         return {"guest": False, "cols": cols, "rows": rows}
     return {"guest": True, "cols": cols, "rows": rows}
+
+
+# The "Ver historial" window: everything a tab or a herdr pane still holds,
+# with its colors, for a read-only terminal scaled to the screen.
+LOG_LINES = 5000
+LOG_MAX_BYTES = 4 * 1024 * 1024
+
+
+def pane_log(tab: str, pane: str, socket: str = TMUX_SOCKET) -> dict:
+    """{"ok", "cols", "text"} of a tab (tmux history) or a herdr pane."""
+    if pane:
+        from .herdr import PANE_RE, _herdr_bin
+
+        if not PANE_RE.match(pane):
+            return {"ok": False}
+        try:
+            out = subprocess.run(
+                [_herdr_bin(), "pane", "read", pane, "--source", "recent", "--lines", str(LOG_LINES), "--format", "ansi"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {"ok": False}
+        if out.returncode != 0:
+            return {"ok": False}
+        raw = out.stdout
+        cols = 0
+    else:
+        if not TAB_RE.match(tab or ""):
+            return {"ok": False}
+        size = _tmux(socket, "display-message", "-p", "-t", f"={tab}:", "#{pane_width}", text=True)
+        if size.returncode != 0:
+            return {"ok": False}
+        out = _tmux(socket, "capture-pane", "-p", "-e", "-S", f"-{LOG_LINES}", "-t", f"={tab}:")
+        if out.returncode != 0:
+            return {"ok": False}
+        raw = out.stdout
+        try:
+            cols = int(size.stdout.strip())
+        except ValueError:
+            cols = 0
+    text = raw[-LOG_MAX_BYTES:].decode("utf-8", errors="replace").rstrip("\n")
+    return {"ok": True, "cols": cols, "text": text}
+
+
+# A device of the owner's profile that types takes the tab's size
+# (extra_keys.js). Tapping, focusing or opening the tab only watches.
+CLAIM_MAX = 1000
+
+
+def claim_tab_size(tab: str, prof: str, cols: int, rows: int, socket: str = TMUX_SOCKET) -> dict:
+    """Resize the tab's window to the screen of the device that typed.
+
+    Only the owner's devices drive it; another profile only watches. herdr
+    tabs are skipped: each device has its own view there (herdr_size).
+    """
+    if not TAB_RE.match(tab or "") or not PROF_RE.match(prof or ""):
+        return {"ok": False}
+    if not (1 < cols <= CLAIM_MAX and 1 < rows <= CLAIM_MAX):
+        return {"ok": False}
+    result = _tmux(
+        socket, "display-message", "-p", "-t", f"={tab}:", "#{window_width}\t#{window_height}\t#{@rc_prof}\t#{pane_current_command}", text=True
+    )
+    parts = result.stdout.strip().split("\t") if result.returncode == 0 else []
+    if len(parts) < 4 or parts[3] == "herdr" or (parts[2] and parts[2] != prof):
+        return {"ok": False}
+    if parts[0] == str(cols) and parts[1] == str(rows):
+        # Same size: a resize would make herdr repaint every device for nothing.
+        return {"ok": True}
+    done = _tmux(socket, "resize-window", "-t", f"={tab}:", "-x", str(cols), "-y", str(rows))
+    return {"ok": done.returncode == 0}
 
 
 def herdr_size(tab: str, dev: str, socket: str = TMUX_SOCKET) -> dict:

@@ -498,6 +498,8 @@
         var term = pane.term;
         watchOwnSize(pane);
         var follow = guestSize[id] && guestSize[id].follow;
+        // The window is not the size this device last asked for: ask again.
+        if (claimed[id] !== info.cols + "x" + info.rows) delete claimed[id];
         if (info.guest && info.cols > 1 && info.rows > 1) {
           guestSize[id] = { cols: info.cols, rows: info.rows };
           if (term.__rcGuest && term.cols === info.cols && term.rows === info.rows) return;
@@ -505,9 +507,12 @@
           // Another device of this same profile typed last and sized the tab:
           // follow it, scaled, until someone types here.
           guestSize[id] = { cols: info.cols, rows: info.rows, follow: true };
+          drives[id] = false;
+          paintTakeChip();
           if (term.__rcGuest && term.cols === info.cols && term.rows === info.rows) return;
         } else {
           delete guestSize[id];
+          paintTakeChip();
           if (!term.__rcGuest) return;
         }
         fitPane(pane);
@@ -517,10 +522,9 @@
 
   // Same profile on two screens: the tab takes the size of the device that
   // typed last; the other one shows that size scaled to fit instead of
-  // tmux's dots. Typing here takes the size back (tmux.tab.conf hooks resize
-  // the window to this client once its terminal is its own size again).
+  // tmux's dots. Typing here takes the size back (claimSize).
   var ownResizeAt = {};
-  var OWN_RESIZE_GRACE_MS = 2500;
+  var OWN_RESIZE_GRACE_MS = 1500;
 
   function sizeTaken(id, term, info) {
     if (term.__rcGuest || (term.cols === info.cols && term.rows === info.rows)) return false;
@@ -533,27 +537,33 @@
     if (!term || term.__rcOwnSizeHook || typeof term.onData !== "function") return;
     term.__rcOwnSizeHook = true;
     var id = pane.id;
-    // Just attached: tmux gives this client the window (client-attached hook).
+    // Just attached: alone in the tab, tmux gives this client the window
+    // (client-attached hook).
     ownResizeAt[id] = Date.now();
     if (typeof term.onResize === "function") {
       term.onResize(function () {
-        if (!term.__rcGuest) ownResizeAt[id] = Date.now();
+        if (term.__rcGuest) return;
+        ownResizeAt[id] = Date.now();
+        // The driving screen changed size (rotation, window, keyboard).
+        if (drives[id] && id === tabId()) claimSizeSoon();
       });
     }
     term.onData(function (data) {
-      var want = guestSize[id];
-      if (!want || !want.follow) return;
-      // Focus and mouse reports are not someone typing here.
-      if (data === "\x1b[I" || data === "\x1b[O" || /^\x1b\[(M|<)/.test(data)) return;
-      delete guestSize[id];
-      fitPane(panes[id] || pane);
+      if (isTyping(data) && id === tabId()) typedHere();
     });
+  }
+
+  // A tab just opened shows dots or a cut-off grid until the first poll that
+  // is past the grace: poll again then instead of waiting for the interval.
+  function pollGuestSizeSoon() {
+    pollGuestSize();
+    setTimeout(pollGuestSize, OWN_RESIZE_GRACE_MS + 100);
   }
 
   function bootGuestSize() {
     setInterval(pollGuestSize, 2000);
-    window.addEventListener("rc-tab-changed", pollGuestSize);
-    window.addEventListener("rc-ws-open", pollGuestSize);
+    window.addEventListener("rc-tab-changed", pollGuestSizeSoon);
+    window.addEventListener("rc-ws-open", pollGuestSizeSoon);
     pollGuestSize();
   }
 
@@ -851,7 +861,7 @@
     tmuxScroll.pending = 0;
     armPaneScroll(pane.term);
     fitPane(pane);
-    claimSizeSoon();
+    paintTakeChip();
     try {
       if (typeof pane.term.refresh === "function") {
         pane.term.refresh(0, Math.max(0, (pane.term.rows || 1) - 1));
@@ -1339,6 +1349,12 @@
           : new NativeWS(url, protocols);
       if (!tty) return ws;
       window.__rcLastWsUrl = String(url);
+      // Keys for a pane or tab another profile locked never leave this page.
+      var lockedSend = ws.send.bind(ws);
+      ws.send = function (data) {
+        if (inputBlocked(data) || routeHerdrInput(data)) return;
+        return lockedSend(data);
+      };
       if (pane) {
         ws.__rcPaneId = pane.id;
       } else {
@@ -2070,6 +2086,7 @@
   function sendInput(text) {
     if (!text) return false;
     pingProfile(/[\r\n]/.test(text));
+    if (isTyping(text)) typedHere();
     var ws = window.__rcTermSocket;
     if (!ws || ws.readyState !== 1) {
       setLinkState(false);
@@ -4106,40 +4123,93 @@
     });
   }
 
-  // tmux sizes a shared window to the latest active client (window-size
-  // latest). Viewing or tapping does not count as activity, so a device
-  // that only looks keeps the other device's size. A focus-in report does
-  // count, and tmux only forwards it to apps that asked for focus events.
-  // Throttled per connection: switching tabs must claim the new tab at once
-  // even if the old one was just claimed by the same tap.
+  // Among the owner's devices, the one that types drives the tab's size.
+  // Opening, tapping, scrolling or focusing a tab only watches it: that
+  // device keeps showing the driver's size, scaled (pollGuestSize). Typing,
+  // or the "Tomar" chip, asks the server to size the window to this screen
+  // (/rc-tab-claim); a resize of the driving screen follows. herdr tabs are
+  // skipped: each device has its own view there.
+  var CLAIM_DEBOUNCE_MS = 150;
+  var drives = {};
+  var claimed = {};
+  var claimTimer = 0;
+
+  function currentPane() {
+    var id = tabId();
+    return id ? panes[id] || (id === bootTabId ? ensurePrimary() : null) : null;
+  }
+
   function claimSize() {
-    // herdr gives each device its own view (no size to claim), and a focus
-    // report makes herdr re-ask the terminal's colors, repainting the others.
     if (document.hidden || onHerdrTab()) return;
-    var ws = window.__rcTermSocket;
-    if (!ws || ws.readyState !== 1) return;
-    var now = Date.now();
-    if (now - (ws.__rcClaimAt || 0) < 1500) return;
-    ws.__rcClaimAt = now;
-    sendInput(String.fromCharCode(27) + "[I");
+    var pane = currentPane();
+    var term = pane && pane.term;
+    if (!term || term.__rcGuest || !(term.cols > 1) || !(term.rows > 1)) return;
+    var id = pane.id;
+    var size = term.cols + "x" + term.rows;
+    drives[id] = true;
+    paintTakeChip();
+    if (claimed[id] === size) return;
+    claimed[id] = size;
+    ownResizeAt[id] = Date.now();
+    var query = "tab=" + encodeURIComponent(id) + "&prof=" + encodeURIComponent(profileArg()) + "&cols=" + term.cols + "&rows=" + term.rows;
+    fetch("/rc-tab-claim?" + query, { method: "POST", cache: "no-store" })
+      .then(function () {
+        // A poll sent before the resize landed must not read it as taken.
+        ownResizeAt[id] = Date.now();
+      })
+      .catch(function () {
+        if (claimed[id] === size) delete claimed[id];
+      });
   }
 
-  // A tab already connected in the background keeps the size of whichever
-  // device used it last; showing it here must take the size back.
   function claimSizeSoon() {
-    setTimeout(claimSize, 0);
-    setTimeout(claimSize, 400);
+    clearTimeout(claimTimer);
+    claimTimer = setTimeout(claimSize, CLAIM_DEBOUNCE_MS);
   }
 
-  function bootSizeClaim() {
-    document.addEventListener("visibilitychange", claimSize);
-    window.addEventListener("focus", claimSize);
-    window.addEventListener("pageshow", claimSize);
-    window.addEventListener("rc-tab-changed", claimSizeSoon);
-    window.addEventListener("rc-ws-open", claimSizeSoon);
-    ["pointerdown", "touchstart", "wheel"].forEach(function (type) {
-      document.addEventListener(type, claimSize, { capture: true, passive: true });
-    });
+  // Focus and mouse reports are not someone typing here.
+  function isTyping(data) {
+    return !!data && data !== "\x1b[I" && data !== "\x1b[O" && !/^\x1b\[(M|<)/.test(data);
+  }
+
+  // This device typed in the current tab: stop following, take the size.
+  function typedHere() {
+    var pane = currentPane();
+    if (!pane || onHerdrTab()) return;
+    var want = guestSize[pane.id];
+    if (want && !want.follow) return;
+    if (want) {
+      delete guestSize[pane.id];
+      fitPane(pane);
+    }
+    claimSizeSoon();
+  }
+
+  // Shown while this device follows another one's size: take it without typing.
+  function paintTakeChip() {
+    var pane = currentPane();
+    var want = pane && guestSize[pane.id];
+    var on = !!(want && want.follow) && !onHerdrTab() && !window.__rcEmpty;
+    var chip = document.getElementById("rc-size-take");
+    if (!on) {
+      if (chip) chip.hidden = true;
+      return;
+    }
+    if (!chip) {
+      chip = document.createElement("button");
+      chip.id = "rc-size-take";
+      chip.type = "button";
+      chip.title = "Otro dispositivo escribió último y la pestaña tiene su tamaño. Tócalo para que tome el de esta pantalla.";
+      chip.textContent = "Tamaño de otro dispositivo · Tomar";
+      chip.addEventListener("click", function () {
+        typedHere();
+        try {
+          if (window.term) window.term.focus();
+        } catch (_) {}
+      });
+      document.body.appendChild(chip);
+    }
+    chip.hidden = false;
   }
 
   function bootOsc52() {
@@ -4937,6 +5007,8 @@
     var screen = term && term.element && term.element.querySelector(".xterm-screen");
     if (!paneMarks.marks.length || !screen) {
       if (host) host.hidden = true;
+      var ringOff = document.getElementById("rc-my-pane");
+      if (ringOff) ringOff.hidden = true;
       return;
     }
     if (!host) {
@@ -4974,8 +5046,10 @@
       dot.textContent = (profileLabel(mark.owner) || "?").charAt(0).toUpperCase();
       dot.dataset.pane = mark.pane || "";
       dot.dataset.owner = mark.owner;
+      dot.dataset.locked = mark.locked ? "1" : "";
+      dot.classList.toggle("is-locked", !!mark.locked);
       dot.setAttribute("role", "button");
-      dot.title = "Panel de " + profileLabel(mark.owner) + " · clic para cambiar de usuario";
+      dot.title = "Panel de " + profileLabel(mark.owner) + (mark.locked ? " · bloqueado" : "") + " · clic para cambiar de usuario";
       dot.setAttribute("aria-label", dot.title);
       var a = profileAccent(mark.owner);
       dot.style.background = a ? a.dot : "";
@@ -4987,6 +5061,30 @@
     });
     while (dots.length > n) host.removeChild(dots[dots.length - 1]);
     host.hidden = n === 0;
+    // herdr's own focus frame is shared by everyone in the tab: this one is
+    // where this device's keys go.
+    var ring = document.getElementById("rc-my-pane");
+    var mine = paneMarks.marks.length > 1 && herdrIn.pane && !herdrIn.chrome
+      ? paneMarks.marks.filter(function (mark) {
+          return mark.pane === herdrIn.pane;
+        })[0]
+      : null;
+    var mineBox = mine && paneMarks.boxes[mine.box];
+    if (!mineBox) {
+      if (ring) ring.hidden = true;
+      return;
+    }
+    if (!ring) {
+      ring = document.createElement("div");
+      ring.id = "rc-my-pane";
+      ring.setAttribute("aria-hidden", "true");
+      (document.body || document.documentElement).appendChild(ring);
+    }
+    ring.hidden = false;
+    ring.style.left = Math.round(rect.left + mineBox.x * cellW) + "px";
+    ring.style.top = Math.round(rect.top + mineBox.y * cellH) + "px";
+    ring.style.width = Math.round(mineBox.w * cellW) + "px";
+    ring.style.height = Math.round(mineBox.h * cellH) + "px";
   }
 
   function scanPaneMarks() {
@@ -5016,6 +5114,8 @@
     // New frames: old marks would sit in the wrong places until the answer.
     if (sig !== paneMarks.sig) paneMarks.marks = [];
     paneMarks.boxes = boxes;
+    // Open before the first key, so it already goes to this device's pane.
+    herdrInputSocket();
     placePaneMarks(term);
     var now = Date.now();
     if (paneMarks.busy || (sig === paneMarks.sig && now - paneMarks.at < 4000)) return;
@@ -5031,7 +5131,9 @@
       // on last wins.
       body: JSON.stringify({
         boxes: boxes,
-        viewer: { prof: profileArg(), dev: deviceId(), single: single, idle_ms: Math.min(864e5, Date.now() - typedAt) },
+        // The tab tells the server which herdr client is this device's, and
+        // so which herdr tab is on this screen (herdr.device_view).
+        viewer: { prof: profileArg(), dev: deviceId(), tab: tabId(), single: single, idle_ms: Math.min(864e5, Date.now() - typedAt) },
       }),
     })
       .then(function (resp) {
@@ -5054,7 +5156,10 @@
   // The profiles menu under a herdr pane's mark or a tab's dot: picking one
   // gives it the pane or the tab. ``key`` tells two anchors apart, so a second
   // click on the same one closes the menu.
-  function openOwnerPop(anchor, key, owner, title, pick) {
+  // ``lock`` ({kind, target, locked}): the title row also gets the lock
+  // (only the owner flips it; while on, the owner is the only one who types
+  // there or changes its user) and "Ver historial".
+  function openOwnerPop(anchor, key, owner, title, pick, lock) {
     closeProfilePop();
     var pop = document.createElement("div");
     pop.id = "rc-profile-pop";
@@ -5062,13 +5167,48 @@
     pop.setAttribute("role", "menu");
     var head = document.createElement("div");
     head.className = "rc-profile-pop-title";
-    head.textContent = title;
+    var words = document.createElement("span");
+    words.className = "rc-profile-pop-title-text";
+    words.textContent = title;
+    head.appendChild(words);
+    var mine = owner === myProfileId();
+    var held = !!(lock && lock.locked) && !mine;
+    if (lock) {
+      var lockTitle = lock.locked
+        ? mine
+          ? "Bloqueado: solo tú escribes aquí. Clic para desbloquear"
+          : "Bloqueado por " + profileLabel(owner) + ": solo mira"
+        : mine
+          ? "Bloquear: nadie más escribe aquí"
+          : "Solo " + profileLabel(owner) + " puede bloquearlo";
+      var lockBtn = wsButton("", "rc-pop-icon" + (lock.locked ? " is-on" : ""), lockTitle, function () {
+        if (!mine) return;
+        closeProfilePop();
+        setLock(lock.kind, lock.target, !lock.locked);
+      });
+      lockBtn.innerHTML = lock.locked ? POP_ICONS.locked : POP_ICONS.unlocked;
+      lockBtn.title = lockTitle;
+      lockBtn.disabled = !mine;
+      head.appendChild(lockBtn);
+      var logBtn = wsButton("", "rc-pop-icon", "Ver historial", function () {
+        closeProfilePop();
+        openLogView(lock.kind, lock.target, title.replace(/^Usuario de /, ""));
+      });
+      logBtn.innerHTML = POP_ICONS.log;
+      logBtn.title = "Ver historial";
+      head.appendChild(logBtn);
+    }
     pop.appendChild(head);
     [{ id: "", label: profState.primary || "Principal" }].concat(profState.profiles).forEach(function (p) {
-      var b = wsButton("", "rc-profile-pop-item" + (p.id === owner ? " is-on" : ""), "Usar la cuenta de " + p.label, function () {
+      var b = wsButton("", "rc-profile-pop-item" + (p.id === owner ? " is-on" : ""), held ? "Bloqueado por " + profileLabel(owner) : "Usar la cuenta de " + p.label, function () {
         closeProfilePop();
+        if (held) {
+          showToast("Bloqueado por " + profileLabel(owner));
+          return;
+        }
         if (p.id !== owner) pick(p.id);
       });
+      if (held) b.setAttribute("aria-disabled", "true");
       b.setAttribute("role", "menuitemradio");
       b.setAttribute("aria-checked", p.id === owner ? "true" : "false");
       var mark = document.createElement("span");
@@ -5096,12 +5236,352 @@
     document.addEventListener("keydown", profilePopKey, true);
   }
 
+  function myProfileId() {
+    return profileArg().slice(1);
+  }
+
+  var POP_ICONS = {
+    locked:
+      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+    unlocked:
+      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>',
+    log:
+      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h7"/></svg>',
+  };
+
+  function setLock(kind, target, on) {
+    fetch("/rc-lock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: kind, target: target, locked: on, by: profileArg() }),
+    })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (res) {
+        if (!res || !res.ok) {
+          showToast((res && res.error) || "No se pudo bloquear");
+          return;
+        }
+        if (kind === "pane") {
+          paneMarks.marks.forEach(function (mark) {
+            if (mark.pane === target) mark.locked = on;
+          });
+          paneMarks.at = 0;
+          placePaneMarks(xterm());
+        } else {
+          sessionCache.forEach(function (item) {
+            if (item.id === target) item.locked = on;
+          });
+          pullSessions();
+        }
+        showToast(on ? (kind === "pane" ? "Panel bloqueado: solo tú escribes" : "Pestaña bloqueada: solo tú escribes") : "Desbloqueado");
+      })
+      .catch(function () {
+        showToast("No se pudo bloquear");
+      });
+  }
+
+  // The pane herdr has focused in the tab on this screen (herdr keeps one
+  // per tab for every client; the server reads it, herdr.pane_marks).
+  function focusedMark() {
+    return (
+      paneMarks.marks.filter(function (mark) {
+        return mark.focused;
+      })[0] || null
+    );
+  }
+
+  // Why this page may not type here now, or "" if it may.
+  function lockReason() {
+    if (window.__rcEmpty) return "";
+    var me = myProfileId();
+    if (onHerdrTab()) {
+      var locked = paneMarks.marks.some(function (mark) {
+        return mark.locked && mark.owner !== me;
+      });
+      if (!locked) return "";
+      var mark = myHerdrMark();
+      return mark && mark.locked && mark.owner !== me ? "Panel bloqueado por " + profileLabel(mark.owner) : "";
+    }
+    var id = tabId();
+    var item = sessionCache.filter(function (s) {
+      return s.id === id;
+    })[0];
+    if (item && item.locked && (item.owner || "") !== me) return "Pestaña bloqueada por " + profileLabel(item.owner || "");
+    return "";
+  }
+
+  var lockToastAt = 0;
+
+  // A ttyd input frame ("0" + bytes) of someone typing into a pane or tab
+  // locked by another profile: dropped, with a note now and then.
+  // The text of a ttyd input frame ("0" + bytes), null for anything else.
+  function inputText(data) {
+    try {
+      if (typeof data === "string") return data.charCodeAt(0) === INPUT ? data.slice(1) : null;
+      var bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+      if (!bytes || !bytes.length || bytes[0] !== INPUT) return null;
+      return new TextDecoder().decode(bytes.subarray(1));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function inputBlocked(data) {
+    var rest = inputText(data);
+    if (rest === null || !isTyping(rest)) return false;
+    var why = lockReason();
+    if (!why) return false;
+    var now = Date.now();
+    if (now - lockToastAt > 2500) {
+      lockToastAt = now;
+      showToast(why + (onHerdrTab() ? ": toca otro panel" : ""));
+    }
+    return true;
+  }
+
+  // herdr has one focused pane per tab for all its clients: when someone
+  // else clicks another pane, what this person types would follow it. So the
+  // page keeps its own pane (the one clicked here last; else the one herdr
+  // shows focused) and sends what is typed for it on its own socket
+  // (/rc-herdr-input → herdr.send_input). Clicks, scrolling and herdr's own
+  // keys (prefix ctrl+b and the key after it) still go through herdr.
+  var HERDR_PREFIX = "\x02";
+  var PREFIX_PASS_MS = 1500;
+  var herdrIn = { ws: null, pane: "", sig: "", passUntil: 0, chrome: false };
+
+  function myHerdrMark() {
+    if (herdrIn.sig !== paneMarks.sig) {
+      // Another tab or layout: learn the pane again.
+      herdrIn.sig = paneMarks.sig;
+      herdrIn.pane = "";
+      herdrIn.chrome = false;
+    }
+    var marks = paneMarks.marks;
+    var mine = herdrIn.pane
+      ? marks.filter(function (mark) {
+          return mark.pane === herdrIn.pane;
+        })[0]
+      : null;
+    if (mine) return mine;
+    var seen = focusedMark();
+    herdrIn.pane = seen ? seen.pane : "";
+    return seen;
+  }
+
+  function herdrInputSocket() {
+    var ws = herdrIn.ws;
+    if (ws && (ws.readyState === NativeWS.CONNECTING || ws.readyState === NativeWS.OPEN)) return ws;
+    var url =
+      (location.protocol === "https:" ? "wss:" : "ws:") +
+      "//" +
+      location.host +
+      "/rc-herdr-input?prof=" +
+      encodeURIComponent(profileArg()) +
+      "&dev=" +
+      encodeURIComponent(deviceId());
+    try {
+      ws = new NativeWS(url);
+    } catch (_) {
+      return null;
+    }
+    herdrIn.ws = ws;
+    ws.addEventListener("message", function (ev) {
+      var reply = null;
+      try {
+        reply = JSON.parse(ev.data);
+      } catch (_) {}
+      if (!reply) return;
+      if (reply.blocked) showToast("Panel bloqueado por " + reply.blocked);
+      else if (reply.ok === false) showToast("No se pudo escribir en ese panel");
+    });
+    ws.addEventListener("close", function () {
+      if (herdrIn.ws === ws) herdrIn.ws = null;
+    });
+    return ws;
+  }
+
+  // True when the frame went to this device's pane instead of through herdr.
+  function routeHerdrInput(data) {
+    if (!onHerdrTab()) return false;
+    var text = inputText(data);
+    if (text === null) return false;
+    var now = Date.now();
+    if (text.indexOf(HERDR_PREFIX) !== -1) {
+      // herdr's own keys: they may move the focus, so learn the pane after.
+      herdrIn.passUntil = now + PREFIX_PASS_MS;
+      herdrIn.pane = "";
+      return false;
+    }
+    if (now < herdrIn.passUntil || herdrIn.chrome || !isTyping(text)) return false;
+    var mark = myHerdrMark();
+    var ws = herdrInputSocket();
+    // Not connected yet (or an older server): through herdr, as before.
+    if (!mark || !ws || ws.readyState !== NativeWS.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ pane: mark.pane, text: text }));
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
+  // A click inside a pane makes it this device's; one on herdr's sidebar or
+  // tabs (a menu, a rename) leaves the keys to herdr until the next pane click.
+  function noteHerdrClick(ev) {
+    if (!onHerdrTab()) return;
+    var term = xterm();
+    var screen = term && term.element && term.element.querySelector(".xterm-screen");
+    if (!screen || !ev.target || !screen.contains(ev.target)) return;
+    var rect = screen.getBoundingClientRect();
+    var x = Math.floor(((ev.clientX - rect.left) / rect.width) * term.cols);
+    var y = Math.floor(((ev.clientY - rect.top) / rect.height) * term.rows);
+    myHerdrMark();
+    var hit = paneMarks.marks.filter(function (mark) {
+      var box = paneMarks.boxes[mark.box];
+      return box && x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h;
+    })[0];
+    herdrIn.chrome = !hit;
+    if (hit) herdrIn.pane = hit.pane;
+    placePaneMarks(term);
+  }
+
+  function bootHerdrInput() {
+    document.addEventListener("pointerdown", noteHerdrClick, true);
+  }
+
+  // "Ver historial": everything the pane or tab still holds, in a read-only
+  // terminal at its own width, scaled to this screen.
+  function closeLogView() {
+    var view = document.getElementById("rc-log-view");
+    if (!view) return;
+    if (view.__rcTerm) {
+      try {
+        view.__rcTerm.dispose();
+      } catch (_) {}
+    }
+    window.removeEventListener("keydown", logViewKey, true);
+    view.remove();
+  }
+
+  function logViewKey(ev) {
+    if (!document.getElementById("rc-log-view")) return;
+    // Nothing typed here reaches the terminal behind.
+    ev.stopImmediatePropagation();
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeLogView();
+    }
+  }
+
+  var ANSI_RE = /\x1b\[[0-9;:?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g;
+
+  function openLogView(kind, target, title) {
+    closeLogView();
+    var view = document.createElement("div");
+    view.id = "rc-log-view";
+    view.setAttribute("role", "dialog");
+    view.setAttribute("aria-modal", "true");
+    view.setAttribute("aria-label", "Historial de " + title);
+    var box = document.createElement("div");
+    box.className = "rc-log-box";
+    var head = document.createElement("div");
+    head.className = "rc-log-head";
+    var name = document.createElement("span");
+    name.className = "rc-log-title";
+    name.textContent = "Historial · " + title;
+    head.appendChild(name);
+    head.appendChild(
+      wsButton("✕", "rc-log-close", "Cerrar", function () {
+        closeLogView();
+      })
+    );
+    var body = document.createElement("div");
+    body.className = "rc-log-body";
+    var note = document.createElement("div");
+    note.className = "rc-log-note";
+    note.textContent = "Cargando…";
+    body.appendChild(note);
+    box.appendChild(head);
+    box.appendChild(body);
+    view.appendChild(box);
+    view.addEventListener("pointerdown", function (ev) {
+      if (ev.target === view) closeLogView();
+    });
+    (document.body || document.documentElement).appendChild(view);
+    window.addEventListener("keydown", logViewKey, true);
+    var query = (kind === "pane" ? "pane=" : "tab=") + encodeURIComponent(target);
+    fetch("/rc-log?" + query, { cache: "no-store" })
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (res) {
+        if (document.getElementById("rc-log-view") !== view) return;
+        if (!res || !res.ok) {
+          note.textContent = "No se pudo leer el historial";
+          return;
+        }
+        var lines = String(res.text || "").split("\n");
+        if (!res.text) {
+          note.textContent = "Sin historial";
+          return;
+        }
+        var widest = 0;
+        lines.forEach(function (line) {
+          widest = Math.max(widest, line.replace(ANSI_RE, "").length);
+        });
+        var cols = Math.max(20, Math.min(400, res.cols || widest || 80));
+        var proto = window.term;
+        var Term = proto && proto.constructor;
+        if (!Term) {
+          note.textContent = "No se pudo abrir el historial";
+          return;
+        }
+        var opts = termOptions(proto.options);
+        opts.disableStdin = true;
+        opts.cursorBlink = false;
+        opts.scrollback = lines.length + 100;
+        var term = new Term(opts);
+        view.__rcTerm = term;
+        body.removeChild(note);
+        term.open(body);
+        try {
+          lockTheme(term);
+        } catch (_) {}
+        // Its own columns, the font scaled so they fit across this screen.
+        var rect = body.getBoundingClientRect();
+        var cell = cellOf(term);
+        var font = term.options.fontSize || BASE_FONT;
+        if (cell && rect.width > 20) {
+          var want = Math.floor((rect.width / ((cols * cell.width) / font)) * 2) / 2;
+          term.options.fontSize = Math.max(6, Math.min(BASE_FONT, want));
+          cell = cellOf(term) || cell;
+        }
+        var rows = Math.max(4, Math.floor(rect.height / ((cell && cell.height) || 17)));
+        term.resize(cols, rows);
+        term.write("\x1b[?25l" + res.text.replace(/\r?\n/g, "\r\n"), function () {
+          term.scrollToBottom();
+        });
+      })
+      .catch(function () {
+        note.textContent = "No se pudo leer el historial";
+      });
+  }
+
   function openPaneOwnerPop(dot) {
     var pane = dot.dataset.pane;
     if (!pane) return;
-    openOwnerPop(dot, "pane:" + pane, dot.dataset.owner || "", "Usuario de este panel", function (id) {
-      setPaneOwner(pane, id);
-    });
+    openOwnerPop(
+      dot,
+      "pane:" + pane,
+      dot.dataset.owner || "",
+      "Usuario de este panel",
+      function (id) {
+        setPaneOwner(pane, id);
+      },
+      { kind: "pane", target: pane, locked: dot.dataset.locked === "1" }
+    );
   }
 
   // A plain tab's dot: its owner sets its size and the account of its CLIs
@@ -5116,9 +5596,16 @@
       return s.id === tab;
     })[0];
     var owner = item && typeof item.owner === "string" ? item.owner : "";
-    openOwnerPop(dot, "tab:" + tab, owner, "Usuario de esta pestaña", function (id) {
-      setTabOwner(tab, id);
-    });
+    openOwnerPop(
+      dot,
+      "tab:" + tab,
+      owner,
+      "Usuario de esta pestaña",
+      function (id) {
+        setTabOwner(tab, id);
+      },
+      { kind: "tab", target: tab, locked: !!(item && item.locked) }
+    );
   }
 
   function setTabOwner(tab, prof) {
@@ -5131,7 +5618,7 @@
     fetch("/rc-tab-owner", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tab: tab, profile: prof }),
+      body: JSON.stringify({ tab: tab, profile: prof, by: profileArg() }),
     })
       .then(function (resp) {
         return resp.json();
@@ -5163,7 +5650,7 @@
     fetch("/rc-herdr-owner", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pane: pane, profile: prof }),
+      body: JSON.stringify({ pane: pane, profile: prof, by: profileArg() }),
     })
       .then(function (resp) {
         return resp.json();
@@ -9502,10 +9989,10 @@
     bootPaste();
     bootCopyChip();
     bootOsc52();
-    bootSizeClaim();
     bootPaneMarks();
     bootSound();
     bootGuestSize();
+    bootHerdrInput();
     bootGpuWatch();
     bootLinks();
     bootPinScroll();
