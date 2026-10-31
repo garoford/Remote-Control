@@ -2085,6 +2085,7 @@
 
   function sendInput(text) {
     if (!text) return false;
+    if (liveView) return liveView.send(text);
     pingProfile(/[\r\n]/.test(text));
     if (isTyping(text)) typedHere();
     var ws = window.__rcTermSocket;
@@ -4850,7 +4851,18 @@
   var FRAME_TR = "┐┓╗╮";
   var FRAME_V = "│┃║";
   var FRAME_BL = "└┗╚╰";
-  var paneMarks = { sig: "", at: 0, busy: false, boxes: [], marks: [] };
+  var paneMarks = { sig: "", seen: "", geo: "", at: 0, busy: false, boxes: [], marks: [] };
+  // Same screen: who owns each pane (and herdr's focus) is asked again this often.
+  var MARKS_REFRESH_MS = 1500;
+  var marksSoon = [];
+
+  // A click or a key may have switched herdr's tab or workspace: look again
+  // right away instead of at the next tick.
+  function scanPaneMarksSoon() {
+    if (!onHerdrTab()) return;
+    marksSoon.forEach(clearTimeout);
+    marksSoon = [setTimeout(scanPaneMarks, 150), setTimeout(scanPaneMarks, 500)];
+  }
   var typedAt = 0;
   ["keydown", "paste", "beforeinput"].forEach(function (type) {
     document.addEventListener(
@@ -5091,7 +5103,7 @@
     var term = xterm();
     if (!onHerdrTab() || !term || !term.buffer || document.hidden) {
       paneMarks.marks = [];
-      paneMarks.sig = "";
+      paneMarks.sig = paneMarks.seen = paneMarks.geo = "";
       placePaneMarks(null);
       return;
     }
@@ -5103,7 +5115,21 @@
       if (whole) boxes = [whole];
       single = !!whole;
     }
+    // What changes when herdr shows another tab or workspace, even one with
+    // the same shape: the frames, their titles (top row of each frame) and
+    // herdr's top row. Not the panes' content: that changes all the time.
     var sig =
+      tabId() +
+      "|" +
+      (cells[0] || []).join("") +
+      "|" +
+      boxes
+        .map(function (b) {
+          var top = (cells[b.y] || []).slice(b.x, b.x + b.w).join("");
+          return [b.x, b.y, b.w, b.h, top].join(",");
+        })
+        .join(";");
+    var geo =
       tabId() +
       "|" +
       boxes
@@ -5112,13 +5138,17 @@
         })
         .join(";");
     // New frames: old marks would sit in the wrong places until the answer.
-    if (sig !== paneMarks.sig) paneMarks.marks = [];
+    // Only new titles (a CLI's spinner, another tab of the same shape): the
+    // marks stay until the answer says otherwise.
+    if (geo !== paneMarks.geo) paneMarks.marks = [];
+    paneMarks.geo = geo;
+    paneMarks.seen = sig;
     paneMarks.boxes = boxes;
     // Open before the first key, so it already goes to this device's pane.
     herdrInputSocket();
     placePaneMarks(term);
     var now = Date.now();
-    if (paneMarks.busy || (sig === paneMarks.sig && now - paneMarks.at < 4000)) return;
+    if (paneMarks.busy || (sig === paneMarks.sig && now - paneMarks.at < MARKS_REFRESH_MS)) return;
     paneMarks.sig = sig;
     paneMarks.at = now;
     if (!boxes.length) return;
@@ -5141,7 +5171,8 @@
       })
       .then(function (payload) {
         paneMarks.busy = false;
-        if (paneMarks.sig !== sig) return;
+        // The screen moved on while asking: ask again for what it shows now.
+        if (paneMarks.seen !== sig) return scanPaneMarks();
         paneMarks.marks = (payload && payload.marks) || [];
         placePaneMarks(xterm());
       })
@@ -5349,24 +5380,22 @@
   // keys (prefix ctrl+b and the key after it) still go through herdr.
   var HERDR_PREFIX = "\x02";
   var PREFIX_PASS_MS = 1500;
-  var herdrIn = { ws: null, pane: "", sig: "", passUntil: 0, chrome: false };
+  var herdrIn = { ws: null, pane: "", passUntil: 0, chrome: false };
 
   function myHerdrMark() {
-    if (herdrIn.sig !== paneMarks.sig) {
-      // Another tab or layout: learn the pane again.
-      herdrIn.sig = paneMarks.sig;
-      herdrIn.pane = "";
-      herdrIn.chrome = false;
-    }
     var marks = paneMarks.marks;
+    // Still asking which panes these are: keep the one this device had.
+    if (!marks.length) return null;
     var mine = herdrIn.pane
       ? marks.filter(function (mark) {
           return mark.pane === herdrIn.pane;
         })[0]
       : null;
     if (mine) return mine;
+    // Not on screen any more (another tab or workspace): herdr's focus there.
     var seen = focusedMark();
     herdrIn.pane = seen ? seen.pane : "";
+    herdrIn.chrome = false;
     return seen;
   }
 
@@ -5453,9 +5482,20 @@
 
   // "Ver historial": everything the pane or tab still holds, in a read-only
   // terminal at its own width, scaled to this screen.
+  // While "Ver historial" shows a terminal live, the page's own typing
+  // (Enter, arrows, the keys bar, paste: sendInput) goes to it, not to the
+  // terminal behind.
+  var liveView = null;
+
   function closeLogView() {
     var view = document.getElementById("rc-log-view");
     if (!view) return;
+    if (liveView) {
+      try {
+        liveView.ws.close();
+      } catch (_) {}
+      liveView = null;
+    }
     if (view.__rcTerm) {
       try {
         view.__rcTerm.dispose();
@@ -5467,6 +5507,8 @@
 
   function logViewKey(ev) {
     if (!document.getElementById("rc-log-view")) return;
+    // Live: the keys are for the terminal in the window (Esc too: CLIs use it).
+    if (liveView) return;
     // Nothing typed here reaches the terminal behind.
     ev.stopImmediatePropagation();
     if (ev.key === "Escape") {
@@ -5476,6 +5518,84 @@
   }
 
   var ANSI_RE = /\x1b\[[0-9;:?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g;
+
+  // The history above, then the terminal as it is now, live: what it prints
+  // shows up and what is typed here goes into it (/rc-live).
+  function goLive(view, term, body, kind, target) {
+    var url =
+      (location.protocol === "https:" ? "wss:" : "ws:") +
+      "//" +
+      location.host +
+      "/rc-live?" +
+      (kind === "pane" ? "pane=" : "tab=") +
+      encodeURIComponent(target) +
+      "&prof=" +
+      encodeURIComponent(profileArg());
+    var ws;
+    try {
+      ws = new NativeWS(url);
+    } catch (_) {
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    var live = {
+      ws: ws,
+      send: function (text) {
+        if (ws.readyState !== NativeWS.OPEN || !text) return false;
+        try {
+          ws.send(JSON.stringify({ text: text }));
+        } catch (_) {
+          return false;
+        }
+        return true;
+      },
+    };
+    ws.addEventListener("open", function () {
+      if (document.getElementById("rc-log-view") !== view) return ws.close();
+      liveView = live;
+      view.classList.add("is-live");
+      term.options.disableStdin = false;
+      term.options.cursorBlink = true;
+      try {
+        term.focus();
+      } catch (_) {}
+    });
+    ws.addEventListener("message", function (ev) {
+      if (typeof ev.data === "string") {
+        var msg = null;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch (_) {}
+        if (!msg) return;
+        if (msg.blocked) showToast("Bloqueado por " + msg.blocked);
+        if (msg.cols > 1 && msg.rows > 1) fitLive(term, body, msg.cols, msg.rows);
+        return;
+      }
+      term.write(new Uint8Array(ev.data));
+    });
+    ws.addEventListener("close", function () {
+      if (liveView === live) liveView = null;
+      view.classList.remove("is-live");
+      term.options.disableStdin = true;
+    });
+    term.onData(function (data) {
+      live.send(data);
+    });
+  }
+
+  // The live screen at the terminal's own grid (its programs draw at those
+  // positions), the font scaled so it fits this window.
+  function fitLive(term, body, cols, rows) {
+    var rect = body.getBoundingClientRect();
+    var cell = cellOf(term);
+    var font = term.options.fontSize || BASE_FONT;
+    if (cell && rect.width > 20 && rect.height > 20) {
+      var want = Math.min(rect.width / ((cols * cell.width) / font), rect.height / ((rows * cell.height) / font));
+      term.options.fontSize = Math.max(6, Math.min(BASE_FONT, Math.floor(want * 2) / 2));
+    }
+    if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+    term.scrollToBottom();
+  }
 
   function openLogView(kind, target, title) {
     closeLogView();
@@ -5560,8 +5680,9 @@
         }
         var rows = Math.max(4, Math.floor(rect.height / ((cell && cell.height) || 17)));
         term.resize(cols, rows);
-        term.write("\x1b[?25l" + res.text.replace(/\r?\n/g, "\r\n"), function () {
+        term.write(res.text.replace(/\r?\n/g, "\r\n") + "\r\n", function () {
           term.scrollToBottom();
+          goLive(view, term, body, kind, target);
         });
       })
       .catch(function () {
@@ -6008,6 +6129,8 @@
 
   function bootPaneMarks() {
     setInterval(scanPaneMarks, 1000);
+    document.addEventListener("pointerup", scanPaneMarksSoon, true);
+    document.addEventListener("keyup", scanPaneMarksSoon, true);
     window.addEventListener("resize", function () {
       placePaneMarks(xterm());
     });

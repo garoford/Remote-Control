@@ -528,6 +528,44 @@ def send_input(pane: str, text: str) -> bool:
             return False
 
 
+def pane_size(pane: str) -> tuple[int, int] | None:
+    """(cols, rows) of a pane's terminal, read from its pty: herdr does not say."""
+    import fcntl
+    import struct
+    import termios
+
+    if not PANE_RE.match(pane or ""):
+        return None
+    info = (_api("pane", "process-info", "--pane", pane) or {}).get("process_info") or {}
+    pid = info.get("shell_pid")
+    if not isinstance(pid, int):
+        return None
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return None
+    for fd in fds:
+        try:
+            tty = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if not tty.startswith("/dev/pts/"):
+            continue
+        try:
+            handle = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            rows, cols = struct.unpack("HHHH", fcntl.ioctl(handle, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+        except OSError:
+            continue
+        finally:
+            os.close(handle)
+        if cols > 0 and rows > 0:
+            return cols, rows
+    return None
+
+
 def _stop(hold: dict) -> None:
     proc = hold["proc"]
     try:

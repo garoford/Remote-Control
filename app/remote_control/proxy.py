@@ -19,8 +19,10 @@ import mimetypes
 import queue
 import secrets
 import socket
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -218,6 +220,10 @@ def _http_response(
 
 # A paste larger than this goes in pieces (extra_keys.js keeps them smaller).
 HERDR_INPUT_MAX = 1 << 20
+# "Ver historial" live: how often it checks the terminal's size, and how
+# often a tab's screen is read (herdr panes stream their own changes).
+LIVE_SIZE_EVERY_S = 1.0
+LIVE_TAB_EVERY_S = 0.15
 
 
 def _ws_accept(key: str) -> str:
@@ -245,6 +251,40 @@ def _recv_exact(conn: socket.socket, size: int) -> bytes | None:
             return None
         data += part
     return data
+
+
+def _ws_read(conn: socket.socket, limit: int) -> tuple[int, bytes] | None:
+    """(opcode, unmasked payload) of the page's next WebSocket frame; None when it went away."""
+    head = _recv_exact(conn, 2)
+    if head is None:
+        return None
+    size = head[1] & 0x7F
+    if size == 126:
+        size = int.from_bytes(_recv_exact(conn, 2) or b"\0\0", "big")
+    elif size == 127:
+        size = int.from_bytes(_recv_exact(conn, 8) or bytes(8), "big")
+    if size > limit:
+        return None
+    mask = _recv_exact(conn, 4) if head[1] & 0x80 else b"\0\0\0\0"
+    data = _recv_exact(conn, size) if size else b""
+    if mask is None or data is None:
+        return None
+    return head[0] & 0x0F, bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+
+
+def _ws_upgrade(conn: socket.socket, key: str) -> None:
+    conn.sendall(
+        "\r\n".join(
+            [
+                "HTTP/1.1 101 Switching Protocols",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                "Sec-WebSocket-Accept: " + _ws_accept(key),
+                "",
+                "",
+            ]
+        ).encode("latin1")
+    )
 
 
 def _splice(left: socket.socket, right: socket.socket) -> None:
@@ -465,6 +505,9 @@ class Sidecar:
                 return
             if path == "/rc-profiles" and method in ("GET", "POST"):
                 self._serve_profiles(conn, method, body)
+                return
+            if path == "/rc-live" and method == "GET":
+                self._serve_live(conn, parse_qs(parsed_url.query), headers)
                 return
             if path == "/rc-herdr-input" and method == "GET":
                 self._serve_herdr_input(conn, parse_qs(parsed_url.query), headers)
@@ -1126,36 +1169,13 @@ class Sidecar:
         prof = (query.get("prof") or [""])[0]
         me = prof[1:] if herdr.PROF_ARG_RE.match(prof) else None
         try:
-            conn.sendall(
-                "\r\n".join(
-                    [
-                        "HTTP/1.1 101 Switching Protocols",
-                        "Upgrade: websocket",
-                        "Connection: Upgrade",
-                        "Sec-WebSocket-Accept: " + _ws_accept(key),
-                        "",
-                        "",
-                    ]
-                ).encode("latin1")
-            )
+            _ws_upgrade(conn, key)
             conn.settimeout(None)
             while not self._stop.is_set():
-                head = _recv_exact(conn, 2)
-                if head is None:
+                got = _ws_read(conn, HERDR_INPUT_MAX)
+                if got is None or got[0] == 0x8:
                     break
-                opcode = head[0] & 0x0F
-                size = head[1] & 0x7F
-                if size == 126:
-                    size = int.from_bytes(_recv_exact(conn, 2) or b"\0\0", "big")
-                elif size == 127:
-                    size = int.from_bytes(_recv_exact(conn, 8) or bytes(8), "big")
-                if size > HERDR_INPUT_MAX:
-                    break
-                mask = _recv_exact(conn, 4) if head[1] & 0x80 else b"\0\0\0\0"
-                data = _recv_exact(conn, size) if size else b""
-                if mask is None or data is None or opcode == 0x8:
-                    break
-                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                opcode, payload = got
                 if opcode == 0x9:
                     conn.sendall(_ws_frame(payload, 0xA))
                     continue
@@ -1181,6 +1201,140 @@ class Sidecar:
                     conn.sendall(_ws_frame(json.dumps(reply).encode(), 0x1))
         except OSError:
             pass
+
+    def _serve_live(self, conn: socket.socket, query: dict, headers: dict[str, str]) -> None:
+        """"Ver historial" live: a herdr pane's or a tab's screen as it changes,
+        and what the page types into it. First a {"cols", "rows"} text frame
+        (again whenever the size changes), then binary frames of terminal
+        output; the page sends {"text"} frames."""
+        from remote_control import herdr
+        from remote_control.history import TAB_RE, _tmux
+
+        key = headers.get("sec-websocket-key", "")
+        if headers.get("upgrade", "").lower() != "websocket" or not key:
+            self._json(conn, {"ok": False, "error": "websocket"}, "400 Bad Request")
+            return
+        pane = (query.get("pane") or [""])[0]
+        tab = (query.get("tab") or [""])[0]
+        prof = (query.get("prof") or [""])[0]
+        me = prof[1:] if herdr.PROF_ARG_RE.match(prof) else None
+        if pane and herdr.PANE_RE.match(pane):
+            target = pane
+        elif tab and TAB_RE.match(tab):
+            target = "rc:" + tab
+        else:
+            self._json(conn, {"ok": False, "error": "target"}, "400 Bad Request")
+            return
+        gone = threading.Event()
+        send_lock = threading.Lock()
+
+        def send(payload: bytes, opcode: int) -> None:
+            with send_lock:
+                conn.sendall(_ws_frame(payload, opcode))
+
+        def type_in() -> None:
+            try:
+                while not gone.is_set():
+                    got = _ws_read(conn, HERDR_INPUT_MAX)
+                    if got is None or got[0] == 0x8:
+                        break
+                    opcode, payload = got
+                    if opcode != 0x1:
+                        continue
+                    try:
+                        msg = json.loads(payload.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    text = msg.get("text") if isinstance(msg, dict) else None
+                    if not isinstance(text, str) or not text:
+                        continue
+                    holder = herdr.lock_owner(target)
+                    if holder is not None and holder != me:
+                        send(json.dumps({"blocked": herdr._label(holder)}).encode(), 0x1)
+                    elif pane:
+                        herdr.send_input(pane, text)
+                    else:
+                        _tmux(self.tmux_socket, "send-keys", "-t", f"={tab}:", "-l", text)
+            except OSError:
+                pass
+            gone.set()
+
+        proc = None
+        try:
+            _ws_upgrade(conn, key)
+            conn.settimeout(None)
+            threading.Thread(target=type_in, daemon=True).start()
+            size = None
+            last = b""
+            checked = 0.0
+            frames: queue.Queue = queue.Queue()
+            while not gone.is_set() and not self._stop.is_set():
+                now = time.monotonic()
+                if now - checked >= LIVE_SIZE_EVERY_S:
+                    checked = now
+                    if pane:
+                        fresh = herdr.pane_size(pane)
+                    else:
+                        out = _tmux(self.tmux_socket, "display-message", "-p", "-t", f"={tab}:", "#{pane_width} #{pane_height}", text=True)
+                        parts = out.stdout.split() if out.returncode == 0 else []
+                        fresh = (int(parts[0]), int(parts[1])) if len(parts) == 2 and all(x.isdigit() for x in parts) else None
+                    if fresh is None:
+                        break
+                    if fresh != size:
+                        size = fresh
+                        last = b""
+                        send(json.dumps({"cols": size[0], "rows": size[1]}).encode(), 0x1)
+                        if pane:
+                            if proc is not None:
+                                proc.terminate()
+                            # herdr renders the pane at its own size; frames are ANSI.
+                            proc = subprocess.Popen(
+                                [herdr._herdr_bin(), "terminal", "session", "observe", pane, "--cols", str(size[0]), "--rows", str(size[1])],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                text=True,
+                            )
+
+                            def pump(src=proc) -> None:
+                                for line in iter(src.stdout.readline, ""):
+                                    frames.put((src, line))
+                                frames.put((src, None))
+
+                            threading.Thread(target=pump, daemon=True).start()
+                if pane:
+                    try:
+                        src, line = frames.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    if src is not proc:
+                        continue
+                    if line is None:
+                        break
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    data = event.get("bytes") if isinstance(event, dict) else None
+                    if isinstance(data, str) and data:
+                        send(base64.b64decode(data), 0x2)
+                    continue
+                # A tab: its screen when it changes, redrawn whole.
+                out = _tmux(self.tmux_socket, "capture-pane", "-p", "-e", "-t", f"={tab}:")
+                cur = _tmux(self.tmux_socket, "display-message", "-p", "-t", f"={tab}:", "#{cursor_x} #{cursor_y}", text=True).stdout.split()
+                if out.returncode == 0:
+                    screen = out.stdout.rstrip(b"\n").replace(b"\n", b"\r\n")
+                    if len(cur) == 2 and all(x.isdigit() for x in cur):
+                        screen += f"\x1b[{int(cur[1]) + 1};{int(cur[0]) + 1}H".encode()
+                    if screen != last:
+                        last = screen
+                        send(b"\x1b[H\x1b[2J" + screen, 0x2)
+                gone.wait(LIVE_TAB_EVERY_S)
+        except OSError:
+            pass
+        finally:
+            gone.set()
+            if proc is not None:
+                proc.terminate()
 
     def _json(self, conn: socket.socket, payload: dict, status: str = "200 OK") -> None:
         conn.sendall(

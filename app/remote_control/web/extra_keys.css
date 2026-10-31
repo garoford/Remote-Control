@@ -4217,3 +4217,9 @@ html.rc-is-empty #rc-net-badge {
 #rc-my-pane[hidden] {
   display: none;
 }
+
+/* "Ver historial" live: the terminal takes keys. */
+#rc-log-view.is-live .rc-log-title::after {
+  content: " · en vivo";
+  color: var(--rc-on);
+}
