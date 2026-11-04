@@ -607,6 +607,24 @@ class DeviceViewTests(unittest.TestCase):
         res = herdr.pane_marks(self.BOXES[:2], {"prof": "p", "dev": self.DEV, "tab": self.TAB})
         self.assertEqual(res["marks"], [])
 
+    def test_a_stale_title_falls_back_to_shapes(self) -> None:
+        # The client shows a new two-pane workspace; its title still names the old one.
+        lay = PickLayoutTests.layout(None, "w5:t1", 73, 17)
+        lay["panes"] = lay["panes"][:2]
+        self.snap["layouts"].append(lay)
+        self.snap["panes"] += [{"pane_id": p["pane_id"]} for p in lay["panes"]]
+        res = herdr.pane_marks(self.BOXES[:2], {"prof": "p", "dev": self.DEV, "tab": self.TAB})
+        self.assertFalse(res["exact"])
+        self.assertEqual([m["pane"] for m in res["marks"]], ["w5:t1:a", "w5:t1:b"])
+
+    def test_a_title_a_pane_overwrote_keeps_the_last_workspace(self) -> None:
+        herdr._last_title.clear()
+        self.assertTrue(self.marks()["exact"])
+        self.title = "Ga=d,d=i,i=1145402003,p=518486,q=2;"
+        res = self.marks()
+        self.assertTrue(res["exact"])
+        self.assertEqual([m["pane"] for m in res["marks"]], ["w4:t1:a", "w4:t1:b", "w4:t1:c"])
+
     def test_two_workspaces_with_one_name_fall_back_to_shapes(self) -> None:
         self.snap["workspaces"][0]["label"] = "Quoruz"
         self.assertIsNone(herdr.device_view(self.DEV, self.TAB, self.snap))

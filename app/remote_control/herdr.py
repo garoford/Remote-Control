@@ -307,6 +307,10 @@ WORKSPACE_TITLE_RE = re.compile(r"^workspace: (.+)$")
 # layout, computed at another client's size: same tab, so only rounding
 # separates them (more on a narrow phone).
 VIEW_TOLERANCE = 0.3
+# Last "workspace: <name>" title of each client session. Anything a pane
+# prints can overwrite a tmux pane title: an image escape (kitty graphics,
+# `\e_Ga=d,...\e\\`) becomes the title until herdr sets it again.
+_last_title: dict[str, str] = {}
 
 
 def _device_client(dev: str, tab: str) -> str:
@@ -332,6 +336,10 @@ def device_view(dev: str, tab: str, snap: dict) -> dict | None:
         return None
     title = _tmux(TMUX_SOCKET, "display-message", "-p", "-t", f"={session}:", "#{pane_title}", text=True).stdout.strip()
     m = WORKSPACE_TITLE_RE.match(title)
+    if m:
+        _last_title[session] = title
+    else:
+        m = WORKSPACE_TITLE_RE.match(_last_title.get(session, ""))
     if not m:
         return None
     named = [w for w in snap.get("workspaces") or [] if isinstance(w, dict) and w.get("label") == m.group(1)]
@@ -373,12 +381,16 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     tab = str(viewer.get("tab") or "") if isinstance(viewer, dict) else ""
     layout = device_view(dev, tab, snap)
     ids: list[str] | None = None
-    exact = layout is not None
     if layout is not None:
-        # Known tab: its frames are its panes, or the page misread its screen.
+        # Known tab: its frames are its panes.
         found = _shape_fit(boxes, _layout_panes(layout), VIEW_TOLERANCE)
         ids = found[0] if found else None
-    else:
+        if not ids:
+            # They are not: the title is stale (a new workspace, a title a
+            # pane overwrote). Look for the tab by its shape instead.
+            layout = None
+    exact = layout is not None
+    if layout is None:
         # An older page (no tab) or herdr without the title: by shape, as before.
         candidates = []
         for lay in snap.get("layouts") or []:
