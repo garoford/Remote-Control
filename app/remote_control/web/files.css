@@ -1367,6 +1367,27 @@ html.rc-touch .rcf-menu-item {
   overflow-wrap: anywhere;
 }
 
+.rcf-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.rcf-switch input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--rcf-accent);
+  cursor: pointer;
+}
+
+.rcf-switch input:disabled,
+.rcf-switch input:disabled + span {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .rcf-keys {
   margin-top: 14px;
 }
@@ -1611,6 +1632,15 @@ html.rc-touch .rcf-ops {
 
 .rcf-op.is-fail .rcf-op-text {
   color: var(--rc-red);
+}
+
+.rcf-op-stop {
+  flex: none;
+  height: 32px;
+}
+
+.rcf-op-stop:disabled {
+  opacity: 0.6;
 }
 
 .rcf-undo .rcf-pill {

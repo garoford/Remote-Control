@@ -920,11 +920,38 @@ def _subfolder(folder: Path, sub: str) -> Path:
     return folder
 
 
+# Uploads stopped from the page: a chunk already on its way when "Detener"
+# was pressed must not start the part file again.
+_stopped_uploads: dict[str, float] = {}
+STOPPED_TTL_S = 3600
+
+
+def upload_cancel(dir_raw: str, upload_id: str, sub: str = "") -> dict:
+    """Stop an upload: its half-written part goes, and late chunks are refused."""
+    if not re.match(r"^[a-z0-9]{8,32}$", upload_id or ""):
+        raise FsError("Subida no válida")
+    now = time.time()
+    for old in [k for k, t in _stopped_uploads.items() if now - t > STOPPED_TTL_S]:
+        _stopped_uploads.pop(old, None)
+    _stopped_uploads[upload_id] = now
+    folder = _folder(dir_raw)
+    for part in [p for p in str(sub or "").split("/") if p]:
+        folder = folder / _clean_name(part)
+    try:
+        (folder / f".{upload_id}.rcpart").unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {"ok": True}
+
+
 def upload_chunk(dir_raw: str, name_raw: str, offset: int, total: int, body: bytes, upload_id: str, sub: str = "") -> dict:
     folder = _subfolder(_folder(dir_raw), sub)
     name = _clean_name(name_raw)
     if not re.match(r"^[a-z0-9]{8,32}$", upload_id or ""):
         raise FsError("Subida no válida")
+    if upload_id in _stopped_uploads:
+        (folder / f".{upload_id}.rcpart").unlink(missing_ok=True)
+        raise FsError("Subida detenida")
     if len(body) > UPLOAD_CHUNK_MAX or offset < 0 or total < 0 or offset + len(body) > total:
         raise FsError("Trozo no válido")
     part = folder / f".{upload_id}.rcpart"

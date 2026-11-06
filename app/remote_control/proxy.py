@@ -1439,6 +1439,8 @@ class Sidecar:
                         arg("sub"),
                     ),
                 )
+            elif method == "DELETE" and route == "upload":
+                self._json(conn, fs.upload_cancel(arg("dir"), arg("id"), arg("sub")))
             elif method == "POST" and route == "zip":
                 req = json.loads(body.decode("utf-8") or "{}")
                 req = req if isinstance(req, dict) else {}

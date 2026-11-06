@@ -2013,6 +2013,10 @@
         rowP("Error", r.error);
         return;
       }
+      show(r);
+    });
+
+    function show(r) {
       rowP("Ruta", r.path);
       rowP("Tipo", r.kind === "dir" ? "Carpeta" : KIND_LABEL[kindOf(target)] + " (" + r.mime + ")");
       rowP("Tamaño", r.kind === "dir" ? r.items + " elementos, " + fmtSize(r.size) : fmtSize(r.size) + " (" + r.size.toLocaleString("es") + " bytes)");
@@ -2021,7 +2025,51 @@
       rowP("Accedido", fmtFull(r.atime));
       rowP("Permisos", r.mode + "  ·  " + r.owner + ":" + r.group);
       if (r.usage) rowP("Espacio libre", fmtSize(r.usage.free) + " de " + fmtSize(r.usage.total));
-    });
+      hiddenRow(r.path);
+    }
+
+    // Hidden, on Linux, is a name that starts with a dot: the switch renames it.
+    function hiddenRow(path) {
+      var name = baseName(path);
+      var bare = name.replace(/^\.+/, "");
+      grid.appendChild(el("dt", null, "Oculto"));
+      var dd = el("dd", "rcf-props-hidden");
+      var label = el("label", "rcf-switch");
+      var box = el("input");
+      box.type = "checkbox";
+      box.checked = name.charAt(0) === ".";
+      // Only dots ("..."): there is no visible name to give it.
+      box.disabled = !bare;
+      label.appendChild(box);
+      label.appendChild(el("span", null, box.checked ? "Sí (empieza con punto)" : "No"));
+      dd.appendChild(label);
+      grid.appendChild(dd);
+      box.addEventListener("change", function () {
+        var want = box.checked ? "." + name : bare;
+        box.disabled = true;
+        op({ op: "rename", path: path, name: want }).then(function (r) {
+          if (!r.ok) {
+            box.checked = !box.checked;
+            box.disabled = false;
+            toast(r.error || "No pude cambiarlo");
+            return;
+          }
+          if (!layer.isConnected) return;
+          var titleNode = layer.querySelector(".rcf-dialog-title");
+          if (titleNode) titleNode.textContent = baseName(r.path);
+          // Hidden while hidden files are not shown: it leaves the list, say why.
+          if (box.checked && !prefs.hidden) toast("Ahora es oculto. Ctrl+H muestra los archivos ocultos");
+          t.focusName = baseName(r.path);
+          load(t);
+          target = { path: r.path, name: baseName(r.path), kind: target.kind };
+          op({ op: "props", path: r.path }).then(function (again) {
+            if (!layer.isConnected || !again.ok) return;
+            grid.innerHTML = "";
+            show(again);
+          });
+        });
+      });
+    }
   }
 
   function shortcutsHelp() {
@@ -2903,26 +2951,59 @@
       return;
     }
     var queue = list.slice();
+    // "Detener" on any of them stops this file and the ones still waiting.
+    var stopper = uploadStopper();
     (function nextFile() {
-      var file = queue.shift();
+      var file = stopper.stopped ? null : queue.shift();
       if (!file) {
         var t = tab();
         if (t.path === dest) load(t, true);
         return;
       }
-      uploadOne(file, dest).then(nextFile);
+      uploadOne(file, dest, "", null, stopper).then(nextFile);
     })();
   }
 
-  function uploadOne(file, dest, sub, quiet) {
+  // Shared by the files of one upload: stop() cuts the chunk on its way.
+  function uploadStopper() {
+    var s = {
+      stopped: false,
+      ctrl: null,
+      stop: function () {
+        s.stopped = true;
+        if (s.ctrl) s.ctrl.abort();
+      },
+    };
+    return s;
+  }
+
+  // The server drops the half-sent part (and any chunk still arriving).
+  function cancelUpload(dest, id, sub) {
+    return fetch(
+      "/rc-fs/upload?" + ["dir=" + encodeURIComponent(dest), "id=" + id, "sub=" + encodeURIComponent(sub || "")].join("&"),
+      { method: "DELETE", credentials: "same-origin", cache: "no-store" }
+    ).catch(function () {});
+  }
+
+  // Resolves true (uploaded), false (failed) or "stopped".
+  function uploadOne(file, dest, sub, quiet, stopper) {
     var id = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+    stopper = stopper || uploadStopper();
     // A folder's files share one card (uploadTree): theirs only report errors.
-    var job = quiet || opCard(I.upload, "Subiendo «" + file.name + "»");
+    var job = quiet || opCard(I.upload, "Subiendo «" + file.name + "»", stopper.stop);
     var total = file.size;
     var offset = 0;
     return new Promise(function (resolve) {
+      function stopped() {
+        stopper.ctrl = null;
+        cancelUpload(dest, id, sub);
+        if (!quiet) job.fail("Subida detenida: «" + file.name + "» no se subió");
+        resolve("stopped");
+      }
       (function send() {
+        if (stopper.stopped) return stopped();
         var end = Math.min(total, offset + CHUNK);
+        stopper.ctrl = window.AbortController ? new AbortController() : null;
         var blob = file.slice(offset, end);
         fetch(
           "/rc-fs/upload?" +
@@ -2934,7 +3015,7 @@
               "id=" + id,
               "sub=" + encodeURIComponent(sub || ""),
             ].join("&"),
-          { method: "PUT", body: blob, credentials: "same-origin", cache: "no-store" }
+          { method: "PUT", body: blob, credentials: "same-origin", cache: "no-store", signal: stopper.ctrl ? stopper.ctrl.signal : undefined }
         )
           .then(function (resp) {
             return resp.json().catch(function () {
@@ -2943,6 +3024,12 @@
           })
           .then(
             function (r) {
+              stopper.ctrl = null;
+              if (r.done && r.ok) {
+                // Finished just as "Detener" was pressed: it is up, keep it.
+              } else if (stopper.stopped) {
+                return stopped();
+              }
               if (!r.ok) {
                 job.fail(r.error || "Falló la subida");
                 resolve(false);
@@ -2961,6 +3048,7 @@
               send();
             },
             function () {
+              if (stopper.stopped) return stopped();
               job.fail("Sin conexión");
               resolve(false);
             }
@@ -3019,7 +3107,8 @@
   }
 
   function uploadTree(dirEntry, dest) {
-    var job = opCard(I.upload, "Leyendo «" + dirEntry.name + "»…");
+    var stopper = uploadStopper();
+    var job = opCard(I.upload, "Leyendo «" + dirEntry.name + "»…", stopper.stop);
     var out = { files: [], dirs: [], unreadable: 0 };
     var failed = 0;
     return op({ op: "mkdir", dir: dest, name: dirEntry.name })
@@ -3040,6 +3129,7 @@
             // Empty folders too, in order (parents first).
             return out.dirs.reduce(function (chain, sub) {
               return chain.then(function () {
+                if (stopper.stopped) return;
                 return op({ op: "mkdirs", dir: root, sub: sub });
               });
             }, Promise.resolve());
@@ -3059,7 +3149,9 @@
             return out.files
               .reduce(function (chain, item) {
                 return chain.then(function () {
-                  return uploadOne(item.file, root, item.sub, quiet).then(function () {
+                  if (stopper.stopped) return;
+                  return uploadOne(item.file, root, item.sub, quiet, stopper).then(function (ok) {
+                    if (ok === "stopped") return;
                     done++;
                     job.progress(total ? done / total : 1);
                     job.text("Subiendo carpeta «" + shown + "» · " + done + " de " + total + " archivos");
@@ -3067,10 +3159,16 @@
                 });
               }, Promise.resolve())
               .then(function () {
+                var t = tab();
+                if (stopper.stopped) {
+                  // What already went up stays, in its folder.
+                  job.fail("Subida detenida: " + done + " de " + total + " archivos de «" + shown + "» se subieron");
+                  if (t.path === dest) load(t, true);
+                  return;
+                }
                 var lost = failed + out.unreadable;
                 if (lost) job.fail("«" + shown + "»: " + lost + " de " + (total + out.unreadable) + " archivos no se subieron");
                 else job.done("Subida la carpeta «" + shown + "» (" + total + " archivos)");
-                var t = tab();
                 if (t.path === dest) t.focusName = shown;
               });
           });
@@ -3192,7 +3290,8 @@
 
   // --- operations panel and toasts ------------------------------------------------------------------------
 
-  function opCard(icon, text) {
+  // ``onStop``: the card gets a "Detener" button while it runs.
+  function opCard(icon, text, onStop) {
     var card = el("div", "rcf-op");
     var ic = el("span", "rcf-op-icon");
     ic.innerHTML = icon;
@@ -3202,10 +3301,24 @@
     bar.appendChild(fill);
     card.appendChild(ic);
     card.appendChild(label);
+    var stop = null;
+    if (onStop) {
+      stop = el("button", "rcf-pill rcf-op-stop", "Detener");
+      stop.type = "button";
+      stop.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        stop.disabled = true;
+        stop.textContent = "Deteniendo…";
+        onStop();
+      });
+      card.appendChild(stop);
+    }
     card.appendChild(bar);
     ui.ops.appendChild(card);
     ui.ops.classList.add("is-on");
     function finish(cls, msg, wait) {
+      if (stop) stop.remove();
       card.classList.add(cls);
       label.textContent = msg;
       fill.style.width = "100%";

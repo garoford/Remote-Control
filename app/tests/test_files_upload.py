@@ -45,5 +45,35 @@ class FolderUploadTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
 
 
+class StopUploadTests(unittest.TestCase):
+    """"Detener": the half-sent file goes, and a chunk still on its way is refused."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patch = mock.patch.object(fs, "_home", lambda: self.root)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(fs._stopped_uploads.clear)
+
+    def test_stop_removes_the_part_and_refuses_late_chunks(self) -> None:
+        out = fs.upload_chunk(str(self.root), "big.bin", 0, 10, b"abcde", "stopme1234", "sub")
+        self.assertFalse(out["done"])
+        part = self.root / "sub" / ".stopme1234.rcpart"
+        self.assertTrue(part.exists())
+        self.assertTrue(fs.upload_cancel(str(self.root), "stopme1234", "sub")["ok"])
+        self.assertFalse(part.exists())
+        with self.assertRaises(fs.FsError):
+            fs.upload_chunk(str(self.root), "big.bin", 0, 10, b"abcde", "stopme1234", "sub")
+        self.assertFalse(part.exists())
+        self.assertFalse((self.root / "sub" / "big.bin").exists())
+
+    def test_other_uploads_go_on(self) -> None:
+        fs.upload_cancel(str(self.root), "stopme1234")
+        out = fs.upload_chunk(str(self.root), "ok.txt", 0, 2, b"ok", "another123")
+        self.assertTrue(out["done"])
+
+
 if __name__ == "__main__":
     unittest.main()
