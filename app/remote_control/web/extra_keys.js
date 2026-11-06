@@ -4581,10 +4581,16 @@
       dot.className = "rc-tab-owner";
       dot.setAttribute("role", "button");
       // Its own clicks: the menu to change the tab's user, not the tab.
+      // On a phone the avatar is much of a small pill: on another tab, a tap
+      // opens that tab; the menu only on the tab already showing.
+      var ownerMenuHere = function () {
+        return !document.documentElement.classList.contains("rc-touch") || el.dataset.id === tabId();
+      };
       dot.addEventListener("pointerdown", function (ev) {
-        ev.stopPropagation();
+        if (ownerMenuHere()) ev.stopPropagation();
       });
       dot.addEventListener("click", function (ev) {
+        if (!ownerMenuHere()) return;
         ev.preventDefault();
         ev.stopPropagation();
         toggleTabOwnerPop(dot, el.dataset.id);
