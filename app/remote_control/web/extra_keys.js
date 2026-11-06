@@ -4171,8 +4171,19 @@
   }
 
   // Focus and mouse reports are not someone typing here.
+  // What xterm.js answers by itself when a program asks the terminal
+  // something (herdr or tmux on attach, a CLI starting): colors (OSC 4/10/11/12),
+  // DA1/DA2, DSR (incl. dark/light ?997), DECRPM ($y), window reports (t),
+  // XTGETTCAP/DECRQSS (DCS), kitty (APC, ?…u). Nobody types these: they go
+  // back to whoever asked, never straight into a pane.
+  var TERMINAL_REPORT_RE = /\x1b\]\d+;|\x1bP[\d>]|\x1b_G|\x1b\[[?>=][\d;]*[a-zA-Z]|\x1b\[[\d;?]*\$y|\x1b\[[\d;]*[nt]/;
+
+  function isTerminalReport(data) {
+    return TERMINAL_REPORT_RE.test(data);
+  }
+
   function isTyping(data) {
-    return !!data && data !== "\x1b[I" && data !== "\x1b[O" && !/^\x1b\[(M|<)/.test(data);
+    return !!data && data !== "\x1b[I" && data !== "\x1b[O" && !/^\x1b\[(M|<)/.test(data) && !isTerminalReport(data);
   }
 
   // This device typed in the current tab: stop following, take the size.
@@ -5584,6 +5595,9 @@
       term.options.disableStdin = true;
     });
     term.onData(function (data) {
+      // This copy answers the questions in the stream it replays; herdr
+      // already answered the program that asked: only keys go on.
+      if (isTerminalReport(data)) return;
       live.send(data);
     });
   }
