@@ -1,8 +1,8 @@
 """Read the running herdr layout so the Phone group can copy it as tabs.
 
-herdr shows its panes side by side, which does not fit a phone. "Auto" turns
-each herdr workspace into a workspace and each pane into a tab that reopens
-the same conversation in the same folder.
+herdr shows its panes side by side, which does not fit a phone. "Auto" copies
+the herdr workspace you pick into a workspace of Phone, each pane a tab that
+reopens the same conversation in the same folder, with the pane's owner.
 """
 
 from __future__ import annotations
@@ -80,31 +80,39 @@ def _short(text: str) -> str:
     return " ".join(str(text or "").split())[:LABEL_MAX]
 
 
-def herdr_plan() -> dict:
-    """{"workspaces": [{name, panes: [{label, cwd, command}]}]} or {"error": ...}."""
+def herdr_plan(workspace: str = "") -> dict:
+    """{"workspaces": [{id, name, panes: [{label, cwd, command, owner}]}]} or {"error": ...}.
+
+    ``workspace`` (a herdr workspace id): only that one.
+    """
     workspaces = _api("workspace", "list")
     panes = _api("pane", "list")
     if workspaces is None or panes is None:
         return {"error": "herdr no está corriendo"}
     home = str(Path.home())
+    owners = _load_owners()
     by_ws: dict[str, list[dict]] = {}
     for pane in panes.get("panes") or []:
         if isinstance(pane, dict) and pane.get("workspace_id"):
             by_ws.setdefault(pane["workspace_id"], []).append(pane)
     out = []
     for ws in sorted(workspaces.get("workspaces") or [], key=lambda w: w.get("number") or 0):
+        wid = str(ws.get("workspace_id") or "")
+        if workspace and wid != workspace:
+            continue
         items = []
         # pane list already comes in tab order, then pane order inside the tab
-        for pane in by_ws.get(ws.get("workspace_id"), []):
+        for pane in by_ws.get(wid, []):
+            pid = str(pane.get("pane_id") or "")
             cwd = str(pane.get("foreground_cwd") or pane.get("cwd") or home)
             if not os.path.isdir(cwd):
                 cwd = home
             label = _short(pane.get("label") or pane.get("terminal_title_stripped") or os.path.basename(cwd))
-            items.append({"label": label, "cwd": cwd, "command": _pane_command(str(pane.get("pane_id") or ""))})
+            items.append({"label": label, "cwd": cwd, "command": _pane_command(pid), "owner": owners.get(pid, "")})
         if items:
-            out.append({"name": _short(ws.get("label")) or f"herdr {ws.get('number', '')}".strip(), "panes": items})
+            out.append({"id": wid, "name": _short(ws.get("label")) or f"herdr {ws.get('number', '')}".strip(), "panes": items})
     if not out:
-        return {"error": "herdr no tiene paneles abiertos"}
+        return {"error": "Ese space de herdr ya no existe" if workspace else "herdr no tiene paneles abiertos"}
     return {"workspaces": out}
 
 

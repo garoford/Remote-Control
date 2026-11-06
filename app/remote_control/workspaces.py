@@ -453,10 +453,13 @@ def apply_op(state: dict, op: dict, socket: str = TMUX_SOCKET) -> dict:
         plan = herdr_plan()
         if plan.get("error"):
             return {"ok": False, "error": plan["error"]}
-        phone = [t for ws in state["workspaces"] if ws["group"] == "gphone" for t in ws["tabs"]]
-        return {"ok": True, "plan": plan["workspaces"], "closing": len(phone)}
+        for item in plan["workspaces"]:
+            # A copy made before: copying it again replaces it.
+            item["phone"] = [ws["id"] for ws in _phone_copies(state, item["name"])]
+            item["closing"] = sum(len(ws["tabs"]) for ws in _phone_copies(state, item["name"]))
+        return {"ok": True, "plan": plan["workspaces"]}
     if kind == "herdrApply":
-        return _herdr_apply(state, socket, keep=str(op.get("keep") or ""))
+        return _herdr_apply(state, socket, str(op.get("workspace") or ""), keep=str(op.get("keep") or ""))
     if kind == "create":
         name = _clean_name(op.get("name")) or f"Workspace {len(state['workspaces']) + 1}"
         current = _find(state, state["active"])
@@ -553,21 +556,31 @@ def _group_clear(state: dict, gid: str, socket: str, keep: str = "") -> dict:
     return {"ok": True, "active": state["active"]}
 
 
-def _herdr_apply(state: dict, socket: str, keep: str = "") -> dict:
-    """Replace everything in Phone with herdr's workspaces, one tab per pane.
+def _phone_copies(state: dict, name: str) -> list[dict]:
+    """The workspaces of Phone with this name: earlier copies of that herdr space."""
+    name = _clean_name(name) or "herdr"
+    return [w for w in state["workspaces"] if w["group"] == "gphone" and w["name"] == name]
+
+
+def _herdr_apply(state: dict, socket: str, workspace: str, keep: str = "") -> dict:
+    """Copy one herdr workspace into Phone, one tab per pane, each reopening
+    its conversation with the pane's owner. The rest of Phone stays; an
+    earlier copy of the same space is replaced.
 
     ``keep`` is the tab the phone is showing: the page closes it itself after
     moving to the new tabs, so its reconnect does not bring it back.
     """
     from .herdr import herdr_plan, tab_launch_context
 
-    plan = herdr_plan()
+    if not workspace:
+        return {"ok": False, "error": "Elige un space de herdr"}
+    plan = herdr_plan(workspace)
     if plan.get("error"):
         return {"ok": False, "error": plan["error"]}
     conf, shell, env = tab_launch_context()
     conf_args = ["-f", str(conf)] if conf.is_file() else []
     env_args = tab_env_args(conf, shell)
-    for ws in [w for w in state["workspaces"] if w["group"] == "gphone"]:
+    for ws in _phone_copies(state, plan["workspaces"][0]["name"]):
         for tab in ws["tabs"]:
             if tab == keep:
                 continue
@@ -589,6 +602,8 @@ def _herdr_apply(state: dict, socket: str, keep: str = "") -> dict:
             )
             if made.returncode != 0:
                 continue
+            # The pane's owner owns the tab: its CLIs run with that account.
+            _tmux(socket, "set-option", "-t", f"={tab}:", "@rc_prof", "p" + str(pane.get("owner") or ""))
             if pane["command"]:
                 _tmux(socket, "send-keys", "-t", f"={tab}:", "-l", pane["command"])
                 _tmux(socket, "send-keys", "-t", f"={tab}:", "Enter")

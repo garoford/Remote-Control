@@ -6704,7 +6704,7 @@
     head.appendChild(fold);
     if (group.id === "gphone") {
       head.appendChild(
-        wsButton("Auto", "rc-ws-auto", "Copiar herdr a Phone", function () {
+        wsButton("Auto", "rc-ws-auto", "Copiar un space de herdr a Phone", function () {
           openAutoModal();
         })
       );
@@ -6879,28 +6879,39 @@
       });
   }
 
+  // Which herdr space to copy: a dropdown, what it will open, and "Copiar".
   function fillAutoModal(card, note, payload) {
     var plan = payload.plan || [];
-    var panes = 0;
-    plan.forEach(function (ws) {
-      panes += ws.panes.length;
+    var field = document.createElement("label");
+    field.className = "rc-auto-field";
+    var ask = document.createElement("span");
+    ask.textContent = "¿Qué space de herdr quieres copiar?";
+    var pick = document.createElement("select");
+    pick.className = "rc-auto-select";
+    plan.forEach(function (ws, i) {
+      var opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = ws.name + " · " + ws.panes.length + (ws.panes.length === 1 ? " panel" : " paneles");
+      pick.appendChild(opt);
     });
-    note.className = "rc-auto-note is-warn";
-    note.textContent =
-      (payload.closing
-        ? "Se cerrará todo lo que hay en Phone (" + payload.closing + (payload.closing === 1 ? " pestaña" : " pestañas") + "). "
-        : "") +
-      "Se crearán " + plan.length + (plan.length === 1 ? " workspace" : " workspaces") +
-      " con " + panes + (panes === 1 ? " pestaña" : " pestañas") + ". herdr no se toca.";
+    field.appendChild(ask);
+    field.appendChild(pick);
+    card.insertBefore(field, note);
     var list = document.createElement("div");
     list.className = "rc-auto-list";
-    plan.forEach(function (ws) {
-      var block = document.createElement("div");
-      block.className = "rc-auto-ws";
-      var head = document.createElement("div");
-      head.className = "rc-auto-ws-name";
-      head.textContent = ws.name;
-      block.appendChild(head);
+    card.appendChild(list);
+    function show() {
+      var ws = plan[Number(pick.value) || 0];
+      list.innerHTML = "";
+      if (!ws) return;
+      var n = ws.panes.length;
+      // Orange only when something gets closed.
+      note.className = "rc-auto-note" + (ws.closing ? " is-warn" : "");
+      note.textContent =
+        "Se creará «" + ws.name + "» en Phone con " + n + (n === 1 ? " pestaña" : " pestañas") +
+        ", cada chat abierto de nuevo con su dueño" +
+        (ws.closing ? ". Reemplaza la copia anterior (" + ws.closing + (ws.closing === 1 ? " pestaña" : " pestañas") + ")" : "") +
+        ". El resto de Phone y herdr no se tocan.";
       ws.panes.forEach(function (pane) {
         var row = document.createElement("div");
         row.className = "rc-auto-pane";
@@ -6909,16 +6920,30 @@
         label.textContent = pane.label;
         var what = document.createElement("span");
         what.className = "rc-auto-pane-cmd" + (pane.command ? "" : " is-shell");
-        what.textContent = (pane.command || "terminal") + " · " + shortPath(pane.cwd);
+        what.textContent = (pane.command || "terminal") + " · " + shortPath(pane.cwd) + " · " + profileLabel(pane.owner || "");
         what.title = (pane.command || "terminal") + " · " + pane.cwd;
         row.appendChild(label);
         row.appendChild(what);
-        block.appendChild(row);
+        list.appendChild(row);
       });
-      list.appendChild(block);
-    });
-    card.appendChild(list);
-    card.appendChild(autoActions(plan.length ? applyAuto : null));
+    }
+    pick.addEventListener("change", show);
+    show();
+    var bar = autoActions(
+      plan.length
+        ? function (cancel, go) {
+            applyAuto(plan[Number(pick.value) || 0], cancel, go);
+          }
+        : null
+    );
+    var go = bar.querySelector(".rc-auto-go");
+    if (go) go.textContent = "Copiar";
+    card.appendChild(bar);
+    setTimeout(function () {
+      try {
+        pick.focus();
+      } catch (_) {}
+    }, 0);
   }
 
   function autoActions(onApply) {
@@ -7040,28 +7065,29 @@
     });
   }
 
-  function applyAuto(cancel, go) {
-    if (autoBusy) return;
+  function applyAuto(ws, cancel, go) {
+    if (autoBusy || !ws) return;
     autoBusy = true;
     cancel.disabled = true;
     go.disabled = true;
     go.textContent = "Copiando…";
     var current = tabId();
+    // Only the earlier copy of this space is replaced: close its panes first
+    // so their reconnect does not revive them.
     var old = [];
-    (wsState ? wsState.workspaces : []).forEach(function (ws) {
-      if (ws.group === "gphone") old = old.concat(ws.tabs);
+    (wsState ? wsState.workspaces : []).forEach(function (w) {
+      if (ws.phone && ws.phone.indexOf(w.id) !== -1) old = old.concat(w.tabs);
     });
-    // Close the old panes first so their reconnect does not revive them.
     old.forEach(function (id) {
       if (id !== current) disposePane(id);
     });
     var keep = old.indexOf(current) !== -1 ? current : "";
-    wsPost({ op: "herdrApply", keep: keep }).then(function (payload) {
+    wsPost({ op: "herdrApply", workspace: ws.id, keep: keep }).then(function (payload) {
       autoBusy = false;
       if (!payload || !payload.ok) {
         go.disabled = false;
         cancel.disabled = false;
-        go.textContent = "Reemplazar Phone";
+        go.textContent = "Copiar";
         showToast((payload && payload.error) || "No pude copiar herdr");
         return;
       }
@@ -7070,7 +7096,7 @@
       wsPinned = payload.id;
       if (payload.firstTab) openSession(payload.firstTab);
       if (keep) closeSession(keep);
-      showToast("Phone listo");
+      showToast("«" + ws.name + "» copiado a Phone");
     });
   }
 

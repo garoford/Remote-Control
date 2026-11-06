@@ -1856,6 +1856,28 @@ html[data-rc-theme="light"] #rc-auto-modal {
   color: var(--rc-muted);
 }
 
+.rc-auto-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rc-auto-select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid rgb(var(--rc-shade) / 0.5);
+  border-radius: 10px;
+  background: var(--rc-bg, #111214);
+  color: var(--rc-text);
+  font: inherit;
+}
+
+html[data-rc-theme="light"] .rc-auto-select {
+  background: #fff;
+  border-color: rgb(64 63 83 / 0.25);
+}
+
 .rc-auto-note.is-warn {
   padding: 10px 12px;
   border-radius: 10px;
