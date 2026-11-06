@@ -3995,22 +3995,117 @@ html.rc-is-empty #rc-net-badge {
   line-height: 1.45;
 }
 
+/* Phone: a sheet from the bottom, the full width. Each row stacks its info
+   over its switches (side by side they squeezed the name and links into a
+   sliver), and the buttons get a finger's size. */
 @media (max-width: 560px) {
   #rc-local {
-    padding: 8px;
+    padding: 0;
     place-items: end stretch;
   }
 
   .rc-local {
-    max-height: 88vh;
+    width: 100%;
+    max-height: 92vh;
+    max-height: 92dvh;
+    border-width: 1px 0 0;
+    border-radius: 18px 18px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .rc-local-head {
+    flex-wrap: wrap;
+    align-items: center;
     padding: 14px 14px 10px;
   }
 
+  .rc-local-head > div:first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .rc-local-head > .rc-local-tools {
+    gap: 8px;
+  }
+
+  .rc-local-head .rc-local-icon {
+    width: 38px;
+    height: 38px;
+  }
+
+  .rc-local-list {
+    padding: 4px 10px 14px;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
   .rc-local-row {
-    padding: 9px 10px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 11px 12px;
+  }
+
+  .rc-local-name {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .rc-local-meta {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .rc-local-top .rc-local-tools {
+    gap: 8px;
+  }
+
+  .rc-local-icon.is-mini {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+  }
+
+  .rc-local-icon.is-mini svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  /* The switches, under the info: one line each, name left, links right. */
+  .rc-local-acts {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px solid rgb(var(--rc-text-rgb) / 0.07);
+  }
+
+  .rc-local-switchbox {
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .rc-local-switchbox > label {
+    flex-direction: row;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--rc-text);
+  }
+
+  .rc-local-linkbtns {
+    gap: 8px;
+  }
+
+  .rc-local-shared {
+    align-items: flex-start;
+  }
+
+  .rc-local-link {
+    font-size: 12.5px;
   }
 }
 
