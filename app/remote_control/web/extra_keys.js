@@ -985,8 +985,20 @@
       if (typeof addon.onContextLoss === "function") {
         addon.onContextLoss(function () {
           dropGpu(term);
+          repaint(term);
         });
       }
+    } catch (_) {}
+  }
+
+  // ttyd's xterm.js (1.7.7) never releases the context on dispose: it lives on
+  // until garbage collection. Switching tabs quickly piled them up past
+  // Chrome's limit, which then dropped a live one and left that terminal
+  // blank. Give it back explicitly.
+  function releaseGl(gl) {
+    try {
+      var ext = gl && !gl.isContextLost() && gl.getExtension("WEBGL_lose_context");
+      if (ext) ext.loseContext();
     } catch (_) {}
   }
 
@@ -994,10 +1006,16 @@
     var inst = gpuOf(term);
     if (!inst) return;
     if (!GpuClass) GpuClass = inst.constructor;
+    var gl = null;
     try {
-      inst.__rcDisposed = true;
+      gl = inst._renderer && inst._renderer._gl;
+    } catch (_) {}
+    inst.__rcDisposed = true;
+    try {
       inst.dispose();
     } catch (_) {}
+    // After dispose: xterm's own "context lost" listener is gone by now.
+    releaseGl(gl);
   }
 
   // The terminal on screen draws with WebGL (solid blocks, speed). Hidden ones
