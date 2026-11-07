@@ -141,6 +141,19 @@ EDGE_GLYPHS_RE = re.compile(r"^[\u2500-\u259f\s]+|[\u2500-\u259f\s]+$")
 # Several tabs with the same shape and nothing on screen to tell them apart:
 # each device keeps the tab it was last found on.
 _last_tab: dict[str, str] = {}
+# A new pane (a split, a new tab) belongs to whoever made it: of the devices
+# showing that herdr tab, the one that acted (key or click) last, if that was
+# just now. Only failing that the active profile (the device that typed last
+# anywhere, maybe someone else on another screen).
+# dev -> {"prof": id, "tab": herdr tab id, "seen": epoch, "acted": epoch}
+_viewers: dict[str, dict] = {}
+VIEWER_TTL_S = 10.0
+NEW_PANE_ACT_S = 8.0
+# A new pane another device's scan finds first: its maker's own scan comes
+# within a moment (the page looks again right after a key or a click), so
+# the decision waits that long before falling back to the active profile.
+NEW_PANE_WAIT_S = 3.0
+_unsure: dict[str, float] = {}
 
 
 def _owners_file() -> Path:
@@ -287,6 +300,54 @@ def _pick_layout(boxes: list[dict], candidates: list[tuple[dict, list[str], floa
     return None
 
 
+# Keys go straight to a pane (send_input) only when the page's frames are
+# surely that tab's panes: other tabs with the same shape (common: two equal
+# columns) and the page would type into a pane of another tab, and the keys
+# vanish from the screen. Then the text on screen must name it.
+# Asked on every look (a cached "yes" would outlive a switch to a twin tab);
+# each pane's text is read at most once a second (_pane_text_cached).
+_text_cache: dict[str, tuple[str, float]] = {}
+TEXT_TTL_S = 1.0
+
+
+def _pane_text_cached(pid: str) -> str:
+    now = time.time()
+    hit = _text_cache.get(pid)
+    if hit and now - hit[1] < TEXT_TTL_S:
+        return hit[0]
+    for old in [k for k, (_, at) in _text_cache.items() if now - at > 10 * TEXT_TTL_S]:
+        _text_cache.pop(old, None)
+    text = " ".join(_pane_text(pid).split())
+    _text_cache[pid] = (text, now)
+    return text
+
+
+def _surely(boxes: list[dict], ids: list[str], snap: dict) -> bool:
+    """These frames are these panes beyond doubt: no other tab has the shape, or the text says so."""
+    others = []
+    for lay in snap.get("layouts") or []:
+        if not isinstance(lay, dict):
+            continue
+        found = _shape_fit(boxes, _layout_panes(lay), VIEW_TOLERANCE)
+        if found and found[0] != ids:
+            others.append(found[0])
+    if not others:
+        sure = True
+    else:
+
+        def score(cand: list[str]) -> int:
+            total = 0
+            for box, pid in zip(boxes, cand):
+                if box["lines"]:
+                    text = _pane_text_cached(pid)
+                    total += sum(1 for line in box["lines"] if _line_seen(line, text))
+            return total
+
+        mine = score(ids)
+        sure = mine > 0 and all(score(o) < mine for o in others)
+    return sure
+
+
 def _pane_text(pane_id: str) -> str:
     try:
         result = subprocess.run(
@@ -363,9 +424,9 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
 
     ``viewer`` ({prof, dev, single, idle_ms}) says who measured the frames:
     the panes of that profile get held at the size they have on its screen.
+    ``acted_ms``: how long ago it pressed a key or clicked (a new pane in the
+    tab it shows is then its own).
     """
-    from .profiles import read_active
-
     boxes = _outer_boxes(_clean_boxes(raw_boxes))
     snap = (_api("api", "snapshot") or {}).get("snapshot")
     if not boxes or not isinstance(snap, dict):
@@ -375,16 +436,6 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     _drop_dead_locks(live)
     if not live:
         return {"ok": True, "marks": []}
-    owners = _load_owners()
-    fresh = {pid: owners.get(pid, "") for pid in live if pid in owners}
-    if len(fresh) != len(live) or len(owners) != len(fresh):
-        active = read_active()
-        for pid in live - fresh.keys():
-            # A CLI started there first already noted its owner (profiles.zsh).
-            fresh[pid] = _read_pin(pid, active)
-        _save_owners(fresh)
-        _drop_dead_pins(live)
-    _write_missing_pins(fresh)
     dev = str(viewer.get("dev") or "") if isinstance(viewer, dict) else ""
     tab = str(viewer.get("tab") or "") if isinstance(viewer, dict) else ""
     layout = device_view(dev, tab, snap)
@@ -410,6 +461,9 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
                 if cand == ids and isinstance(lay.get("tab_id"), str):
                     _last_tab[dev] = lay["tab_id"]
                     layout = lay
+    if ids and isinstance(layout, dict):
+        _note_viewer(dev, viewer, layout.get("tab_id"))
+    fresh = _pane_owners(snap, live)
     if not ids:
         return {"ok": True, "marks": []}
     if isinstance(viewer, dict):
@@ -419,6 +473,8 @@ def pane_marks(raw_boxes: object, viewer: object = None) -> dict:
     return {
         "ok": True,
         "exact": exact,
+        # Typing may go straight to these panes (else through herdr).
+        "sure": _surely(boxes, ids, snap),
         "marks": [
             {"box": i, "pane": pid, "owner": fresh.get(pid, ""), "locked": pid in locks, "focused": pid == focused}
             for i, pid in enumerate(ids)
@@ -442,6 +498,75 @@ HOLD_MAX = (1000, 500)
 # Two devices of the owner on screen: the one typed on last sets the size.
 _holds: dict[str, dict] = {}
 _holds_lock = threading.Lock()
+
+
+def _note_viewer(dev: str, viewer: object, tab_id: object) -> None:
+    """This device shows that herdr tab, and acted this long ago."""
+    if not isinstance(viewer, dict) or not DEVICE_ID_RE.match(dev) or not isinstance(tab_id, str):
+        return
+    prof = str(viewer.get("prof") or "")
+    if not PROF_ARG_RE.match(prof):
+        return
+    try:
+        acted_ms = max(0, int(viewer.get("acted_ms", viewer.get("idle_ms")) or 0))
+    except (TypeError, ValueError):
+        return
+    now = time.time()
+    for old in [d for d, v in _viewers.items() if now - v["seen"] > VIEWER_TTL_S]:
+        _viewers.pop(old, None)
+    _viewers[dev] = {"prof": prof[1:], "tab": tab_id, "seen": now, "acted": now - acted_ms / 1000}
+
+
+def _maker(tab_id: object) -> str | None:
+    """The profile of whoever just acted on the device showing this tab, None if nobody did."""
+    now = time.time()
+    near = [
+        v
+        for v in _viewers.values()
+        if v["tab"] == tab_id and now - v["seen"] <= VIEWER_TTL_S and now - v["acted"] <= NEW_PANE_ACT_S
+    ]
+    return max(near, key=lambda v: v["acted"])["prof"] if near else None
+
+
+def _pane_owners(snap: dict, live: set[str]) -> dict[str, str]:
+    """Every live pane's owner; a new one gets its maker's (or else the active profile)."""
+    from .profiles import read_active
+
+    owners = _load_owners()
+    fresh = {pid: owners.get(pid, "") for pid in live if pid in owners}
+    if len(fresh) != len(live) or len(owners) != len(fresh):
+        tabs = {p["pane_id"]: p.get("tab_id") for p in snap.get("panes") or [] if isinstance(p, dict) and isinstance(p.get("pane_id"), str)}
+        active = read_active()
+        now = time.time()
+        for gone in [pid for pid in _unsure if pid not in live]:
+            _unsure.pop(gone, None)
+        waiting: dict[str, str] = {}
+        for pid in live - fresh.keys():
+            maker = _maker(tabs.get(pid))
+            if maker is None:
+                # A CLI started there first already noted its owner (profiles.zsh).
+                guess = _read_pin(pid, active)
+                if now - _unsure.setdefault(pid, now) < NEW_PANE_WAIT_S:
+                    waiting[pid] = guess
+                else:
+                    _unsure.pop(pid, None)
+                    fresh[pid] = guess
+                continue
+            _unsure.pop(pid, None)
+            fresh[pid] = maker
+            # Over the guess profiles.zsh may have noted (the active profile).
+            try:
+                _pins_dir().mkdir(parents=True, exist_ok=True)
+                (_pins_dir() / pid).write_text(maker + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        _save_owners(fresh)
+        _drop_dead_pins(live)
+        _write_missing_pins(fresh)
+        # Shown with the guess meanwhile; not kept until it is sure.
+        return {**fresh, **waiting}
+    _write_missing_pins(fresh)
+    return fresh
 
 
 def _owner_size(box: dict, single: bool) -> tuple[int, int]:

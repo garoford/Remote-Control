@@ -4888,7 +4888,11 @@
   var FRAME_TR = "┐┓╗╮";
   var FRAME_V = "│┃║";
   var FRAME_BL = "└┗╚╰";
-  var paneMarks = { sig: "", seen: "", geo: "", at: 0, busy: false, boxes: [], marks: [] };
+  // ``view``: what the screen shows (tab strip, frames, their titles, minus
+  // spinner glyphs); ``answered``: the view the marks were answered for, and
+  // ``sure`` whether the server is certain of those panes. Keys go straight
+  // to a pane only while all three hold (myHerdrMark).
+  var paneMarks = { sig: "", seen: "", geo: "", view: "", answered: "", sure: false, at: 0, busy: false, boxes: [], marks: [] };
   // Same screen: who owns each pane (and herdr's focus) is asked again this often.
   var MARKS_REFRESH_MS = 1500;
   var marksSoon = [];
@@ -4901,6 +4905,18 @@
     marksSoon = [setTimeout(scanPaneMarks, 150), setTimeout(scanPaneMarks, 500)];
   }
   var typedAt = 0;
+  // A key or a click on this screen: a herdr pane that appears now (a split,
+  // a new tab, by key or with the mouse) is this device's (herdr._maker).
+  var actedAt = 0;
+  ["keydown", "pointerdown"].forEach(function (type) {
+    document.addEventListener(
+      type,
+      function () {
+        actedAt = Date.now();
+      },
+      true
+    );
+  });
   ["keydown", "paste", "beforeinput"].forEach(function (type) {
     document.addEventListener(
       type,
@@ -5116,7 +5132,9 @@
     // herdr's own focus frame is shared by everyone in the tab: this one is
     // where this device's keys go.
     var ring = document.getElementById("rc-my-pane");
-    var mine = paneMarks.marks.length > 1 && herdrIn.pane && !herdrIn.chrome
+    // Only while the keys really go there (myHerdrMark).
+    var direct = paneMarks.sure && paneMarks.answered === paneMarks.view;
+    var mine = direct && paneMarks.marks.length > 1 && herdrIn.pane && !herdrIn.chrome
       ? paneMarks.marks.filter(function (mark) {
           return mark.pane === herdrIn.pane;
         })[0]
@@ -5143,7 +5161,8 @@
     var term = xterm();
     if (!onHerdrTab() || !term || !term.buffer || document.hidden) {
       paneMarks.marks = [];
-      paneMarks.sig = paneMarks.seen = paneMarks.geo = "";
+      paneMarks.sig = paneMarks.seen = paneMarks.geo = paneMarks.view = paneMarks.answered = "";
+      paneMarks.sure = false;
       placePaneMarks(null);
       return;
     }
@@ -5182,6 +5201,23 @@
     // marks stay until the answer says otherwise.
     if (geo !== paneMarks.geo) paneMarks.marks = [];
     paneMarks.geo = geo;
+    // Letters and digits only: a spinner in a title does not change the view;
+    // another tab of the same shape (other titles, another tab highlighted
+    // by name in the strip) does.
+    var alnum = function (t) {
+      return t.replace(/[^0-9A-Za-z\u00C0-\u024F]+/g, "");
+    };
+    var view =
+      geo +
+      "|" +
+      alnum((cells[0] || []).join("")) +
+      "|" +
+      boxes
+        .map(function (b) {
+          return alnum((cells[b.y] || []).slice(b.x, b.x + b.w).join(""));
+        })
+        .join(";");
+    paneMarks.view = view;
     paneMarks.seen = sig;
     paneMarks.boxes = boxes;
     // Open before the first key, so it already goes to this device's pane.
@@ -5203,7 +5239,14 @@
         boxes: boxes,
         // The tab tells the server which herdr client is this device's, and
         // so which herdr tab is on this screen (herdr.device_view).
-        viewer: { prof: profileArg(), dev: deviceId(), tab: tabId(), single: single, idle_ms: Math.min(864e5, Date.now() - typedAt) },
+        viewer: {
+          prof: profileArg(),
+          dev: deviceId(),
+          tab: tabId(),
+          single: single,
+          idle_ms: Math.min(864e5, Date.now() - typedAt),
+          acted_ms: Math.min(864e5, Date.now() - actedAt),
+        },
       }),
     })
       .then(function (resp) {
@@ -5214,6 +5257,8 @@
         // The screen moved on while asking: ask again for what it shows now.
         if (paneMarks.seen !== sig) return scanPaneMarks();
         paneMarks.marks = (payload && payload.marks) || [];
+        paneMarks.sure = !!(payload && payload.sure);
+        paneMarks.answered = view;
         placePaneMarks(xterm());
       })
       .catch(function () {
@@ -5372,7 +5417,9 @@
         return mark.locked && mark.owner !== me;
       });
       if (!locked) return "";
-      var mark = myHerdrMark();
+      // Not sure which pane is this device's: the keys go through herdr, so
+      // to its focused pane.
+      var mark = myHerdrMark() || focusedMark();
       return mark && mark.locked && mark.owner !== me ? "Panel bloqueado por " + profileLabel(mark.owner) : "";
     }
     var id = tabId();
@@ -5424,8 +5471,10 @@
 
   function myHerdrMark() {
     var marks = paneMarks.marks;
-    // Still asking which panes these are: keep the one this device had.
-    if (!marks.length) return null;
+    // Still asking which panes these are, the marks are of the screen before
+    // (a twin tab: same frames, other panes), or the server is not certain
+    // (other tabs of this shape): the keys go through herdr, never astray.
+    if (!marks.length || !paneMarks.sure || paneMarks.answered !== paneMarks.view) return null;
     var mine = herdrIn.pane
       ? marks.filter(function (mark) {
           return mark.pane === herdrIn.pane;

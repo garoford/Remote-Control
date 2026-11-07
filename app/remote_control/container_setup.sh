@@ -73,7 +73,13 @@ export NVM_DIR="$HOME/.nvm"
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh"
-  have node || try "node" nvm install --lts
+  # nvm is a shell function: try's `timeout` runs programs only, so it gets a
+  # bash of its own that loads nvm first.
+  if ! have node; then
+    try "node" bash -c '. "$NVM_DIR/nvm.sh" && nvm install --lts'
+    # This shell picks up the node just installed (npm, for codex below).
+    . "$NVM_DIR/nvm.sh"
+  fi
 fi
 [[ -x "$HOME/.bun/bin/bun" ]] || try "bun" bash -c '$DL https://bun.sh/install | SHELL=/bin/false bash'
 

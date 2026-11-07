@@ -628,3 +628,106 @@ class DeviceViewTests(unittest.TestCase):
     def test_two_workspaces_with_one_name_fall_back_to_shapes(self) -> None:
         self.snap["workspaces"][0]["label"] = "Quoruz"
         self.assertIsNone(herdr.device_view(self.DEV, self.TAB, self.snap))
+
+
+class NewPaneMakerTests(unittest.TestCase):
+    """A split belongs to whoever made it, not to whoever typed last anywhere."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        herdr._viewers.clear()
+        herdr._unsure.clear()
+        self.addCleanup(herdr._viewers.clear)
+        self.addCleanup(herdr._unsure.clear)
+        self.active = "katherine"
+        (self.base / "profiles" / "katherine").mkdir(parents=True)
+        self.snap = {"panes": [{"pane_id": "w1:p1", "tab_id": "w1:t1"}, {"pane_id": "w2:p1", "tab_id": "w2:t1"}]}
+        for p in (
+            mock.patch.object(profiles, "base_dir", lambda: self.base),
+            mock.patch.object(profiles, "read_active", lambda: self.active),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        herdr._save_owners({"w1:p1": "", "w2:p1": "katherine"})
+
+    def split(self, tab: str, pid: str) -> None:
+        self.snap["panes"].append({"pane_id": pid, "tab_id": tab})
+
+    def owners(self) -> dict:
+        return herdr._pane_owners(self.snap, {p["pane_id"] for p in self.snap["panes"]})
+
+    def test_the_device_that_acted_on_that_tab_owns_the_split(self) -> None:
+        # Alvaro just clicked herdr's split; Katherine typed last, on another tab.
+        herdr._note_viewer("dalvaro0001", {"prof": "p", "acted_ms": 300}, "w1:t1")
+        herdr._note_viewer("dkath00001", {"prof": "pkatherine", "acted_ms": 100}, "w2:t1")
+        self.split("w1:t1", "w1:p2")
+        self.assertEqual(self.owners()["w1:p2"], "")
+        self.assertEqual(herdr._load_owners()["w1:p2"], "")
+        self.assertEqual((self.base / "pane-profile" / "w1:p2").read_text().strip(), "")
+
+    def test_of_two_on_the_same_tab_the_one_that_acted_last(self) -> None:
+        herdr._note_viewer("dalvaro0001", {"prof": "p", "acted_ms": 4000}, "w1:t1")
+        herdr._note_viewer("dkath00001", {"prof": "pkatherine", "acted_ms": 200}, "w1:t1")
+        self.split("w1:t1", "w1:p2")
+        self.assertEqual(self.owners()["w1:p2"], "katherine")
+
+    def test_nobody_acting_there_waits_then_falls_back_to_the_active_profile(self) -> None:
+        herdr._note_viewer("dalvaro0001", {"prof": "p", "acted_ms": 60000}, "w1:t1")
+        self.split("w1:t1", "w1:p2")
+        self.assertEqual(self.owners()["w1:p2"], "katherine")
+        self.assertNotIn("w1:p2", herdr._load_owners())
+        # Its maker's scan arrives within the wait: it is theirs.
+        herdr._note_viewer("dalvaro0001", {"prof": "p", "acted_ms": 200}, "w1:t1")
+        self.assertEqual(self.owners()["w1:p2"], "")
+        self.assertEqual(herdr._load_owners()["w1:p2"], "")
+
+    def test_after_the_wait_the_guess_is_kept(self) -> None:
+        self.split("w1:t1", "w1:p2")
+        self.owners()
+        herdr._unsure["w1:p2"] -= herdr.NEW_PANE_WAIT_S + 1
+        self.assertEqual(self.owners()["w1:p2"], "katherine")
+        self.assertEqual(herdr._load_owners()["w1:p2"], "katherine")
+
+
+class SurelyTests(unittest.TestCase):
+    """Keys go straight to a pane only when no twin tab could be the one on screen."""
+
+    BOXES = [
+        {"x": 0, "y": 0, "w": 73, "h": 34, "lines": ["hola desde jbook uno"]},
+        {"x": 73, "y": 0, "w": 72, "h": 34, "lines": ["segundo panel de jbook uno"]},
+    ]
+
+    @staticmethod
+    def two_cols(tab: str) -> dict:
+        return {
+            "tab_id": tab,
+            "panes": [
+                {"pane_id": f"{tab}:a", "rect": {"x": 0, "y": 0, "width": 73, "height": 34}},
+                {"pane_id": f"{tab}:b", "rect": {"x": 73, "y": 0, "width": 72, "height": 34}},
+            ],
+        }
+
+    def setUp(self) -> None:
+        herdr._text_cache.clear()
+        self.addCleanup(herdr._text_cache.clear)
+        self.texts = {"t1:a": "hola desde jbook uno", "t1:b": "segundo panel de jbook uno", "t2:a": "otra cosa", "t2:b": "nada"}
+        p = mock.patch.object(herdr, "_pane_text", lambda pid: self.texts.get(pid, ""))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_shape_no_other_tab_has_is_sure(self) -> None:
+        snap = {"layouts": [self.two_cols("t1")]}
+        self.assertTrue(herdr._surely(self.BOXES, ["t1:a", "t1:b"], snap))
+
+    def test_a_twin_tab_needs_the_text_to_agree(self) -> None:
+        snap = {"layouts": [self.two_cols("t1"), self.two_cols("t2")]}
+        self.assertTrue(herdr._surely(self.BOXES, ["t1:a", "t1:b"], snap))
+        # The guess was the other twin: the text says no, keys go through herdr.
+        self.assertFalse(herdr._surely(self.BOXES, ["t2:a", "t2:b"], snap))
+
+    def test_blank_screens_are_not_sure(self) -> None:
+        snap = {"layouts": [self.two_cols("t1"), self.two_cols("t2")]}
+        blank = [dict(b, lines=[]) for b in self.BOXES]
+        self.assertFalse(herdr._surely(blank, ["t1:a", "t1:b"], snap))
