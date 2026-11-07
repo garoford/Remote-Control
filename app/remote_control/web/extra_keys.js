@@ -2418,7 +2418,7 @@
   // Reserve the name and paste its path right away; compression and upload
   // finish behind it. Enter is not held back, so a very fast Enter can reach
   // the file before its bytes do.
-  function ingestBlob(blob, asImage) {
+  function ingestBlob(blob, asImage, lead) {
     if (!blob || pasteBusy) return Promise.resolve(false);
     pasteBusy = true;
     pasteGuard = Date.now() + 800;
@@ -2438,7 +2438,7 @@
     return reserveFresh(ext)
       .then(
         function (info) {
-          sendPaste(shellQuote(info.path));
+          sendPaste((lead || "") + shellQuote(info.path));
           showToast("Subiendo…");
           restoreFocusAfterPaste(keyboardWasUp);
           return prepare().then(function (file) {
@@ -2453,7 +2453,7 @@
               return saveBlob(ext, file.blob, file.type);
             })
             .then(function (info) {
-              sendPaste(shellQuote(info.path));
+              sendPaste((lead || "") + shellQuote(info.path));
               return info;
             });
         }
@@ -3544,6 +3544,76 @@
     });
     document.body.appendChild(input);
     return input;
+  }
+
+  // PC: files dragged from the computer onto the terminal take the same road
+  // as the attach button, one after another, their paths on one line. Drops
+  // someone else already took (the explorer, the settings images) are theirs.
+  function droppedFiles(dt) {
+    var files = [];
+    var folders = 0;
+    var items = dt.items;
+    for (var i = 0; i < dt.files.length; i++) {
+      var entry = null;
+      try {
+        entry = items && items[i] && items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+      } catch (_) {}
+      if (entry && entry.isDirectory) folders++;
+      else files.push(dt.files[i]);
+    }
+    return { files: files, folders: folders };
+  }
+
+  function ingestAll(files) {
+    var sent = 0;
+    return files.reduce(function (chain, file) {
+      return chain.then(function () {
+        var image = (file.type || "").indexOf("image/") === 0;
+        return ingestBlob(file, image, sent ? " " : "").then(function (ok) {
+          if (ok) sent++;
+        });
+      });
+    }, Promise.resolve());
+  }
+
+  function bootTermDrop() {
+    var veil = document.createElement("div");
+    veil.id = "rc-term-drop";
+    veil.textContent = "Suelta para adjuntar";
+    document.body.appendChild(veil);
+    var timer = 0;
+    function hasFiles(ev) {
+      var types = ev.dataTransfer && ev.dataTransfer.types;
+      return !!types && Array.prototype.indexOf.call(types, "Files") !== -1;
+    }
+    function hide() {
+      clearTimeout(timer);
+      veil.classList.remove("is-on");
+    }
+    // dragover keeps firing while the file is over the page: once it stops
+    // (left the window, Esc) the veil goes too.
+    window.addEventListener("dragover", function (ev) {
+      if (!hasFiles(ev) || ev.defaultPrevented || window.__rcEmpty) {
+        hide();
+        return;
+      }
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "copy";
+      veil.classList.add("is-on");
+      clearTimeout(timer);
+      timer = setTimeout(hide, 250);
+    });
+    window.addEventListener("drop", function (ev) {
+      hide();
+      if (!hasFiles(ev) || ev.defaultPrevented) return;
+      ev.preventDefault();
+      if (window.__rcEmpty) return;
+      var got = droppedFiles(ev.dataTransfer);
+      if (got.folders) showToast("Solo archivos, no carpetas");
+      if (!got.files.length) return;
+      focusTerm();
+      ingestAll(got.files);
+    });
   }
 
   var dictation = null;
@@ -10253,6 +10323,7 @@
       document.documentElement.classList.remove("rc-touch");
       mountPcMic();
       mountPcFile();
+      bootTermDrop();
       return;
     }
     document.documentElement.classList.add("rc-touch");

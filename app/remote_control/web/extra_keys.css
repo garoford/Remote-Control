@@ -1043,6 +1043,28 @@ html.rc-touch #rc-extra-keys {
   transform: translate(-50%, -14px) scale(0.96);
 }
 
+/* PC: a file from the computer dragged over the terminal. */
+#rc-term-drop {
+  position: fixed;
+  z-index: 2147483002;
+  inset: calc(var(--rc-bar-h, 40px) + 8px) 8px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed rgb(var(--rc-blue-rgb) / 0.75);
+  border-radius: 14px;
+  background: rgb(var(--rc-blue-rgb) / 0.1);
+  color: var(--rc-text);
+  font: 600 15px/1.3 ui-sans-serif, system-ui, sans-serif;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+#rc-term-drop.is-on {
+  opacity: 1;
+}
+
 #rc-toast.is-warn {
   --rc-toast-tone: var(--rc-orange);
   --rc-toast-tone-rgb: var(--rc-orange-rgb);

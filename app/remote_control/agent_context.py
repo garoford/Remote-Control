@@ -24,20 +24,20 @@ BEGIN = "<!-- remote-control:begin (managed by Remote Control, do not edit) -->"
 END = "<!-- remote-control:end -->"
 _BLOCK_RE = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
 
-# (global instructions file relative to a HOME, CLI dir that marks it in use,
+# (global instructions file relative to a HOME, CLI dirs that mark it in use,
 # executables). A file is written where its CLI is installed or already used.
 TARGETS = (
-    (".claude/CLAUDE.md", ".claude", ("claude",)),
-    (".codex/AGENTS.md", ".codex", ("codex",)),
-    (".gemini/GEMINI.md", ".gemini", ("gemini", "agy")),
-    (".qwen/QWEN.md", ".qwen", ("qwen",)),
-    (".config/opencode/AGENTS.md", ".config/opencode", ("opencode",)),
-    (".copilot/copilot-instructions.md", ".copilot", ("copilot",)),
-    (".pi/agent/AGENTS.md", ".pi", ("pi",)),
+    (".claude/CLAUDE.md", (".claude",), ("claude",)),
+    (".codex/AGENTS.md", (".codex",), ("codex",)),
+    (".gemini/GEMINI.md", (".gemini",), ("gemini", "agy")),
+    (".qwen/QWEN.md", (".qwen",), ("qwen",)),
+    (".config/opencode/AGENTS.md", (".config/opencode", ".opencode", ".local/share/opencode"), ("opencode",)),
+    (".copilot/copilot-instructions.md", (".copilot",), ("copilot",)),
+    (".pi/agent/AGENTS.md", (".pi",), ("pi",)),
 )
 # Cursor Agent has no global rules file: it reads AGENTS.md in every folder
 # from the project up to /, so the primary HOME's one reaches projects there.
-CURSOR_TARGET = ("AGENTS.md", ".cursor", ("agent", "cursor-agent"))
+CURSOR_TARGET = ("AGENTS.md", (".cursor",), ("agent", "cursor-agent"))
 
 
 def _homes() -> list[tuple[str, str, Path]]:
@@ -141,8 +141,10 @@ def render(me: str | None) -> str:
     )
 
 
-def _in_use(home: Path, marker: str, bins: tuple[str, ...]) -> bool:
-    return (home / marker).is_dir() or any(shutil.which(b) for b in bins)
+def _in_use(home: Path, markers: tuple[str, ...], bins: tuple[str, ...]) -> bool:
+    # The opencode installer puts its binary in ~/.opencode/bin, which is often
+    # not on Remote Control's PATH: its dirs mark it in use instead.
+    return any((home / m).is_dir() for m in markers) or any(shutil.which(b) for b in bins)
 
 
 def _targets() -> list[tuple[Path, str | None]]:
