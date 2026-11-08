@@ -154,7 +154,31 @@
     if (text != null) n.textContent = text;
     return n;
   }
+  // Mac (and iPad with a keyboard): Cmd and Option, shown as ⌘ and ⌥, with
+  // Finder's own chords where they differ (⌘⌫ papelera, ⇧⌘. ocultos…).
+  var IS_MAC = (function () {
+    var nav = window.navigator || {};
+    var platform = (nav.userAgentData && nav.userAgentData.platform) || nav.platform || "";
+    return /Mac|iPhone|iPad|iPod/i.test(platform) || /Macintosh|iPhone|iPad|iPod/.test(nav.userAgent || "");
+  })();
+  function keyLabel(text) {
+    if (!IS_MAC || !text) return text;
+    return String(text)
+      .replace(/Alt\+← \/ Alt\+→/g, "⌘[ / ⌘]")
+      .replace(/Alt\+←/g, "⌘[")
+      .replace(/Alt\+→/g, "⌘]")
+      .replace(/Alt\+↑ o Retroceso/g, "⌘↑")
+      .replace(/Mayús\+Supr/g, "⌥⌘⌫")
+      .replace(/Supr/g, "⌘⌫")
+      .replace(/Ctrl\+H\b/g, "⇧⌘.")
+      .replace(/Ctrl\+L\b/g, "⇧⌘G")
+      .replace(/Ctrl\+\?/g, "⌘/")
+      .replace(/Ctrl\+Shift\+/g, "⇧⌘")
+      .replace(/Ctrl\+/g, "⌘")
+      .replace(/Alt\+/g, "⌥");
+  }
   function iconBtn(icon, label, fn, cls) {
+    label = keyLabel(label);
     var b = el("button", "rcf-btn" + (cls ? " " + cls : ""));
     b.type = "button";
     b.innerHTML = icon;
@@ -172,7 +196,7 @@
     return window.__rcHost || {};
   }
   function toast(text) {
-    if (host().toast) host().toast(text);
+    if (host().toast) host().toast(keyLabel(text));
   }
   function isTouch() {
     return document.documentElement.classList.contains("rc-touch");
@@ -933,7 +957,7 @@
     if (!list.length) {
       if (t.search != null) ui.body.appendChild(emptyState(I.search, t.search ? "Sin resultados" : "Escribe para buscar", t.search ? "Prueba con otras palabras" : "Busca en " + baseName(t.path) + " y sus subcarpetas"));
       else if (t.path === "trash://") ui.body.appendChild(emptyState(I.trash, "La papelera está vacía", ""));
-      else ui.body.appendChild(emptyState(I.folder, "La carpeta está vacía", prefs.hidden ? "" : "Puede tener archivos ocultos (Ctrl+H)"));
+      else ui.body.appendChild(emptyState(I.folder, "La carpeta está vacía", prefs.hidden ? "" : keyLabel("Puede tener archivos ocultos (Ctrl+H)")));
       renderSel();
       return;
     }
@@ -1163,7 +1187,7 @@
     ui.back.disabled = !t.hist.length && !upInstead(t);
     ui.fwd.disabled = !t.fwd.length;
     ui.viewBtn.innerHTML = prefs.view === "list" ? I.grid : I.list;
-    ui.viewBtn.title = prefs.view === "list" ? "Vista de cuadrícula (Ctrl+2)" : "Vista de lista (Ctrl+1)";
+    ui.viewBtn.title = keyLabel(prefs.view === "list" ? "Vista de cuadrícula (Ctrl+2)" : "Vista de lista (Ctrl+1)");
     ui.searchBtn.classList.toggle("is-on", t.search != null);
     if (t.search != null) {
       ui.loc.classList.add("is-edit", "is-search");
@@ -1616,7 +1640,7 @@
       b.setAttribute("role", item.checked != null ? "menuitemcheckbox" : "menuitem");
       b.innerHTML = item.icon || (item.checked != null ? (item.checked ? I.check : "<span></span>") : "<span></span>");
       b.appendChild(el("span", "rcf-menu-label", item.label));
-      if (item.key && !isTouch()) b.appendChild(el("span", "rcf-menu-key", item.key));
+      if (item.key && !isTouch()) b.appendChild(el("span", "rcf-menu-key", keyLabel(item.key)));
       b.disabled = !!item.disabled;
       b.addEventListener("click", function (ev) {
         ev.stopPropagation();
@@ -2079,6 +2103,7 @@
       ["Ctrl+F o escribir", "Buscar"],
       ["Alt+← / Alt+→", "Atrás / Adelante"],
       ["Alt+↑ o Retroceso", "Carpeta superior"],
+      IS_MAC ? ["⌘↓", "Abrir"] : null,
       ["Intro / Espacio", "Abrir / Vista previa"],
       ["F2", "Renombrar"],
       ["Supr / Mayús+Supr", "Papelera / Eliminar"],
@@ -2092,7 +2117,8 @@
       ["F5", "Recargar"],
       ["Esc", "Cerrar"],
     ].forEach(function (r) {
-      body.appendChild(el("dt", null, r[0]));
+      if (!r) return;
+      body.appendChild(el("dt", null, keyLabel(r[0])));
       body.appendChild(el("dd", null, r[1]));
     });
     dialog("Atajos de teclado", { body: body, alert: true, ok: "Cerrar", wide: true, onOk: function () {} });
@@ -3418,6 +3444,10 @@
     }
     var t = tab();
     var handled = true;
+    if (IS_MAC && ev.metaKey && !ev.ctrlKey && macKey(ev, t)) {
+      ev.preventDefault();
+      return;
+    }
     if (ctrl && (k === "l" || k === "L")) editPath();
     else if (ctrl && (k === "f" || k === "F")) startSearch("");
     else if (ctrl && (k === "h" || k === "H")) toggleHidden();
@@ -3476,6 +3506,52 @@
     else handled = false;
     if (handled) ev.preventDefault();
     else if (!root.contains(target)) ev.preventDefault(); // nothing may reach the terminal
+  }
+
+  // Finder's chords. ev.code for the punctuation ones: on Spanish layouts
+  // [ ] and . sit elsewhere or need Option.
+  function macKey(ev, t) {
+    var k = ev.key;
+    var c = ev.code;
+    if (k === "Backspace") {
+      if (ev.altKey || t.path === "trash://") {
+        if (t.path === "trash://") deleteForeverSel();
+        else deletePermanentSel();
+      } else trashSel();
+      return true;
+    }
+    if (ev.altKey) return false;
+    if (k === "ArrowUp") {
+      goUp();
+      return true;
+    }
+    if (k === "ArrowDown") {
+      var sel = selItems();
+      if (sel.length === 1) activate(sel[0]);
+      return true;
+    }
+    if (c === "BracketLeft") {
+      goBack();
+      return true;
+    }
+    if (c === "BracketRight") {
+      goFwd();
+      return true;
+    }
+    if (ev.shiftKey && c === "Period") {
+      toggleHidden();
+      return true;
+    }
+    if (ev.shiftKey && c === "KeyG") {
+      editPath();
+      return true;
+    }
+    if (!ev.shiftKey && c === "KeyI") {
+      var one = selItems();
+      properties(one.length === 1 ? one[0] : { path: t.path, name: baseName(t.path), kind: "dir" });
+      return true;
+    }
+    return false;
   }
 
   // Keeps the terminal page from seeing anything typed while the explorer is

@@ -849,6 +849,12 @@ def _restart_cli(shell_pid: int, prof: str, working: bool, run) -> dict:
         return {"restarted": False}
     name = CLI_NAMES.get(cli)
     if name is None:
+        # A learned CLI that knows how to resume reopens the same way (adapters.py).
+        from .adapters import get as learned_adapter
+
+        adapter = learned_adapter(cli)
+        name = adapter["name"] if adapter and adapter.get("resume") else None
+    if name is None:
         return {"restarted": False, "note": f"{cli} sigue con la cuenta anterior hasta que lo cierres"}
     if working:
         return {"restarted": False, "note": f"{name} está trabajando: el cambio aplica cuando lo vuelvas a abrir"}

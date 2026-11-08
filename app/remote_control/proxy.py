@@ -38,7 +38,7 @@ from remote_control.history import (
 )
 from remote_control import files as fs
 from remote_control import unpack
-from remote_control import agent_context, devlocal, profiles
+from remote_control import adapters, agent_context, devlocal, profiles
 from remote_control.agents import write_rc_command
 from remote_control.paste import PasteError, paste_dir, reserve_paste_file, write_paste_file
 from remote_control import backgrounds
@@ -344,6 +344,11 @@ class Sidecar:
         while not self._stop.wait(10):
             try:
                 snapshot(socket=self.tmux_socket)
+            except Exception:
+                pass
+            # A new AI CLI seen in a tab or pane is learned in the background.
+            try:
+                adapters.scan()
             except Exception:
                 pass
 

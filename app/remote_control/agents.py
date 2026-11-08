@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import profiles
+from . import adapters, profiles
 from .history import TMUX_SOCKET, close_session
 from .workspaces import PROFILE_CLIS, PROFILE_RE, _children, _cmdline, change_workspaces, open_tab_beside
 
@@ -161,9 +161,10 @@ def caller() -> dict:
 
 
 def _cli_name(argv: list[str]) -> str:
+    learned = adapters.known()
     for part in argv[:2]:
         name = os.path.basename(part)
-        if name in AGENT_CLIS:
+        if name in AGENT_CLIS or name in learned:
             return name
     return ""
 
@@ -418,6 +419,8 @@ def _session_files(agent: dict, since: float) -> list[Path]:
         found = list((home / ".pi" / "agent" / "sessions").glob("*/*.jsonl"))
     elif cli == "codex":
         found = list((home / ".codex" / "sessions").glob("*/*/*/rollout-*.jsonl"))
+    elif adapters.get(cli):
+        return adapters.session_files(adapters.get(cli), home, since)
     else:
         return []
     fresh = []
@@ -479,8 +482,9 @@ def reply_since(agent: dict, sent: str, since: float) -> str | None:
     needle = _norm(sent)[:80]
     if not needle:
         return None
+    adapter = None if agent["cli"] in AGENT_CLIS else adapters.get(agent["cli"])
     for path in _session_files(agent, since):
-        turns = _turns(path)
+        turns = adapters.turns(path, adapter) if adapter else _turns(path)
         anchor = None
         for i in range(len(turns) - 1, -1, -1):
             if turns[i][0] == "user" and needle in _norm(turns[i][1]):
@@ -764,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     p_wait.add_argument("--timeout", type=int, default=WAIT_DEFAULT, help=f"seconds (default {WAIT_DEFAULT}, 0 = no limit)")
     p_wait.add_argument("--lines", type=int, default=40)
     p_spawn = sub.add_parser("spawn", help="open a tab next to yours (same workspace) with an AI CLI; not in herdr")
-    p_spawn.add_argument("cli", choices=sorted(AGENT_CLIS))
+    p_spawn.add_argument("cli", choices=sorted(AGENT_CLIS | adapters.known()))
     p_spawn.add_argument("cli_args", nargs="*", metavar="ARG", help="arguments for the CLI (put them after --)")
     p_spawn.add_argument("--cwd", default=os.getcwd(), help="its folder (default: here)")
     p_spawn.add_argument("--prompt", help="task to send once it is ready")
@@ -776,7 +780,16 @@ def main(argv: list[str] | None = None) -> int:
     p_close = sub.add_parser("close", help="close a tab you opened with rc spawn")
     p_close.add_argument("id")
     sub.add_parser("whoami", help="your profile and pane")
+    p_adapt = sub.add_parser("adapt", help="learn (with an installed AI) how to support an AI CLI with no native support")
+    p_adapt.add_argument("cli", nargs="?", help="the CLI's command name; none lists what was learned")
+    p_adapt.add_argument("--list", action="store_true", help="list the learned CLIs")
+    p_adapt.add_argument("--show", action="store_true", help="print what was learned of CLI")
+    p_adapt.add_argument("--forget", action="store_true", help="undo what was learned of CLI")
+    p_adapt.add_argument("--force", action="store_true", help="learn it again, even if marked as not an AI CLI")
     args = parser.parse_args(argv)
+
+    if args.cmd == "adapt":
+        return adapters.command(args)
 
     if args.cmd == "spawn":
         return _spawn_cmd(args, me)

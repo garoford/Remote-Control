@@ -18,7 +18,7 @@ import re
 import shutil
 from pathlib import Path
 
-from . import profiles
+from . import adapters, profiles
 
 BEGIN = "<!-- remote-control:begin (managed by Remote Control, do not edit) -->"
 END = "<!-- remote-control:end -->"
@@ -117,6 +117,8 @@ def render(me: str | None) -> str:
             "  `rc close <id>` when you are done. Exit 2 right after it opens: the CLI asks something",
             "  first (trust this folder, a login); tell your user. In herdr, open a pane instead (below).",
             "- `rc whoami`: your profile and pane. Full herdr control: `herdr --skill`.",
+            "- An AI CLI with no native support is learned on its own the first time it runs",
+            "  (`rc adapt --list`; `rc adapt <cli>` learns one now, `--forget` undoes it).",
             "",
             "Several people use this machine at the same time through Remote Control, each with",
             "their own AI CLI logins. They all are the same Linux user: a profile is just another",
@@ -147,11 +149,24 @@ def _in_use(home: Path, markers: tuple[str, ...], bins: tuple[str, ...]) -> bool
     return any((home / m).is_dir() for m in markers) or any(shutil.which(b) for b in bins)
 
 
+def _learned_targets() -> list[tuple[str, tuple[str, ...], tuple[str, ...]]]:
+    """TARGETS rows for the CLIs Remote Control learned (adapters.py); a file
+    a native row already writes is left to it."""
+    native = {rel for rel, _m, _b in TARGETS}
+    out = []
+    for adapter in {a["cli"]: a for a in adapters.learned().values()}.values():
+        rel = adapter.get("context_file") or ""
+        if rel and rel not in native and all(rel != row[0] for row in out):
+            out.append((rel, tuple(adapter.get("home_dirs") or ()), tuple(adapter["bins"])))
+    return out
+
+
 def _targets() -> list[tuple[Path, str | None]]:
     """Every file to write, with whose block it gets (render)."""
     paths: list[tuple[Path, str | None]] = []
+    rows = list(TARGETS) + _learned_targets()
     for pid, _label, home in _homes():
-        for rel, marker, bins in TARGETS:
+        for rel, marker, bins in rows:
             if _in_use(home, marker, bins):
                 paths.append((home / rel, pid))
         if not pid and _in_use(home, CURSOR_TARGET[1], CURSOR_TARGET[2]):
@@ -204,6 +219,13 @@ def sync() -> None:
 
 def clear() -> None:
     """Take the block out again (tunnel stopped)."""
+    rels = [t[0] for t in TARGETS] + [CURSOR_TARGET[0]] + [t[0] for t in _learned_targets()]
     for _pid, _label, home in _homes():
-        for rel in [t[0] for t in TARGETS] + [CURSOR_TARGET[0]]:
+        for rel in rels:
             _drop_block(home / rel)
+
+
+def drop_file(rel: str) -> None:
+    """Take the block out of one file (relative to each HOME) everywhere."""
+    for _pid, _label, home in _homes():
+        _drop_block(home / rel)

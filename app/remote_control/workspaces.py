@@ -21,7 +21,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import backgrounds
+from . import adapters, backgrounds
 from .history import TAB_RE, TMUX_SOCKET, _tmux, close_session, closed_tabs, list_sessions
 
 WS_RE = re.compile(r"^w[a-f0-9]{8}$")
@@ -884,8 +884,12 @@ def _pi_session(pid: int, home: Path) -> str:
 
 
 def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
-    """("claude"|"agent"|"agy"|"pi", conversation id or "") for the CLI under a pane's shell."""
+    """("claude"|"agent"|"agy"|"pi", conversation id or "") for the CLI under a pane's shell.
+
+    A CLI Remote Control learned (adapters.py) counts when it knows how to
+    resume it."""
     home = home or Path.home()
+    learned = {n: a for n, a in adapters.learned().items() if a.get("resume")}
     queue = list(_children(pane_pid))
     seen = 0
     fallback = ""
@@ -906,6 +910,10 @@ def detect_cli(pane_pid: int, home: Path | None = None) -> tuple[str, str]:
             if chat:
                 return "agent", chat
             fallback = fallback or "agent"
+        for part in argv[:2]:
+            adapter = learned.get(os.path.basename(part))
+            if adapter:
+                return os.path.basename(part), adapters.session_id(adapter, pid, home)
         queue.extend(_children(pid))
     return fallback, ""
 
@@ -949,7 +957,10 @@ def foreground_argv(pane_pid: int) -> list[str]:
 
 
 def is_cli_tool(argv: list[str], alternate: bool) -> bool:
-    return bool(argv) and (alternate or os.path.basename(argv[0]) in AUTO_RESUME)
+    if not argv:
+        return False
+    name = os.path.basename(argv[0])
+    return alternate or name in AUTO_RESUME or name in adapters.known()
 
 
 def rerun_line(argv: list[str]) -> str:
@@ -1065,7 +1076,7 @@ def _cursor_workspace(chat: str, home: Path) -> str:
 
 def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
     if cli not in RESUME_FLAG:
-        return ""
+        return adapters.resume_line(cli, resume) if cli not in PROFILE_CLIS else ""
     home = home or Path.home()
     if not RESUME_RE.match(resume or ""):
         return cli
@@ -1078,10 +1089,15 @@ def resume_command(cli: str, resume: str, home: Path | None = None) -> str:
     return f"{cli} {RESUME_FLAG[cli]} {resume}"
 
 
-# CLIs the shell wrapper (web/profiles.zsh) runs with a profile's account.
+# CLIs the shell wrapper (web/profiles.zsh) runs with a profile's account:
+# the native ones here, the learned ones from adapters.py (profile_clis).
 PROFILE_CLIS = frozenset(
     ("claude", "agent", "cursor-agent", "codex", "gemini", "agy", "aider", "opencode", "crush", "goose", "qwen", "amp", "copilot", "pi")
 )
+
+
+def profile_clis() -> frozenset[str]:
+    return PROFILE_CLIS | adapters.known()
 
 
 def _rerun(info: dict) -> str:
@@ -1099,7 +1115,7 @@ def _rerun(info: dict) -> str:
     # device typed last.
     if home:
         return f"RC_PROFILE={profile} {line}"
-    if line.split(" ", 1)[0] in PROFILE_CLIS:
+    if line.split(" ", 1)[0] in profile_clis():
         return f"RC_PROFILE= {line}"
     return line
 

@@ -629,6 +629,7 @@
       if (!pane.ws) pane.ws = window.__rcPrimarySocket || window.__rcTermSocket || null;
     }
     primaryPane = pane;
+    widenEmoji(term);
     lockTheme(term);
     hookOsc52(term);
     host.classList.add("rc-pane");
@@ -1070,7 +1071,53 @@
   // default (Unicode 6) counts emoji like 🔒 or ⚠ as one column while the app
   // printing them counts two, so the rest of that line slides over (TUI borders,
   // QR codes, prompts). Give every pane the primary's width tables.
+  // Emoji presentation: a symbol with a text default (⚠ ❤ ✔ ☀, keycap digits)
+  // followed by VS16 (U+FE0F) is drawn as an emoji, two columns wide. herdr,
+  // tmux and the CLIs (string-width) count two; xterm's Unicode 11 table
+  // counts one, so the rest of that row slid one column left: herdr's pane
+  // borders broke on that row and the pane owners could not be matched.
+  // This provider wraps the active table and widens just those sequences.
+  var VS16_SUFFIX = "+vs16";
+  var EMOJI_BASE = 1; // char kind (state bits) of a possible emoji base
+
+  function emojiBase(cp) {
+    return (
+      cp === 0x23 || cp === 0x2a || (cp >= 0x30 && cp <= 0x39) || cp === 0xa9 || cp === 0xae ||
+      (cp >= 0x203c && cp <= 0x3299) || (cp >= 0x1f000 && cp <= 0x1faff)
+    );
+  }
+
+  function vs16Provider(inner) {
+    return {
+      version: inner.version + VS16_SUFFIX,
+      wcwidth: function (cp) {
+        return inner.wcwidth(cp);
+      },
+      charProperties: function (cp, prev) {
+        // (kind << 3) | (width << 1) | joins, as xterm's UnicodeService packs it.
+        if (cp === 0xfe0f && prev >> 3 === EMOJI_BASE && ((prev >> 1) & 3) === 1) return (2 << 1) | 1;
+        var props = inner.charProperties(cp, prev);
+        if (!(props & 1) && emojiBase(cp)) props = (props & 7) | (EMOJI_BASE << 3);
+        return props;
+      },
+    };
+  }
+
+  function widenEmoji(term) {
+    try {
+      var service = term && term._core && term._core.unicodeService;
+      var active = service && service.activeVersion;
+      if (!active || active.slice(-VS16_SUFFIX.length) === VS16_SUFFIX) return;
+      var inner = service._providers && service._providers[active];
+      if (!inner || typeof inner.charProperties !== "function") return;
+      var name = active + VS16_SUFFIX;
+      if (!service._providers[name]) service.register(vs16Provider(inner));
+      service.activeVersion = name;
+    } catch (_) {}
+  }
+
   function matchUnicode(term) {
+    widenEmoji(window.term);
     try {
       var src = window.term && window.term._core && window.term._core.unicodeService;
       var dst = term._core && term._core.unicodeService;
@@ -2515,7 +2562,7 @@
 
   function pasteTextOnly() {
     if (!navigator.clipboard || !navigator.clipboard.readText) {
-      showToast("Pegá con Ctrl+Shift+V");
+      showToast(IS_MAC ? "Pegá con ⌘V" : "Pegá con Ctrl+Shift+V");
       return;
     }
     navigator.clipboard
@@ -2525,7 +2572,7 @@
         else showToast("El clipboard está vacío");
       })
       .catch(function () {
-        showToast("Pegá con Ctrl+Shift+V");
+        showToast(IS_MAC ? "Pegá con ⌘V" : "Pegá con Ctrl+Shift+V");
       });
   }
 
@@ -4436,6 +4483,115 @@
     );
   }
 
+  // --- macOS keys -------------------------------------------------------------
+  // Mac (and iPad with a keyboard) users type Cmd and Option where Linux uses
+  // Ctrl and Alt, the way Terminal.app and iTerm do. Ctrl keeps its terminal
+  // meaning (Ctrl+C interrupts) and Option alone still types its characters
+  // (@ # [ ] { } on Spanish layouts); only these chords are translated.
+  var IS_MAC = (function () {
+    var nav = window.navigator || {};
+    var platform = (nav.userAgentData && nav.userAgentData.platform) || nav.platform || "";
+    return /Mac|iPhone|iPad|iPod/i.test(platform) || /Macintosh|iPhone|iPad|iPod/.test(nav.userAgent || "");
+  })();
+
+  // Cmd+<key> → bytes for the shell line editor (readline, zle, CLIs' inputs).
+  var MAC_CMD_SEQ = {
+    ArrowLeft: "\u0001", // inicio de línea (Ctrl+A)
+    ArrowRight: "\u0005", // fin de línea (Ctrl+E)
+    Backspace: "\u0015", // borrar hasta el inicio (Ctrl+U)
+    Delete: "\u000b", // borrar hasta el final (Ctrl+K)
+    z: "\u001f", // deshacer (Ctrl+_)
+    ".": "\u0003", // interrumpir (Ctrl+C), como Cmd+. en Terminal.app
+  };
+  // Option+<key> → the Meta sequences Terminal.app sends with "Option as Meta".
+  var MAC_OPT_SEQ = {
+    ArrowLeft: "\u001bb", // palabra anterior
+    ArrowRight: "\u001bf", // palabra siguiente
+    Backspace: "\u0017", // borrar palabra anterior (Ctrl+W)
+    Delete: "\u001bd", // borrar palabra siguiente (fn+Option+Borrar)
+    Enter: "\u001b\r", // salto de línea en Claude Code, Codex…
+  };
+
+  function macTerm() {
+    var pane = currentPane();
+    return (pane && pane.term) || xterm();
+  }
+
+  function macTarget(el) {
+    if (document.documentElement.classList.contains("rcf-open")) return false;
+    if (document.getElementById("rc-log-view") && !liveView) return false;
+    if (!isTypeTarget(el)) return false;
+    if (el && el.isContentEditable) return false;
+    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !isTermTextarea(el)) return false;
+    return true;
+  }
+
+  function macAction(ev) {
+    var k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+    var term = macTerm();
+    if (ev.metaKey && !ev.altKey) {
+      if (!ev.shiftKey && k === "c") {
+        return function () {
+          if (termSelection()) copySelection();
+        };
+      }
+      if (!ev.shiftKey && k === "a") {
+        return function () {
+          if (term && term.selectAll) term.selectAll();
+        };
+      }
+      if (!ev.shiftKey && k === "k") {
+        return function () {
+          if (term && term.clear) term.clear();
+          sendInput("\u000c");
+        };
+      }
+      if (k === "ArrowUp" || k === "Home") {
+        return function () {
+          if (term && term.scrollToTop) term.scrollToTop();
+        };
+      }
+      if (k === "ArrowDown" || k === "End") {
+        return function () {
+          if (term && term.scrollToBottom) term.scrollToBottom();
+        };
+      }
+      if (!ev.shiftKey && MAC_CMD_SEQ[k]) return MAC_CMD_SEQ[k];
+      return null;
+    }
+    if (ev.altKey && !ev.metaKey && MAC_OPT_SEQ[k]) return MAC_OPT_SEQ[k];
+    return null;
+  }
+
+  function macKey(ev) {
+    if (ev.defaultPrevented || ev.isComposing || ev.keyCode === 229) return;
+    if (ev.ctrlKey || !(ev.metaKey || ev.altKey)) return;
+    if (!macTarget(ev.target)) return;
+    // Cmd+V: the browser's own paste event (no permission prompt) reaches
+    // bootPaste; only the Ctrl+V blocker and xterm must not see the key.
+    if (ev.metaKey && !ev.altKey && !ev.shiftKey && (ev.key === "v" || ev.key === "V")) {
+      ev.stopImmediatePropagation();
+      return;
+    }
+    var act = macAction(ev);
+    if (!act) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    if (typeof act === "function") {
+      act();
+      return;
+    }
+    resetMirror();
+    sendInput(act);
+  }
+
+  function bootMacKeys() {
+    if (!IS_MAC) return;
+    document.documentElement.classList.add("rc-mac");
+    window.__rcIsMac = true;
+    window.addEventListener("keydown", macKey, true);
+  }
+
   function armPaneScroll(term) {
     if (!term || term.__rcScrollArmed || typeof term.onScroll !== "function") return;
     term.__rcScrollArmed = true;
@@ -5019,6 +5175,19 @@
     return !!ch && set.indexOf(ch) !== -1;
   }
 
+  // A wide char the app and xterm still count differently slides the rest of
+  // its row over (see widenEmoji): a pane's side may sit a column or two off
+  // on a few rows. The corners are found exactly; the sides allow that slip.
+  var FRAME_SLIP = 2;
+
+  function nearIn(set, row, x) {
+    if (!row) return false;
+    for (var d = 0; d <= FRAME_SLIP; d++) {
+      if (isIn(set, row[x - d]) || (d && isIn(set, row[x + d]))) return true;
+    }
+    return false;
+  }
+
   function findFrames(rows) {
     var out = [];
     rows.forEach(function (row, y) {
@@ -5033,14 +5202,20 @@
           if (isIn(FRAME_TL, row[k])) break;
         }
         var next = rows[y + 1];
-        if (x2 < 0 || !next || !isIn(FRAME_V, next[x]) || !isIn(FRAME_V, next[x2])) continue;
+        if (x2 < 0 || !next || !nearIn(FRAME_V, next, x) || !nearIn(FRAME_V, next, x2)) continue;
         var y2 = rows.length - 1;
         for (var j = y + 1; j < rows.length; j++) {
           if (isIn(FRAME_BL, rows[j][x])) {
             y2 = j;
             break;
           }
-          if (!isIn(FRAME_V, rows[j][x])) {
+          if (isIn(FRAME_V, rows[j][x])) continue;
+          // Off by a slip: the corner first, so a side never runs past it.
+          if (nearIn(FRAME_BL, rows[j], x)) {
+            y2 = j;
+            break;
+          }
+          if (!nearIn(FRAME_V, rows[j], x)) {
             y2 = j - 1;
             break;
           }
@@ -5236,6 +5411,8 @@
       placePaneMarks(null);
       return;
     }
+    // ttyd may switch its table after boot: keep the emoji widths on.
+    widenEmoji(term);
     var cells = screenCells(term);
     var boxes = paneFramesOnly(findFrames(cells), cells);
     var single = false;
@@ -6399,6 +6576,11 @@
     notes.forEach(function (note) {
       if (!note || typeof note.t !== "number" || note.t <= agentNoteSeen) return;
       agentNoteSeen = note.t;
+      // A new AI CLI learned on its own (adapters.py): everyone hears of it.
+      if (note.kind === "adapter") {
+        showToast("Aprendí a usar " + (note.name || note.cli) + " · deshacer: rc adapt --forget " + note.cli);
+        return;
+      }
       if (note.to !== me) return;
       showToast("El agente de " + (note.fromLabel || "otro usuario") + " le escribió a tu " + (note.cli || "agente") + " (" + note.target + ")");
     });
@@ -10297,6 +10479,7 @@
     bootProfiles();
     bootSessions();
     watchNativeClear();
+    bootMacKeys();
     bootPaste();
     bootCopyChip();
     bootOsc52();

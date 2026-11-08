@@ -198,4 +198,12 @@ for _rc_name in claude agent cursor-agent codex gemini agy aider opencode crush 
   (( $+commands[$_rc_name] )) || continue
   eval "function $_rc_name { _rc_cli $_rc_name \"\$@\" }"
 done
+# AI CLIs Remote Control learned on its own (adapters.py, `rc adapt`).
+if [[ -r "$_RC_BASE/cli-adapters/bins" ]]; then
+  for _rc_name in ${(f)"$(<"$_RC_BASE/cli-adapters/bins")"}; do
+    [[ "$_rc_name" =~ '^[a-z0-9][a-z0-9._-]*$' ]] || continue
+    (( $+functions[$_rc_name] || ! $+commands[$_rc_name] )) && continue
+    eval "function $_rc_name { _rc_cli $_rc_name \"\$@\" }"
+  done
+fi
 unset _rc_name
