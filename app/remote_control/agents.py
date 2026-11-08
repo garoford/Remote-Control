@@ -16,6 +16,7 @@ All users are the same Linux user, so this is courtesy, not a lock.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import pwd
@@ -24,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import adapters, profiles
@@ -686,8 +688,151 @@ def spawn(cli: str, cli_args: list[str], me: dict, cwd: str) -> tuple[dict | Non
     return agent, _wait_ready(agent)
 
 
+# --- spawning in herdr -------------------------------------------------------
+# An agent orchestrating others from a herdr pane keeps each herdr tab to at
+# most MAX_PANES panes (its own counted): the rest go to other tabs of the
+# same workspace, ones `rc spawn` opened for agents, or a new one. Tabs the
+# user made for other things are never filled.
+
+MAX_PANES = 5
+
+
+def _spawned_file() -> Path:
+    return primary_home() / ".local" / "share" / "remote-control" / "herdr-spawned.json"
+
+
+@contextmanager
+def _spawned_state():
+    """The panes and tabs `rc spawn` opened in herdr, read and written under
+    a lock: orchestrators spawning at once must not both take a tab's last slot."""
+    path = _spawned_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(".herdr-spawned.lock"), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+            state.setdefault("panes", {})
+            state.setdefault("tabs", {})
+            yield state
+            tmp = path.with_name(".herdr-spawned.tmp")
+            tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _herdr_panes() -> list[dict]:
+    return [p for p in ((_herdr("pane", "list") or {}).get("panes") or []) if isinstance(p, dict)]
+
+
+def _herdr_tabs() -> list[dict]:
+    return [t for t in ((_herdr("tab", "list") or {}).get("tabs") or []) if isinstance(t, dict)]
+
+
+def plan_slot(me_pane: str, tabs: list[dict], panes: list[dict], ours: set[str]) -> tuple[str, str]:
+    """Where the next agent goes: ("split", tab id) or ("new", workspace id).
+
+    The caller's tab while it has room, then a tab `rc spawn` opened for
+    agents (``ours``) in the same workspace with room, else a new tab."""
+    mine = next((p for p in panes if p.get("pane_id") == me_pane), None)
+    if not mine:
+        return "", ""
+    tab_id, ws = str(mine.get("tab_id") or ""), str(mine.get("workspace_id") or "")
+    count = {str(t.get("tab_id")): int(t.get("pane_count") or 0) for t in tabs}
+    if count.get(tab_id, MAX_PANES) < MAX_PANES:
+        return "split", tab_id
+    same = sorted(
+        (t for t in tabs if t.get("workspace_id") == ws and t.get("tab_id") in ours),
+        key=lambda t: int(t.get("number") or 0),
+    )
+    for t in same:
+        if int(t.get("pane_count") or 0) < MAX_PANES:
+            return "split", str(t["tab_id"])
+    return "new", ws
+
+
+def biggest_pane(layout: dict) -> tuple[str, str]:
+    """(pane id, direction) to split so the tab stays a readable grid: the
+    largest pane, side by side while it is wide (a cell is about twice as tall
+    as wide), else one under the other."""
+    best = None
+    for p in layout.get("panes") or []:
+        r = p.get("rect") or {}
+        w, h = int(r.get("width") or 0), int(r.get("height") or 0)
+        if best is None or w * h > best[1] * best[2]:
+            best = (str(p.get("pane_id")), w, h)
+    if not best:
+        return "", ""
+    return best[0], "right" if best[1] >= best[2] * 2.2 else "down"
+
+
+def _herdr_ready(pane: str, cli: str, limit: float = READY_S) -> str:
+    """Until the CLI in a new pane is up and quiet (as _wait_ready)."""
+    start = time.monotonic()
+    while time.monotonic() - start < limit:
+        time.sleep(1)
+        row = next((p for p in _herdr_panes() if p.get("pane_id") == pane), None)
+        if row is None:
+            return "error:pane_closed"
+        status = str(row.get("agent_status") or "")
+        if row.get("agent") and status in FINISHED:
+            return status
+        if not row.get("agent"):
+            # A CLI herdr does not detect (a learned one): up once it runs.
+            info = (_herdr("pane", "process-info", "--pane", pane) or {}).get("process_info") or {}
+            shell = info.get("shell_pid")
+            if isinstance(shell, int) and find_cli(shell)[0] and time.monotonic() - start > 4:
+                return "idle"
+    return "error:timeout"
+
+
+def spawn_herdr(cli: str, cli_args: list[str], me: dict, cwd: str) -> tuple[dict | None, str]:
+    """Open a herdr pane for ``cli`` as the caller's user, keeping MAX_PANES
+    per tab. Returns (agent, status) or (None, error)."""
+    env = f"RC_PROFILE={me['profile']}"
+    with _spawned_state() as state:
+        ours = set(state["tabs"])
+        mode, where = plan_slot(me["pane"], _herdr_tabs(), _herdr_panes(), ours)
+        if not mode:
+            return None, "error:pane_not_found"
+        if mode == "split":
+            layout = (_herdr("pane", "layout", "--pane", next(
+                (p["pane_id"] for p in _herdr_panes() if p.get("tab_id") == where), me["pane"]
+            )) or {}).get("layout") or {}
+            target, direction = biggest_pane(layout)
+            if not target:
+                return None, "error:no_layout"
+            made = _herdr("pane", "split", target, "--direction", direction, "--cwd", cwd, "--env", env, "--no-focus") or {}
+            pane = str((made.get("pane") or {}).get("pane_id") or "")
+            tab = where
+        else:
+            n = 1 + sum(1 for t in _herdr_tabs() if t.get("workspace_id") == where and t.get("tab_id") in ours)
+            made = _herdr("tab", "create", "--workspace", where, "--cwd", cwd, "--label", f"agentes {n}",
+                          "--env", env, "--no-focus") or {}
+            pane = str((made.get("root_pane") or {}).get("pane_id") or "")
+            tab = str((made.get("tab") or {}).get("tab_id") or "")
+            if tab:
+                state["tabs"][tab] = me["profile"] or "-"
+        if not pane:
+            return None, "error:pane_not_started"
+        state["panes"][pane] = {"by": me["profile"] or "-", "tab": tab, "from": me["pane"], "t": int(time.time())}
+    _herdr("pane", "run", pane, shlex.join([cli, *cli_args]))
+    agent = {
+        "id": pane, "where": "herdr", "cli": cli, "name": "", "owner": me["profile"],
+        "owner_label": label_of(me["profile"]), "cwd": cwd, "status": "", "you": False, "pid": 0,
+    }
+    return agent, _herdr_ready(pane, cli)
+
+
 def close_spawned(agent_id: str, me: dict) -> str:
-    """Close a tab `rc spawn` opened for this user. "" or why not."""
+    """Close a tab (or herdr pane) `rc spawn` opened for this user. "" or why not."""
+    if PANE_ID_RE.match(agent_id or ""):
+        return _close_herdr(agent_id, me)
     tab = _tab_of(agent_id)
     if not tab or agent_id == me["pane"]:
         return "only tabs opened with `rc spawn` can be closed"
@@ -699,6 +844,28 @@ def close_spawned(agent_id: str, me: dict) -> str:
     if not close_session(tab):
         return "tmux did not close it"
     change_workspaces({"op": "forget", "tab": tab})
+    return ""
+
+
+PANE_ID_RE = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
+
+
+def _close_herdr(pane: str, me: dict) -> str:
+    if pane == me["pane"]:
+        return "that is you"
+    with _spawned_state() as state:
+        row = state["panes"].get(pane)
+        if not isinstance(row, dict):
+            return "it was not opened with `rc spawn`; ask your user to close it"
+        if row.get("by") != (me["profile"] or "-"):
+            return "another user opened it"
+        if _herdr("pane", "close", pane) is None and any(p.get("pane_id") == pane for p in _herdr_panes()):
+            return "herdr did not close it"
+        state["panes"].pop(pane, None)
+        # A tab of agents that is empty now is gone in herdr too.
+        live = {str(t.get("tab_id")) for t in _herdr_tabs()}
+        for tab in [t for t in state["tabs"] if t not in live]:
+            state["tabs"].pop(tab, None)
     return ""
 
 
@@ -860,16 +1027,15 @@ def _send(agent: dict, text: str, me: dict, wait: int | None, lines: int) -> int
     return report(agent, result["status"], lines, wait)
 
 
+def _tab_label(pane: str) -> str:
+    row = next((p for p in _herdr_panes() if p.get("pane_id") == pane), None)
+    tab = next((t for t in _herdr_tabs() if row and t.get("tab_id") == row.get("tab_id")), None)
+    return f"{tab.get('label') or tab.get('number')} ({tab['tab_id']}, {tab.get('pane_count')}/{MAX_PANES} panes)" if tab else "?"
+
+
 def _spawn_cmd(args: argparse.Namespace, me: dict) -> int:
-    if os.environ.get("HERDR_PANE_ID"):
-        print(
-            "rc: you are in a herdr pane: open another pane instead (`herdr pane split --current "
-            "--direction right --cwd \"$PWD\" --no-focus`, then `herdr agent start <name> --kind <kind> "
-            "--pane <new-pane-id>`) and use rc prompt/wait with its id.",
-            file=sys.stderr,
-        )
-        return 1
-    if not _tab_of(me["pane"]):
+    in_herdr = bool(PANE_ID_RE.match(me["pane"] or ""))
+    if not in_herdr and not _tab_of(me["pane"]):
         print("rc: spawn works from a Remote Control tab (yours is not one).", file=sys.stderr)
         return 1
     cwd = os.path.abspath(args.cwd)
@@ -877,11 +1043,15 @@ def _spawn_cmd(args: argparse.Namespace, me: dict) -> int:
         print(f"rc: no folder {cwd}", file=sys.stderr)
         return 1
     lines = max(1, min(args.lines, 2000))
-    agent, status = spawn(args.cli, args.cli_args, me, cwd)
+    if in_herdr:
+        agent, status = spawn_herdr(args.cli, args.cli_args, me, cwd)
+    else:
+        agent, status = spawn(args.cli, args.cli_args, me, cwd)
     if agent is None:
-        print(f"rc: could not open a tab ({status})", file=sys.stderr)
+        print(f"rc: could not open a {'pane' if in_herdr else 'tab'} ({status})", file=sys.stderr)
         return 1
-    print(f"Opened {agent['id']} ({args.cli}) next to your tab. Close it when done: rc close {agent['id']}")
+    where = f"in herdr tab {_tab_label(agent['id'])}" if in_herdr else "next to your tab"
+    print(f"Opened {agent['id']} ({args.cli}) {where}. Close it when done: rc close {agent['id']}")
     if status == "blocked":
         print("It asks something before it starts (trusting the folder, a login…); nothing was sent. Its screen:\n")
         sys.stdout.write(read_screen(agent, lines))

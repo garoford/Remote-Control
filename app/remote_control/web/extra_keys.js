@@ -22,6 +22,9 @@
   var keepFocusUntil = 0;
   var writing = false;
   var writeBusy = false;
+  var writeBusyAt = 0;
+  var COPY_CANCEL_MS = 1500;
+  var WRITE_STUCK_MS = 4000;
   var writeQ = "";
   var lastFit = "";
   var lastSentAt = 0;
@@ -1417,7 +1420,7 @@
       // Keys for a pane or tab another profile locked never leave this page.
       var lockedSend = ws.send.bind(ws);
       ws.send = function (data) {
-        if (inputBlocked(data) || routeHerdrInput(data)) return;
+        if (inputBlocked(data) || routeHerdrInput(data, lockedSend)) return;
         return lockedSend(data);
       };
       if (pane) {
@@ -2120,13 +2123,24 @@
     tmuxScroll.pending = 0;
     var tab = tabId();
     if (!tab) return Promise.resolve();
-    return fetch("/rc-copy-cancel?tab=" + encodeURIComponent(tab), {
+    // Typing waits for this: a request that hangs (a stalled tunnel) must not
+    // hold every key after it until F5, so it gives up after COPY_CANCEL_MS.
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var asked = fetch("/rc-copy-cancel?tab=" + encodeURIComponent(tab), {
       method: "POST",
       cache: "no-store",
+      signal: ctl ? ctl.signal : undefined,
     }).then(
       function () {},
       function () {}
     );
+    var late = new Promise(function (resolve) {
+      setTimeout(function () {
+        if (ctl) ctl.abort();
+        resolve();
+      }, COPY_CANCEL_MS);
+    });
+    return Promise.race([asked, late]);
   }
 
   function armKeepFocus() {
@@ -3435,8 +3449,11 @@
   }
 
   function pumpWrite() {
+    // A send that never finished (it should not happen any more) gives way.
+    if (writeBusy && Date.now() - writeBusyAt > WRITE_STUCK_MS) writeBusy = false;
     if (writeBusy || !writeQ) return;
     writeBusy = true;
+    writeBusyAt = Date.now();
     var pending = writeQ;
     writeQ = "";
     // "Ver historial" live: the keys go to its terminal; the one behind stays as it is.
@@ -5714,7 +5731,18 @@
   // keys (prefix ctrl+b and the key after it) still go through herdr.
   var HERDR_PREFIX = "\x02";
   var PREFIX_PASS_MS = 1500;
-  var herdrIn = { ws: null, pane: "", passUntil: 0, chrome: false };
+  // Every frame on that socket is acknowledged. A socket that looks open but
+  // answers nothing (a tunnel hiccup or a proxy restart the browser never
+  // heard of) used to swallow every key and paste until F5: now what it did
+  // not acknowledge in HERDR_ACK_MS goes through herdr instead, the socket is
+  // replaced, and a heartbeat finds a dead one before anyone types.
+  var HERDR_ACK_MS = 2500;
+  var HERDR_PING_MS = 15000;
+  var HERDR_OFF_MS = 8000;
+  var herdrIn = {
+    ws: null, pane: "", passUntil: 0, chrome: false,
+    seq: 0, pending: [], ackTimer: 0, offUntil: 0, pongs: 0, acks: 0, downs: 0, lastDown: "",
+  };
 
   function myHerdrMark() {
     var marks = paneMarks.marks;
@@ -5758,17 +5786,110 @@
         reply = JSON.parse(ev.data);
       } catch (_) {}
       if (!reply) return;
+      if (reply.pong) herdrIn.pongs++;
+      settleHerdr(reply);
       if (reply.blocked) showToast("Panel bloqueado por " + reply.blocked);
       else if (reply.ok === false) showToast("No se pudo escribir en ese panel");
     });
     ws.addEventListener("close", function () {
-      if (herdrIn.ws === ws) herdrIn.ws = null;
+      if (herdrIn.ws !== ws) return;
+      herdrIn.ws = null;
+      // Closed with keys in flight: they go through herdr, not lost.
+      if (herdrIn.pending.length) herdrDown("closed");
     });
     return ws;
   }
 
+  // An answer for one frame (by id; an older server answers without one:
+  // then the oldest frame waiting).
+  function settleHerdr(reply) {
+    var list = herdrIn.pending;
+    var at = -1;
+    if (typeof reply.id === "number") {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === reply.id) {
+          at = i;
+          break;
+        }
+      }
+    } else if (reply.pane) {
+      for (var j = 0; j < list.length; j++) {
+        if (list[j].data) {
+          at = j;
+          break;
+        }
+      }
+    }
+    if (at < 0) return;
+    if (list[at].data) herdrIn.acks++;
+    list.splice(at, 1);
+  }
+
+  function armHerdrAck() {
+    if (herdrIn.ackTimer) return;
+    herdrIn.ackTimer = setTimeout(function () {
+      herdrIn.ackTimer = 0;
+      var list = herdrIn.pending;
+      if (!list.length) return;
+      // A ping counts only once this server has answered one (an older
+      // server ignores them).
+      var stale = list.some(function (item) {
+        return Date.now() - item.at > HERDR_ACK_MS && (item.data || herdrIn.pongs);
+      });
+      if (stale) herdrDown("no-ack");
+      else {
+        herdrIn.pending = list.filter(function (item) {
+          return item.data || Date.now() - item.at < HERDR_ACK_MS * 2;
+        });
+        if (herdrIn.pending.length) armHerdrAck();
+      }
+    }, 500);
+  }
+
+  // The socket stopped answering: what it was given goes through herdr
+  // (to the pane herdr has focused, the same one almost always), and the
+  // keys keep going that way for a moment while a new socket opens.
+  function herdrDown(why) {
+    var ws = herdrIn.ws;
+    var lost = herdrIn.pending;
+    herdrIn.ws = null;
+    herdrIn.pending = [];
+    herdrIn.offUntil = Date.now() + HERDR_OFF_MS;
+    herdrIn.downs++;
+    herdrIn.lastDown = why + " " + new Date().toLocaleTimeString();
+    try {
+      if (ws) ws.close();
+    } catch (_) {}
+    var resent = 0;
+    lost.forEach(function (item) {
+      if (!item.data || !item.fallback) return;
+      try {
+        item.fallback(item.data);
+        resent++;
+      } catch (_) {}
+    });
+    if (resent || why !== "ping") showToast("La escritura se había trabado: la reconecté");
+  }
+
+  function herdrHeartbeat() {
+    setInterval(function () {
+      var ws = herdrIn.ws;
+      if (document.hidden || !ws || ws.readyState !== NativeWS.OPEN || !onHerdrTab()) return;
+      var id = ++herdrIn.seq;
+      try {
+        ws.send(JSON.stringify({ ping: 1, id: id }));
+      } catch (_) {
+        herdrDown("ping");
+        return;
+      }
+      herdrIn.pending.push({ id: id, data: null, at: Date.now() });
+      armHerdrAck();
+    }, HERDR_PING_MS);
+  }
+
   // True when the frame went to this device's pane instead of through herdr.
-  function routeHerdrInput(data) {
+  // ``fallback`` sends it through herdr if this socket never acknowledges it.
+  function routeHerdrInput(data, fallback) {
     if (!onHerdrTab()) return false;
     var text = inputText(data);
     if (text === null) return false;
@@ -5782,13 +5903,16 @@
     if (now < herdrIn.passUntil || herdrIn.chrome || !isTyping(text)) return false;
     var mark = myHerdrMark();
     var ws = herdrInputSocket();
-    // Not connected yet (or an older server): through herdr, as before.
-    if (!mark || !ws || ws.readyState !== NativeWS.OPEN) return false;
+    // Not connected yet, or it just failed: through herdr, as before.
+    if (now < herdrIn.offUntil || !mark || !ws || ws.readyState !== NativeWS.OPEN) return false;
+    var id = ++herdrIn.seq;
     try {
-      ws.send(JSON.stringify({ pane: mark.pane, text: text }));
+      ws.send(JSON.stringify({ pane: mark.pane, text: text, ack: true, id: id }));
     } catch (_) {
       return false;
     }
+    herdrIn.pending.push({ id: id, data: data, fallback: fallback, at: now });
+    armHerdrAck();
     return true;
   }
 
@@ -5814,7 +5938,37 @@
 
   function bootHerdrInput() {
     document.addEventListener("pointerdown", noteHerdrClick, true);
+    herdrHeartbeat();
   }
+
+  // When typing seems to go nowhere: `__rcDiag()` in the browser console
+  // shows every road a key can take and where it may be stuck.
+  var WS_STATES = ["conectando", "abierto", "cerrando", "cerrado"];
+
+  function wsState(ws) {
+    return ws ? WS_STATES[ws.readyState] || String(ws.readyState) : "ninguno";
+  }
+
+  window.__rcDiag = function () {
+    var now = Date.now();
+    var oldest = herdrIn.pending.length ? now - herdrIn.pending[0].at : 0;
+    return {
+      pestañaHerdr: onHerdrTab(),
+      socketTerminal: wsState(window.__rcTermSocket),
+      socketPrincipal: wsState(window.__rcPrimarySocket),
+      socketHerdr: wsState(herdrIn.ws),
+      herdrPanelPropio: herdrIn.pane || "(el que herdr tenga enfocado)",
+      herdrSinConfirmar: herdrIn.pending.length + (oldest ? " (el más viejo hace " + oldest + " ms)" : ""),
+      herdrConfirmados: herdrIn.acks,
+      herdrPongs: herdrIn.pongs,
+      herdrCaidas: herdrIn.downs + (herdrIn.lastDown ? " (última: " + herdrIn.lastDown + ")" : ""),
+      herdrDesviadoPor: herdrIn.offUntil > now ? herdrIn.offUntil - now + " ms" : "no",
+      marcasSeguras: !!(paneMarks.sure && paneMarks.answered === paneMarks.view),
+      bloqueo: lockReason() || "no",
+      colaTactil: writeQ.length + " caracteres" + (writeBusy ? ", ocupada hace " + (now - writeBusyAt) + " ms" : ""),
+      historialEnVivo: !!liveView,
+    };
+  };
 
   // "Ver historial": everything the pane or tab still holds, in a read-only
   // terminal at its own width, scaled to this screen.

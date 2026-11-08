@@ -1192,6 +1192,12 @@ class Sidecar:
                     continue
                 if not isinstance(msg, dict):
                     continue
+                ident = msg.get("id") if isinstance(msg.get("id"), int) else None
+                # The page's heartbeat: a socket that stops answering is
+                # replaced there, instead of swallowing every key (extra_keys.js).
+                if "ping" in msg:
+                    conn.sendall(_ws_frame(json.dumps({"pong": True, "id": ident}).encode(), 0x1))
+                    continue
                 pane = str(msg.get("pane") or "")
                 text = msg.get("text")
                 if not isinstance(text, str):
@@ -1202,6 +1208,8 @@ class Sidecar:
                     reply = {"pane": pane, "blocked": herdr._label(holder)}
                 else:
                     reply = {"pane": pane, "ok": herdr.send_input(pane, text)}
+                if ident is not None:
+                    reply["id"] = ident
                 if msg.get("ack") or not reply.get("ok"):
                     conn.sendall(_ws_frame(json.dumps(reply).encode(), 0x1))
         except OSError:

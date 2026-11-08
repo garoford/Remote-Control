@@ -65,10 +65,12 @@ class SpawnCommandTests(unittest.TestCase):
             code = agents.main(argv)
         return code, err.getvalue(), spawn
 
-    def test_refused_in_herdr(self) -> None:
-        code, err, spawn = self.run_rc(["spawn", "claude"], {"HERDR_PANE_ID": "w1:p1", "RC_PROFILE": ""})
+    def test_herdr_opens_a_pane_not_a_tab(self) -> None:
+        with mock.patch.object(agents, "spawn_herdr", return_value=(None, "error:pane_not_found")) as herdr:
+            code, err, spawn = self.run_rc(["spawn", "claude"], {"HERDR_PANE_ID": "w1:p1", "RC_PROFILE": ""})
         self.assertEqual(code, 1)
-        self.assertIn("herdr pane split", err)
+        self.assertIn("could not open a pane", err)
+        herdr.assert_called_once()
         spawn.assert_not_called()
 
     def test_refused_outside_a_tab(self) -> None:
